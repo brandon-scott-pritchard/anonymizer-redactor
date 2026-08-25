@@ -29,7 +29,32 @@ from . import __version__, caption, categories, ner, pdf_processor, pipeline
 from .engine import Settings
 from .mapping import MappingStore
 
-CHECKED, UNCHECKED = "☑", "☐"
+def _checkbox_images(size: int = 22) -> "tuple[tk.PhotoImage, tk.PhotoImage]":
+    """(checked, unchecked) images for the Treeview rows.
+
+    Drawn rather than glyphs: text checkboxes render at the row font size,
+    which is far too small a click target, and their look drifts between
+    macOS and Windows.
+    """
+    border, fill, mark, blank = "#5a6a78", "#4a7fb5", "#ffffff", "#ffffff"
+    last = size - 1
+
+    def _box(filled: bool) -> tk.PhotoImage:
+        img = tk.PhotoImage(width=size, height=size)
+        img.put(blank, to=(2, 2, size - 2, size - 2))
+        for i in range(size):
+            for t in (0, 1):
+                for x, y in ((i, t), (i, last - t), (t, i), (last - t, i)):
+                    img.put(border, (x, y))
+        if filled:
+            img.put(fill, to=(2, 2, size - 2, size - 2))
+            for step in range(4):        # down stroke of the check mark
+                img.put(mark, to=(5 + step, 11 + step, 6 + step, 14 + step))
+            for step in range(9):        # up stroke
+                img.put(mark, to=(9 + step, 14 - step, 10 + step, 17 - step))
+        return img
+
+    return _box(True), _box(False)
 
 ANONYMIZE_NOTE = (
     "ANONYMIZE replaces each person with a realistic, invented name - "
@@ -162,6 +187,9 @@ class App(Tk):
         self._queue: "queue.Queue[tuple]" = queue.Queue()
         self._busy = False
         self._dialog: ProgressDialog | None = None
+        # checked state lives here, not in the widgets - the images are paint
+        self._suggest_checked: set[str] = set()
+        self._img_checked, self._img_unchecked = _checkbox_images()
 
         self._init_theme()
         self._build()
@@ -185,6 +213,8 @@ class App(Tk):
                         background="#4a7fb5", foreground="#ffffff")
         style.map("Flash.TButton", background=[("!disabled", "#4a7fb5")])
         style.configure("Primary.TButton", padding=(12, 7), font=("", 11, "bold"))
+        style.configure("Big.Treeview", rowheight=32, font=("", 13))
+        style.configure("Big.Treeview.Heading", font=("", 12, "bold"))
 
     def _button(self, parent, **kwargs) -> ttk.Button:
         """A button that visibly reacts to being clicked."""
@@ -391,9 +421,9 @@ class App(Tk):
 
         columns = ("name", "role", "confidence", "source")
         self.suggest_tree = ttk.Treeview(suggest_frame, columns=columns, show="tree headings",
-                                         selectmode="none", height=16)
+                                         selectmode="none", height=16, style="Big.Treeview")
         self.suggest_tree.heading("#0", text="")
-        self.suggest_tree.column("#0", width=34, stretch=False, anchor="center")
+        self.suggest_tree.column("#0", width=48, stretch=False, anchor="center")
         for key, label, width in (("name", "Name", 190), ("role", "Found as", 150),
                                   ("confidence", "Confidence", 82), ("source", "Where", 150)):
             self.suggest_tree.heading(key, text=label)
@@ -402,7 +432,8 @@ class App(Tk):
         sscroll = ttk.Scrollbar(suggest_frame, command=self.suggest_tree.yview)
         self.suggest_tree.configure(yscrollcommand=sscroll.set)
         sscroll.grid(row=1, column=1, sticky="ns")
-        self.suggest_tree.bind("<Button-1>", self._toggle_suggestion)
+        self.suggest_tree.bind("<Button-1>", self._suggest_click)
+        self.suggest_tree.bind("<Double-1>", self._suggest_double)
 
         buttons = ttk.Frame(frame)
         buttons.grid(row=3, column=0, columnspan=2, sticky="ew")
@@ -423,14 +454,16 @@ class App(Tk):
         frame.rowconfigure(1, weight=1)
 
         tk.Label(frame, justify="left", anchor="w", wraplength=1040,
-                 text=("Everything below will change. Untick anything that should stay, and "
-                       "double-click a replacement to edit it. Nothing has been written yet."),
+                 text=("Everything below will change. Untick anything that should stay. "
+                       "Double-click the Found or Replaced-with columns to edit an item. "
+                       "Nothing has been written yet."),
                  ).grid(row=0, column=0, sticky="ew", pady=(0, 8))
 
         columns = ("type", "original", "replacement", "hits", "source")
-        self.review_tree = ttk.Treeview(frame, columns=columns, show="tree headings", selectmode="browse")
+        self.review_tree = ttk.Treeview(frame, columns=columns, show="tree headings",
+                                        selectmode="extended", style="Big.Treeview")
         self.review_tree.heading("#0", text="")
-        self.review_tree.column("#0", width=34, stretch=False, anchor="center")
+        self.review_tree.column("#0", width=48, stretch=False, anchor="center")
         for key, label, width, anchor in (
             ("type", "Type", 210, "w"), ("original", "Found", 330, "w"),
             ("replacement", "Replaced with", 260, "w"), ("hits", "Times", 60, "e"),
@@ -442,8 +475,9 @@ class App(Tk):
         rscroll = ttk.Scrollbar(frame, command=self.review_tree.yview)
         self.review_tree.configure(yscrollcommand=rscroll.set)
         rscroll.grid(row=1, column=1, sticky="ns")
-        self.review_tree.bind("<Button-1>", self._toggle_review)
-        self.review_tree.bind("<Double-1>", self._edit_replacement)
+        self.review_tree.bind("<Button-1>", self._review_click)
+        self.review_tree.bind("<Double-1>", self._review_double)
+        self.review_tree.bind("<space>", self._review_space)
 
         self.review_warning = tk.Label(frame, justify="left", anchor="w", wraplength=1040, fg="#8a4b00")
         self.review_warning.grid(row=2, column=0, sticky="ew", pady=(6, 4))
@@ -590,35 +624,61 @@ class App(Tk):
         else:
             self.status.set(f"{len(self.suggestions)} further name(s) proposed. Tick the ones that matter.")
 
+    def _paint_check(self, tree: ttk.Treeview, iid: str, checked: bool) -> None:
+        tree.item(iid, image=self._img_checked if checked else self._img_unchecked)
+
     def _render_suggestions(self):
         self.suggest_tree.delete(*self.suggest_tree.get_children())
+        self._suggest_checked.clear()
         for item in self.caption_names:
-            checked = CHECKED if item.confidence == "high" else UNCHECKED
+            iid = f"cap::{item.key}"
+            if item.confidence == "high":
+                self._suggest_checked.add(iid)
             self.suggest_tree.insert(
-                "", "end", iid=f"cap::{item.key}", text=checked,
+                "", "end", iid=iid, text="",
+                image=self._img_checked if iid in self._suggest_checked else self._img_unchecked,
                 values=(item.name, item.role, item.confidence, item.source),
                 tags=("minor",) if item.category == "minor" else (),
             )
         for item in self.suggestions:
             label = categories.label_for(item.category)
             self.suggest_tree.insert(
-                "", "end", iid=f"ner::{item.key}", text=UNCHECKED,
+                "", "end", iid=f"ner::{item.key}", text="", image=self._img_unchecked,
                 values=(item.text, label, f"x{item.count}", "; ".join(sorted(item.documents))[:40]),
             )
 
-    def _toggle_suggestion(self, event):
-        if self.suggest_tree.identify_region(event.x, event.y) not in {"tree", "cell"}:
+    def _suggest_toggle(self, iid: str) -> None:
+        if iid in self._suggest_checked:
+            self._suggest_checked.discard(iid)
+        else:
+            self._suggest_checked.add(iid)
+        self._paint_check(self.suggest_tree, iid, iid in self._suggest_checked)
+
+    def _suggest_click(self, event):
+        if self.suggest_tree.identify_column(event.x) != "#0":
             return
-        item = self.suggest_tree.identify_row(event.y)
-        if not item:
+        iid = self.suggest_tree.identify_row(event.y)
+        if not iid:
             return
-        current = self.suggest_tree.item(item, "text")
-        self.suggest_tree.item(item, text=UNCHECKED if current == CHECKED else CHECKED)
+        self._suggest_toggle(iid)
+        return "break"
+
+    def _suggest_double(self, event):
+        iid = self.suggest_tree.identify_row(event.y)
+        if not iid:
+            return
+        column = self.suggest_tree.identify_column(event.x)
+        if column in ("#0", "#1"):
+            self._suggest_toggle(iid)
+        return "break"
 
     def _set_all_suggestions(self, checked: bool):
-        mark = CHECKED if checked else UNCHECKED
-        for item in self.suggest_tree.get_children():
-            self.suggest_tree.item(item, text=mark)
+        for iid in self.suggest_tree.get_children():
+            if checked:
+                self._suggest_checked.add(iid)
+            else:
+                self._suggest_checked.discard(iid)
+            self._paint_check(self.suggest_tree, iid, checked)
 
     def add_single_name(self):
         name = self.new_name.get().strip()
@@ -631,7 +691,7 @@ class App(Tk):
     def add_checked_suggestions(self):
         added = 0
         for item in self.suggest_tree.get_children():
-            if self.suggest_tree.item(item, "text") != CHECKED:
+            if item not in self._suggest_checked:
                 continue
             name = self.suggest_tree.item(item, "values")[0]
             minor = "minor" in self.suggest_tree.item(item, "tags")
@@ -706,7 +766,8 @@ class App(Tk):
                              key=lambda e: (0 if e.is_person else 1, e.category,
                                             -e.occurrences, e.canonical.casefold())):
             self.review_tree.insert(
-                "", "end", iid=entity.key, text=CHECKED if entity.enabled else UNCHECKED,
+                "", "end", iid=entity.key, text="",
+                image=self._img_checked if entity.enabled else self._img_unchecked,
                 values=(entity.label, entity.canonical, entity.replacement,
                         entity.occurrences, entity.source),
             )
@@ -723,45 +784,67 @@ class App(Tk):
         self.review_warning.configure(text="\n".join(notes))
         self.status.set(f"{len(store.entities)} item(s) to review.")
 
-    def _toggle_review(self, event):
-        if self.review_tree.identify_region(event.x, event.y) != "tree":
-            return
-        item = self.review_tree.identify_row(event.y)
-        if not item:
-            return
-        entity = self.store.entities.get(item)
+    def _review_toggle(self, iid: str) -> None:
+        entity = self.store.entities.get(iid)
         if entity is None:
             return
         entity.enabled = not entity.enabled
-        self.review_tree.item(item, text=CHECKED if entity.enabled else UNCHECKED)
+        self._paint_check(self.review_tree, iid, entity.enabled)
 
-    def _edit_replacement(self, event):
-        item = self.review_tree.identify_row(event.y)
-        if not item or self.review_tree.identify_column(event.x) != "#3":
+    def _review_click(self, event):
+        if self.review_tree.identify_column(event.x) != "#0":
             return
-        entity = self.store.entities.get(item)
+        iid = self.review_tree.identify_row(event.y)
+        if not iid:
+            return
+        self._review_toggle(iid)
+        return "break"
+
+    def _review_double(self, event):
+        iid = self.review_tree.identify_row(event.y)
+        if not iid:
+            return
+        column = self.review_tree.identify_column(event.x)
+        if column in ("#0", "#1"):
+            # the two single-click toggles on #0 have already fired and
+            # cancelled out; this third one is the single net toggle
+            self._review_toggle(iid)
+        elif column in ("#2", "#3"):
+            self._edit_review_row(iid)
+        return "break"       # Times and How-found stay inert
+
+    def _review_space(self, event):
+        for iid in self.review_tree.selection():
+            self._review_toggle(iid)
+        return "break"
+
+    def _edit_review_row(self, iid: str) -> None:
+        entity = self.store.entities.get(iid)
         if entity is None:
             return
         value = simpledialog.askstring(
             "Replacement", f"Replace “{entity.canonical}” with:",
             initialvalue=entity.replacement, parent=self)
-        if not value:
+        if value is None:                      # Cancel - not the same as empty
+            return
+        if not value.strip():
+            self.status.set("The replacement cannot be empty - nothing was changed.")
             return
         entity.replacement = value
         if entity.is_person and entity.surrogate is not None:
             from . import names as _names
             entity.surrogate = _names.parse(value)
-        values = list(self.review_tree.item(item, "values"))
+        values = list(self.review_tree.item(iid, "values"))
         values[2] = value
-        self.review_tree.item(item, values=values)
+        self.review_tree.item(iid, values=values)
 
     def _set_all_review(self, enabled: bool):
-        for item in self.review_tree.get_children():
-            entity = self.store.entities.get(item)
+        for iid in self.review_tree.get_children():
+            entity = self.store.entities.get(iid)
             if entity is None:
                 continue
             entity.enabled = enabled
-            self.review_tree.item(item, text=CHECKED if enabled else UNCHECKED)
+            self._paint_check(self.review_tree, iid, enabled)
 
     # --------------------------------------------------------------- run --
     def go_to_run(self):

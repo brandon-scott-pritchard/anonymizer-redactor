@@ -115,3 +115,90 @@ def test_the_modal_cannot_be_dismissed_by_the_user(app):
     dialog = ProgressDialog(app, "Processing")
     assert dialog.protocol("WM_DELETE_WINDOW"), "closing the window is not intercepted"
     dialog.close()
+
+
+# ------------------------------------------------------ checkboxes & clicks --
+
+from types import SimpleNamespace
+
+
+def _review_row(app):
+    """Populate the review tree with one person and return (store, iid)."""
+    from redactor.mapping import MappingStore
+
+    store = MappingStore()
+    store.add_person("John Michael Smith")
+    app._review_ready(store)
+    app.notebook.select(app.tab_review)
+    app.update_idletasks()
+    app.update()
+    return store, app.review_tree.get_children()[0]
+
+
+def _cell_event(tree, iid, column):
+    x, y, w, h = tree.bbox(iid, column)
+    return SimpleNamespace(x=x + w // 2, y=y + h // 2)
+
+
+def test_the_rows_are_tall_enough_to_click(app):
+    style = ttk.Style(app)
+    assert int(style.lookup("Big.Treeview", "rowheight")) >= 28
+    assert str(app.review_tree.cget("style")) == "Big.Treeview"
+    assert str(app.suggest_tree.cget("style")) == "Big.Treeview"
+
+
+def test_double_click_on_the_type_column_toggles(app):
+    store, iid = _review_row(app)
+    entity = store.entities[iid]
+    assert entity.enabled
+    app._review_double(_cell_event(app.review_tree, iid, "#1"))
+    assert not entity.enabled
+    app._review_double(_cell_event(app.review_tree, iid, "#1"))
+    assert entity.enabled
+
+
+def test_double_click_on_the_times_column_is_inert(app, monkeypatch):
+    from tkinter import simpledialog
+
+    store, iid = _review_row(app)
+    entity = store.entities[iid]
+    opened = []
+    monkeypatch.setattr(simpledialog, "askstring",
+                        lambda *a, **k: opened.append(1) or None)
+    before = entity.enabled
+    app._review_double(_cell_event(app.review_tree, iid, "#4"))
+    assert entity.enabled == before
+    assert not opened, "the editor must not open from the Times column"
+
+
+def test_double_click_on_found_opens_the_editor_and_cancel_changes_nothing(app, monkeypatch):
+    from redactor.gui import simpledialog
+
+    store, iid = _review_row(app)
+    entity = store.entities[iid]
+    original = entity.replacement
+    monkeypatch.setattr(simpledialog, "askstring", lambda *a, **k: None)
+    app._review_double(_cell_event(app.review_tree, iid, "#2"))
+    assert entity.replacement == original, "Cancel must not clear the replacement"
+
+    monkeypatch.setattr(simpledialog, "askstring", lambda *a, **k: "Tamsin Q. Middleton")
+    app._review_double(_cell_event(app.review_tree, iid, "#2"))
+    assert entity.replacement == "Tamsin Q. Middleton"
+
+
+def test_a_click_on_a_suggestion_name_cell_does_not_toggle(app):
+    from redactor.caption import CaptionName
+
+    app.caption_names = [CaptionName("Jane Ellen Smith", "Petitioner", "doc", "medium")]
+    app._render_suggestions()
+    app.notebook.select(app.tab_names)
+    app.update_idletasks()
+    app.update()
+    iid = app.suggest_tree.get_children()[0]
+    assert iid not in app._suggest_checked
+
+    app._suggest_click(_cell_event(app.suggest_tree, iid, "#1"))
+    assert iid not in app._suggest_checked, "a name-cell click must not toggle"
+
+    app._suggest_click(_cell_event(app.suggest_tree, iid, "#0"))
+    assert iid in app._suggest_checked
