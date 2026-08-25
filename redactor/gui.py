@@ -574,9 +574,11 @@ class App(Tk):
         files = list(self.files)
         settings = self.settings()
         store = self._store_with_names()
+        captions = list(self.caption_names)
         self._work(
             "Scanning for additional names",
-            lambda report: pipeline.collect_suggestions(files, store, settings, report),
+            lambda report: pipeline.collect_suggestions(files, store, settings, report,
+                                                        caption_names=captions),
             self._suggestions_ready,
         )
 

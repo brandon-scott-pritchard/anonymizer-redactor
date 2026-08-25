@@ -2,7 +2,7 @@
 
 import pytest
 
-from redactor import caption, names, patterns, surrogates
+from redactor import caption, names, ner, patterns, surrogates
 from redactor.mapping import MappingStore, read_encrypted_key, write_encrypted_key
 
 
@@ -165,3 +165,36 @@ def test_the_key_file_never_contains_plaintext(tmp_path):
     store.add_value("ssn", "528-41-9963")
     path = write_encrypted_key(store, tmp_path / "key.json", "pw")
     assert "528-41-9963" not in path.read_text()
+
+
+# ---------------------------------------------------------- NER refinement --
+
+@pytest.mark.parametrize("value", [
+    "JANE ELLEN SMITH",          # ALL-CAPS caption form
+    "John Smith",
+    "Maria de la Cruz",          # particles
+    "Robert J. Smith Jr.",       # initial and suffix
+])
+def test_person_shaped_org_suggestions_become_people(value):
+    assert ner.refine_category(value, "organization") == "person"
+
+
+@pytest.mark.parametrize("value", [
+    "Smith & Associates",
+    "Zions Bank",
+    "Wasatch Elementary School",
+    "Salt Lake County",
+    "Granite Credit Union",
+    "Smith Family Trust",
+])
+def test_real_organizations_keep_their_category(value):
+    assert ner.refine_category(value, "organization") == "organization"
+
+
+def test_refine_leaves_other_categories_alone():
+    assert ner.refine_category("John Smith", "person") == "person"
+    assert ner.refine_category("Unit 4B Building 7", "location") == "location"
+
+
+def test_norp_is_not_mapped_to_organization():
+    assert "NORP" not in ner.LABEL_MAP

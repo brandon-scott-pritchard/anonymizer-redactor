@@ -13,15 +13,27 @@ from dataclasses import dataclass
 
 MODEL_NAME = "en_core_web_sm"
 
-# spaCy entity label -> our category
+# spaCy entity label -> our category.  NORP (nationalities, religions,
+# political groups) is deliberately absent - "American" or "Catholic" is not an
+# organization and only polluted the suggestion list.
 LABEL_MAP = {
     "PERSON": "person",
     "ORG": "organization",
     "GPE": "location",
     "LOC": "location",
     "FAC": "location",
-    "NORP": "organization",
 }
+
+# Tokens that mean a string really is an organization, however person-shaped
+# the rest of it looks.
+_ORG_MARKERS = frozenset({
+    "llc", "llp", "pllc", "pc", "inc", "corp", "co", "company", "ltd",
+    "bank", "credit", "union", "church", "school", "district", "university",
+    "college", "hospital", "clinic", "court", "county", "city", "state",
+    "department", "dept", "agency", "bureau", "associates", "group", "firm",
+    "partners", "partnership", "trust", "foundation", "services", "insurance",
+    "realty", "properties", "enterprises", "industries", "&",
+})
 
 _nlp = None
 _load_error: str | None = None
@@ -74,6 +86,38 @@ class Suggestion:
 
 MAX_CHARS_PER_DOC = 400_000      # spaCy's default parser limit is 1_000_000
 
+# One token of a personal name: capitalised word, ALL CAPS, initial, particle
+# or generational suffix - the same shapes caption.NAME_RE accepts.
+_PERSON_TOKEN = re.compile(
+    r"(?:[A-Z][A-Za-z'’\-]{1,20}|[A-Z]{2,20}|[A-Z]\."
+    r"|van|von|de|del|della|di|da|du|la|le|el|bin|ibn|al|st\.?|mc|mac|o'"
+    r"|Jr\.?|Sr\.?|II|III|IV|V)$"
+)
+
+
+def refine_category(value: str, category: str) -> str:
+    """Reclassify a person-shaped org/location suggestion as a person.
+
+    The small spaCy model routinely labels ALL-CAPS caption names and
+    surname-only mentions as ORG.  Accepting that would register the person as
+    a value entity - an ``[ORG-n]`` placeholder with no surname or initial
+    variant matching, which leaks.  A string of 2-4 name-shaped tokens with no
+    digits and no organization marker is a person.
+    """
+    if category not in {"organization", "location"}:
+        return category
+    if any(ch.isdigit() for ch in value):
+        return category
+    tokens = value.split()
+    if not 2 <= len(tokens) <= 4:
+        return category
+    for token in tokens:
+        if token.strip(".,").casefold() in _ORG_MARKERS:
+            return category
+        if not _PERSON_TOKEN.match(token.rstrip(",")):
+            return category
+    return "person"
+
 
 def suggest(documents: dict[str, str], protected: dict[str, list[tuple[int, int]]] | None = None
             ) -> list[Suggestion]:
@@ -99,6 +143,7 @@ def suggest(documents: dict[str, str], protected: dict[str, list[tuple[int, int]
                     continue
                 value = " ".join(ent.text.split()).strip(" .,;:'\"")
                 value = re.sub(r"['\u2019]s$", "", value).strip()   # drop possessives
+                category = refine_category(value, category)
                 if not _plausible(value, category):
                     continue
                 start = chunk_start + ent.start_char

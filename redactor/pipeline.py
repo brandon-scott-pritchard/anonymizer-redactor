@@ -83,6 +83,7 @@ def collect_suggestions(
     store: MappingStore,
     settings: Settings,
     progress: Progress = _noop,
+    caption_names: Sequence[caption.CaptionName] | None = None,
 ) -> tuple[list[ner.Suggestion], list[str]]:
     """Model proposals for people, organisations and places, minus what we have."""
     notes: list[str] = []
@@ -108,6 +109,11 @@ def collect_suggestions(
         known.add(entity.canonical.casefold())
         for variant in entity.variants:
             known.add(variant.text.casefold())
+    # Caption parties may not be in the store yet (the operator has not ticked
+    # them), but their surnames must never resurface as "organization" rows.
+    for item in caption_names or ():
+        known.add(item.name.casefold())
+        known.update(token.casefold() for token in item.name.split())
 
     filtered = [s for s in raw if s.text.casefold() not in known]
     notes.append(note)
