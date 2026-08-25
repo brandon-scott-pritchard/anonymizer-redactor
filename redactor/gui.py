@@ -28,7 +28,8 @@ from tkinter import ttk
 
 import webbrowser
 
-from . import __version__, caption, categories, feedback, ner, pdf_processor, pipeline
+from . import (__version__, caption, categories, feedback, ner, pdf_processor,
+               pipeline, review)
 from .engine import Settings
 from .mapping import MappingStore
 
@@ -927,62 +928,21 @@ class App(Tk):
         # a rescan must not discard what the operator already decided: keep
         # each row's tick, type override and edited replacement, matched by
         # the found text
-        carryover = {
-            entity.canonical.casefold():
-                (entity.enabled, entity.category, entity.replacement)
-            for entity in self.store.entities.values()
-        }
+        carryover = review.snapshot_decisions(self.store)
         store = self._store_with_names()
         settings = self.settings()
         files = list(self.files)
 
         def work(report):
             pipeline.prescan(files, store, settings, report)
-            self._carry_decisions(store, carryover)
+            review.carry_decisions(store, carryover)
             return store
 
         self._work("Scanning documents", work, self._review_ready)
 
     @staticmethod
     def _carry_decisions(store: MappingStore, carryover: dict) -> None:
-        """Re-apply the operator's earlier review decisions to a fresh scan."""
-        taken = {e.replacement for e in store.entities.values()}
-        for entity in list(store.entities.values()):
-            previous = carryover.get(entity.canonical.casefold())
-            if previous is None:
-                continue
-            enabled, category, replacement = previous
-            if category != entity.category:
-                survivor = store.get(category, entity.canonical)
-                if survivor is not None and survivor is not entity:
-                    survivor.occurrences += entity.occurrences
-                    survivor.documents |= entity.documents
-                    del store.entities[entity.key]
-                    entity = survivor
-                else:
-                    del store.entities[entity.key]
-                    if categories.style_for(category) == "person":
-                        fresh = store.add_person(entity.canonical, category=category,
-                                                 role=entity.role, source=entity.source)
-                    else:
-                        fresh = store.add_value(category, entity.canonical,
-                                                source=entity.source)
-                    if fresh is None:
-                        store.entities[entity.key] = entity
-                    else:
-                        fresh.occurrences = entity.occurrences
-                        fresh.documents = entity.documents
-                        entity = fresh
-            # restore an edited replacement, but never mint a duplicate
-            # placeholder if numbering shifted between scans
-            if (replacement and replacement != entity.replacement
-                    and category == entity.category
-                    and replacement not in taken):
-                entity.replacement = replacement
-                if entity.is_person and entity.surrogate is not None:
-                    from . import names as _names
-                    entity.surrogate = _names.parse(replacement)
-            entity.enabled = enabled
+        review.carry_decisions(store, carryover)
 
     def _review_ready(self, store: MappingStore):
         self.store = store
@@ -1116,34 +1076,8 @@ class App(Tk):
             ))
 
     def _retype_entity(self, entity, new_category):
-        """Re-register ``entity`` under ``new_category``; None if it will not parse."""
-        if (categories.style_for(new_category) == "person"
-                and not any(ch.isalpha() for ch in entity.canonical)):
-            # "528-41-9963" parses as a "name" and would be replaced by an
-            # invented human name; refuse rather than invent
-            return None
-        existing = self.store.get(new_category, entity.canonical)
-        if existing is not None and existing is not entity:
-            # the same text is already registered under the target type -
-            # merge into the survivor instead of clobbering its state
-            existing.occurrences += entity.occurrences
-            existing.documents |= entity.documents
-            del self.store.entities[entity.key]
-            return existing
-        del self.store.entities[entity.key]
-        if categories.style_for(new_category) == "person":
-            fresh = self.store.add_person(entity.canonical, category=new_category,
-                                          role=entity.role, source=entity.source)
-        else:
-            fresh = self.store.add_value(new_category, entity.canonical,
-                                         source=entity.source)
-        if fresh is None:
-            self.store.entities[entity.key] = entity
-            return None
-        fresh.enabled = entity.enabled
-        fresh.occurrences = entity.occurrences
-        fresh.documents = entity.documents
-        return fresh
+        """Re-register ``entity`` under ``new_category``; None if refused."""
+        return review.retype_entity(self.store, entity, new_category)
 
     def _edit_suggestion_row(self, iid: str) -> None:
         meta = self._suggest_meta.get(iid)

@@ -18,6 +18,22 @@ REDACTION_TEXT = "[REDACTED]"
 # a longer written form always beats a shorter one
 PERSON_BASE_PRIORITY = 68
 PERSON_TOKEN_BONUS = 4
+# typo forms of a name rank below every exact written form
+FUZZY_PRIORITY = 66
+# only tokens this long get typo-matched; short names would collide with
+# ordinary words
+MIN_FUZZY_LENGTH = 4
+
+_FUZZY_WORD_RE = re.compile(r"(?<![\w'’])[A-Za-z][A-Za-z'’\-]{3,}(?!\w)")
+
+
+def _is_adjacent_swap(a: str, b: str) -> bool:
+    """True when ``a`` is ``b`` with exactly one adjacent pair transposed."""
+    if len(a) != len(b) or a == b:
+        return False
+    diffs = [i for i, (x, y) in enumerate(zip(a, b)) if x != y]
+    return (len(diffs) == 2 and diffs[1] == diffs[0] + 1
+            and a[diffs[0]] == b[diffs[1]] and a[diffs[1]] == b[diffs[0]])
 
 
 @dataclass
@@ -118,6 +134,24 @@ class EntityMatcher:
                 rf"(?<![\w'’])(?:{'|'.join(bodies)})(?!\w)", re.IGNORECASE)
             self.rules.append((regex, entity, lookup))
 
+        # Typo index: "Johhn" or "Smiith" (an inserted letter) and "Jonh"
+        # (an adjacent transposition) must still resolve to the registered
+        # person. Keyed by the casefolded correct token; only plain
+        # single-component forms long enough not to collide with ordinary
+        # words take part.
+        self._fuzzy: dict[str, tuple[Entity, _names.NameVariant]] = {}
+        self._fuzzy_by_length: dict[int, list[str]] = {}
+        if settings.include_single_token_names:
+            for regex, entity, lookup in self.rules:
+                for token_key, (variant, _priority) in lookup.items():
+                    if (variant.token_count != 1 or variant.risky
+                            or variant.layout != "plain"
+                            or len(token_key) < MIN_FUZZY_LENGTH):
+                        continue
+                    if token_key not in self._fuzzy:
+                        self._fuzzy[token_key] = (entity, variant)
+                        self._fuzzy_by_length.setdefault(len(token_key), []).append(token_key)
+
     def _state_fingerprint(self) -> int:
         """Changes whenever any entity's identity, tick or replacement does.
 
@@ -185,6 +219,42 @@ class EntityMatcher:
                     Hit(start, end, m.group(0), entity.category, replacement,
                         entity.key, priority)
                 )
+        hits.extend(self._find_typos(text, protected, redact))
+        return hits
+
+    def _find_typos(self, text: str, protected, redact: bool) -> list[Hit]:
+        """Words one inserted letter or one adjacent swap away from a name."""
+        if not self._fuzzy:
+            return []
+        hits: list[Hit] = []
+        for m in _FUZZY_WORD_RE.finditer(text):
+            word = m.group(0)
+            key = word.replace("’", "'").casefold()
+            if key in self._fuzzy:
+                continue           # the exact regexes already covered it
+            if _overlaps(m.start(), m.end(), protected):
+                continue
+            found = None
+            if len(key) > MIN_FUZZY_LENGTH:
+                for i in range(len(key)):          # drop the inserted letter
+                    found = self._fuzzy.get(key[:i] + key[i + 1:])
+                    if found:
+                        break
+            if found is None:
+                for candidate in self._fuzzy_by_length.get(len(key), ()):
+                    if _is_adjacent_swap(key, candidate):
+                        found = self._fuzzy[candidate]
+                        break
+            if found is None:
+                continue
+            entity, variant = found
+            if redact:
+                replacement = REDACTION_TEXT
+            else:
+                rendered = _names.render(variant, entity.surrogate)
+                replacement = _names.match_case(word, rendered)
+            hits.append(Hit(m.start(), m.end(), word, entity.category,
+                            replacement, entity.key, FUZZY_PRIORITY))
         return hits
 
 

@@ -75,12 +75,31 @@ class MappingStore:
         parsed = _names.parse(full_name)
         if not parsed.canonical:
             return None
-        key = f"{category}:{parsed.canonical.casefold()}"
+        # the suffix is part of who the person IS - father and son share the
+        # canonical "Robert Smith" and must not share an entity
+        identity = parsed.canonical.casefold()
+        if parsed.suffix:
+            identity = f"{identity} {parsed.suffix.casefold()}"
+        key = f"{category}:{identity}"
         existing = self.entities.get(key)
         if existing:
             if role and not existing.role:
                 existing.role = role
             return existing
+
+        # "John Smith" and "John Michael Smith" are one person and must share
+        # one pseudonym; keep whichever written form carries more of the name
+        for entity in list(self.entities.values()):
+            if (entity.category != category or not entity.is_person
+                    or entity.person is None):
+                continue
+            if _names.same_person(entity.person, parsed):
+                if _names.richness(parsed) > _names.richness(entity.person):
+                    self._upgrade_person(entity, parsed, category,
+                                         include_single_tokens)
+                if role and not entity.role:
+                    entity.role = role
+                return entity
 
         surrogate = self._unique_person_surrogate(parsed)
         entity = Entity(
@@ -120,6 +139,25 @@ class MappingStore:
             other.replacement = other.surrogate.canonical
             self._used_replacements.add(other.surrogate.canonical.casefold())
         return entity
+
+    def _upgrade_person(self, entity: Entity, parsed: _names.PersonName,
+                        category: str, include_single_tokens: bool) -> None:
+        """Rewrite an entity around a richer written form of the same name."""
+        del self.entities[entity.key]
+        if entity.surrogate is not None:
+            self._used_replacements.discard(entity.surrogate.canonical.casefold())
+        identity = parsed.canonical.casefold()
+        if parsed.suffix:
+            identity = f"{identity} {parsed.suffix.casefold()}"
+        entity.key = f"{category}:{identity}"
+        entity.canonical = parsed.canonical
+        entity.person = parsed
+        entity.variants = _names.variants(
+            parsed, include_single_tokens=include_single_tokens)
+        entity.surrogate = self._unique_person_surrogate(parsed)
+        entity.replacement = entity.surrogate.canonical
+        self.entities[entity.key] = entity
+        self._used_replacements.add(entity.surrogate.canonical.casefold())
 
     def _real_person_names(self) -> set[str]:
         """Real names (and surnames) no surrogate may collide with."""

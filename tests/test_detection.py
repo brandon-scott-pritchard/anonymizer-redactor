@@ -305,3 +305,76 @@ def test_title_and_plural_forms_survive_single_token_off():
     out, _hits = _engine.scan_and_apply(
         "Mr. Smith and the Smiths met.", store, settings, "doc")
     assert "Mr. Smith" not in out and "the Smiths" not in out
+
+
+# ----------------------------------------------- one person, one pseudonym --
+
+def test_short_and_full_forms_are_one_person():
+    store = MappingStore()
+    short = store.add_person("John Smith")
+    full = store.add_person("John Michael Smith")
+    assert short is full
+    assert full.canonical == "John Michael Smith"
+    assert len([e for e in store.entities.values() if e.is_person]) == 1
+
+
+def test_the_richer_form_wins_regardless_of_order():
+    store = MappingStore()
+    full = store.add_person("John Michael Smith")
+    short = store.add_person("John Smith")
+    assert short is full
+    assert full.canonical == "John Michael Smith"
+
+
+def test_an_initial_matches_the_written_out_form():
+    store = MappingStore()
+    a = store.add_person("J. Smith")
+    b = store.add_person("John Smith")
+    assert a is b and b.canonical == "John Smith"
+
+
+def test_different_people_never_merge():
+    store = MappingStore()
+    jane = store.add_person("Jane Smith")
+    john = store.add_person("John Smith")
+    senior = store.add_person("Robert Smith Sr.")
+    junior = store.add_person("Robert Smith Jr.")
+    assert jane is not john
+    assert senior is not junior
+
+
+def test_merged_person_matches_both_written_forms():
+    store = MappingStore()
+    store.add_person("John Smith")
+    store.add_person("John Michael Smith")
+    out, _ = _engine.scan_and_apply(
+        "John Smith signed. John Michael Smith agreed.", store, _Settings(), "doc")
+    assert "Smith" not in out
+    fake = next(e for e in store.entities.values() if e.is_person).surrogate
+    assert out.count(fake.last) == 2, "both forms must get the same pseudonym"
+
+
+# ------------------------------------------------------------- typo forms --
+
+@pytest.mark.parametrize("typo", [
+    "Johhn Smith",       # doubled letter
+    "Johnn Smith",       # extra letter at a boundary
+    "John Smiith",       # epenthesis in the surname
+    "Jonh Smith",        # adjacent transposition
+    "John Smiht",        # adjacent transposition in the surname
+])
+def test_typo_forms_of_a_registered_name_are_caught(typo):
+    store = MappingStore()
+    store.add_person("John Smith")
+    out, hits = _engine.scan_and_apply(f"{typo} appeared today.", store,
+                                       _Settings(), "doc")
+    assert hits, typo
+    for token in typo.split():
+        assert token not in out, f"{token} leaked from {typo!r}"
+
+
+def test_short_words_are_not_typo_matched():
+    store = MappingStore()
+    store.add_person("Al Ray")        # both under the fuzzy length floor
+    out, _ = _engine.scan_and_apply("All of the era.", store, _Settings(), "doc")
+    assert "All" in out and "era" in out

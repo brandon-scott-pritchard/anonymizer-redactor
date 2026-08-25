@@ -245,6 +245,44 @@ def match_case(original: str, replacement: str) -> str:
     return replacement
 
 
+def _part_compatible(x: str, y: str) -> bool:
+    """Equal, one missing, or one the initial of the other."""
+    x, y = x.strip(".").casefold(), y.strip(".").casefold()
+    if not x or not y or x == y:
+        return True
+    return (len(x) == 1 or len(y) == 1) and x[0] == y[0]
+
+
+def same_person(a: PersonName, b: PersonName) -> bool:
+    """Could these be one person written with more or fewer parts?
+
+    "John Smith", "John Michael Smith", "J. Smith" and "John M. Smith" are
+    the same person; "Jane Smith" and "John Smith Jr." vs "John Smith Sr."
+    are not. Registering them as separate entities would hand one person
+    two different pseudonyms.
+    """
+    if not a.last or not b.last or a.last.casefold() != b.last.casefold():
+        return False
+    if a.suffix and b.suffix and a.suffix.casefold() != b.suffix.casefold():
+        return False
+    if not _part_compatible(a.first, b.first):
+        return False
+    if not (a.first and b.first):
+        # surname-only forms are too ambiguous to merge automatically
+        return False
+    for mine, theirs in zip(a.middles, b.middles):
+        if not _part_compatible(mine, theirs):
+            return False
+    return True
+
+
+def richness(person: PersonName) -> tuple[int, int, int]:
+    """How much of the name is written out; the richer form wins a merge."""
+    return (len(person.middles),
+            sum(len(m.strip(".")) for m in person.middles),
+            len(person.first.strip(".")))
+
+
 def escape_token(token: str) -> str:
     """``re.escape`` that also accepts the typographic apostrophe.
 
