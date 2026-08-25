@@ -268,3 +268,9 @@ vendor/               vendored Tesseract (gitignored; rebuild with the scripts)
 tests/                the suite described above
 samples/              example pleading in DOCX and PDF
 ```
+
+---
+
+## License
+
+MIT. See [LICENSE](LICENSE).
