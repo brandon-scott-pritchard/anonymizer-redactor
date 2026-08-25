@@ -1,6 +1,7 @@
 # Vendored binaries - large, architecture-specific, and rebuildable with
-# vendor_tesseract_macos.py / vendor_tesseract_windows.py
-vendor/
+# vendor_tesseract_macos.py / vendor_tesseract_windows.py.
+# Root only: webapp/static/vendor (the React runtime) IS committed.
+/vendor/
 
 # Build output
 dist/
