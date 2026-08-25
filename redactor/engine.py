@@ -78,21 +78,36 @@ class EntityMatcher:
         self.settings = settings
         self._value_rules: list[tuple[re.Pattern, Entity]] = []
         self._value_version = -1
-        self.rules: list[tuple[re.Pattern, Entity, _names.NameVariant, int]] = []
+        # One combined alternation per entity instead of one regex per written
+        # form - a person expands into dozens of variants, and running each as
+        # its own finditer pass over every paragraph was the scan's hot spot.
+        # Longest variant first so the alternation prefers the longest form at
+        # any position, which is what the per-variant priorities resolved to.
+        self.rules: list[tuple[re.Pattern, Entity,
+                               dict[str, tuple[_names.NameVariant, int]]]] = []
         for entity in store.persons():
             if not entity.enabled or not settings.category_enabled(entity.category):
                 continue
+            usable: list[tuple[_names.NameVariant, int]] = []
             for variant in entity.variants:
                 if variant.token_count == 1 and not settings.include_single_token_names:
                     continue
                 if variant.risky and not settings.include_single_token_names:
                     continue
                 priority = PERSON_BASE_PRIORITY + PERSON_TOKEN_BONUS * variant.token_count
-                self.rules.append(
-                    (_names.variant_regex(variant.text), entity, variant, priority)
-                )
-        # longest written form first so "John Michael Smith" wins over "Smith"
-        self.rules.sort(key=lambda r: (-r[3], -len(r[2].text)))
+                usable.append((variant, priority))
+            if not usable:
+                continue
+            usable.sort(key=lambda item: (-len(item[0].text), -item[1]))
+            bodies = []
+            lookup: dict[str, tuple[_names.NameVariant, int]] = {}
+            for variant, priority in usable:
+                bodies.append(r"\s+".join(re.escape(tok) for tok in variant.text.split()))
+                lookup.setdefault(" ".join(variant.text.split()).casefold(),
+                                  (variant, priority))
+            regex = re.compile(
+                rf"(?<![\w'’])(?:{'|'.join(bodies)})(?!\w)", re.IGNORECASE)
+            self.rules.append((regex, entity, lookup))
 
     def _refresh_values(self) -> None:
         """Rebuild the literal rules when the store has grown since last time."""
@@ -130,11 +145,15 @@ class EntityMatcher:
 
     def find(self, text: str, protected: list[tuple[int, int]], redact: bool) -> list[Hit]:
         hits: list[Hit] = []
-        for regex, entity, variant, priority in self.rules:
+        for regex, entity, lookup in self.rules:
             for m in regex.finditer(text):
                 start, end = m.span()
                 if _overlaps(start, end, protected):
                     continue
+                found = lookup.get(" ".join(m.group(0).split()).casefold())
+                if found is None:      # pragma: no cover - defensive
+                    continue
+                variant, priority = found
                 if redact:
                     replacement = REDACTION_TEXT
                 else:

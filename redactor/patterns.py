@@ -44,6 +44,16 @@ class Detector:
     group: int = 0
     validator: Callable[[str], bool] | None = None
     priority: int = 50
+    # cheap prechecks: skip the regex when the text cannot possibly match.
+    # needs_digit is set only where the pattern provably requires a digit;
+    # keywords only where every possible match contains one of them.
+    needs_digit: bool = False
+    keywords: tuple[str, ...] = ()
+
+
+# Test hook: turning this off must never change scan()/allowlist_spans()
+# output - the prefilters are pure go-faster stripes.
+PREFILTER = True
 
 
 # --------------------------------------------------------------------------
@@ -187,10 +197,35 @@ ALLOWLIST_PATTERNS: tuple[re.Pattern, ...] = (
 )
 
 
+# (needs_digit, keywords) per allowlist pattern, same order. Set only where
+# provably implied by the pattern - a wrong guard here un-protects citations.
+_ALLOWLIST_GUARDS: tuple[tuple[bool, tuple[str, ...]], ...] = (
+    (False, ("§", "sec")),       # statutes end in § / Section / Sec
+    (False, ("§",)),
+    (False, ("sec",)),
+    (True, ()),                  # rules of procedure require a rule number
+    (True, ()),                  # reporter citations require volume digits
+    (True, ()),                  # party pair + reporter, likewise
+    (False, ("judge", "commissioner", "justice", "magistrate", "hon")),
+    (False, ("court",)),
+    (False, ("court",)),
+    (False, ("judicial",)),
+    (False, ("clerk",)),
+)
+assert len(_ALLOWLIST_GUARDS) == len(ALLOWLIST_PATTERNS)
+
+
 def allowlist_spans(text: str, extra: Iterable[str] = ()) -> list[tuple[int, int]]:
     """Character spans that must survive untouched."""
     spans: list[tuple[int, int]] = []
-    for pat in ALLOWLIST_PATTERNS:
+    lower = text.lower()
+    has_digit = any(ch.isdigit() for ch in text)
+    for pat, (needs_digit, keywords) in zip(ALLOWLIST_PATTERNS, _ALLOWLIST_GUARDS):
+        if PREFILTER:
+            if needs_digit and not has_digit:
+                continue
+            if keywords and not any(k in lower for k in keywords):
+                continue
         for m in pat.finditer(text):
             spans.append((m.start(), m.end()))
     for term in extra:
@@ -223,96 +258,154 @@ def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
 _I = re.IGNORECASE
 
 
-def _d(category, pattern, group=0, validator=None, priority=50, flags=_I):
-    return Detector(category, re.compile(pattern, flags), group, validator, priority)
+def _d(category, pattern, group=0, validator=None, priority=50, flags=_I,
+       digit=False, kw=()):
+    return Detector(category, re.compile(pattern, flags), group, validator, priority,
+                    needs_digit=digit, keywords=tuple(kw))
 
 
 DETECTORS: tuple[Detector, ...] = (
     # ------------------------------------------------------------- contact --
-    _d("email", r"\b[\w!#$%&'*+/=?^`{|}~.-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+\b", priority=90),
-    _d("url", r"\b(?:https?://|ftp://|www\.)[^\s<>\"'\)\]]+", priority=88),
-    _d("fax", rf"(?:fax(?:simile)?|telecopier){_SEP}((?:\+?1[\s.\-]?)?(?:\(\d{{3}}\)\s?|\d{{3}}[\s.\-])\d{{3}}[\s.\-]?\d{{4}})", group=1, priority=86),
-    _d("phone", r"(?:\+?1[\s.\-]?)?\(\d{3}\)\s?\d{3}[\s.\-]?\d{4}(?:\s*(?:x|ext\.?|extension)\s*\d{1,6})?", priority=80),
-    _d("phone", r"(?<![\d\-])(?:\+?1[\s.\-])?\d{3}[\s.\-]\d{3}[\s.\-]\d{4}(?:\s*(?:x|ext\.?|extension)\s*\d{1,6})?(?![\d\-])", priority=80),
+    _d("email", r"\b[\w!#$%&'*+/=?^`{|}~.-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+\b", priority=90,
+       kw=("@",)),
+    _d("url", r"\b(?:https?://|ftp://|www\.)[^\s<>\"'\)\]]+", priority=88,
+       kw=("http", "ftp", "www.")),
+    _d("fax", rf"(?:fax(?:simile)?|telecopier){_SEP}((?:\+?1[\s.\-]?)?(?:\(\d{{3}}\)\s?|\d{{3}}[\s.\-])\d{{3}}[\s.\-]?\d{{4}})", group=1, priority=86,
+       digit=True, kw=("fax", "telecopier")),
+    _d("phone", r"(?:\+?1[\s.\-]?)?\(\d{3}\)\s?\d{3}[\s.\-]?\d{4}(?:\s*(?:x|ext\.?|extension)\s*\d{1,6})?", priority=80,
+       digit=True),
+    _d("phone", r"(?<![\d\-])(?:\+?1[\s.\-])?\d{3}[\s.\-]\d{3}[\s.\-]\d{4}(?:\s*(?:x|ext\.?|extension)\s*\d{1,6})?(?![\d\-])", priority=80,
+       digit=True),
     _d("phone", labeled(("telephone", "phone", "cell(?:ular)?", "mobile", "tel\\.?"),
-                        r"\d{10}"), group=1, priority=79),
-    _d("ip_address", r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b", priority=85),
-    _d("ip_address", r"\b(?:[0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}\b", priority=85),
+                        r"\d{10}"), group=1, priority=79,
+       digit=True, kw=("tel", "phone", "cell", "mobile")),
+    _d("ip_address", r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b", priority=85,
+       digit=True),
+    _d("ip_address", r"\b(?:[0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}\b", priority=85,
+       kw=(":",)),
     _d("mac_address", r"\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b", priority=85),
-    _d("gps", r"[-+]?\d{1,3}\.\d{4,}\s*[,\s]\s*[-+]?\d{1,3}\.\d{4,}", priority=85),
+    _d("gps", r"[-+]?\d{1,3}\.\d{4,}\s*[,\s]\s*[-+]?\d{1,3}\.\d{4,}", priority=85,
+       digit=True),
     _d("social_handle",
        rf"\b(?:facebook|fb|instagram|insta|ig|twitter|x\.com|tiktok|snapchat|snap|linkedin|"
        rf"reddit|discord|telegram|whatsapp|youtube|onlyfans|tinder|bumble|hinge)\b\s*"
        rf"(?:profile|account|handle|user\s?name|username|id)?\s*(?:is|:|=|@|-)?\s*(@?[A-Za-z0-9._\-]{{3,30}})",
-       group=1, priority=84),
-    _d("social_handle", r"(?<![\w./@])@[A-Za-z][A-Za-z0-9_.\-]{2,29}(?<![.\-])", priority=60),
+       group=1, priority=84,
+       kw=("facebook", "fb", "insta", "ig", "twitter", "x.com", "tiktok", "snap",
+           "linkedin", "reddit", "discord", "telegram", "whatsapp", "youtube",
+           "onlyfans", "tinder", "bumble", "hinge")),
+    _d("social_handle", r"(?<![\w./@])@[A-Za-z][A-Za-z0-9_.\-]{2,29}(?<![.\-])", priority=60,
+       kw=("@",)),
     _d("username", labeled(("user\\s?name", "user\\s?id", "login(?:\\s?name|\\s?id)?", "screen\\s?name", "display\\s?name"),
-                           r"[A-Za-z0-9._@\-]{3,40}"), group=1, priority=70),
+                           r"[A-Za-z0-9._@\-]{3,40}"), group=1, priority=70,
+       kw=("user", "login", "screen", "display")),
 
     # -------------------------------------------------------- government ID --
-    _d("ssn", r"(?<!\d)\d{3}-\d{2}-\d{4}(?!\d)", validator=valid_ssn, priority=95),
+    _d("ssn", r"(?<!\d)\d{3}-\d{2}-\d{4}(?!\d)", validator=valid_ssn, priority=95,
+       digit=True),
     _d("ssn", labeled(("s\\.?s\\.?n\\.?", "social\\s+security", "soc\\.?\\s*sec\\.?"),
-                      r"(?:\d{3}[-\s]?\d{2}[-\s]?\d{4}|" + V_MASKED + r")"), group=1, priority=96),
+                      r"(?:\d{3}[-\s]?\d{2}[-\s]?\d{4}|" + V_MASKED + r")"), group=1, priority=96,
+       digit=True, kw=("soc", "ssn", "s.s", "ss.")),
     _d("ein", labeled(("e\\.?i\\.?n\\.?", "f\\.?e\\.?i\\.?n\\.?", "employer\\s+identification",
                        "tax\\s*(?:payer)?\\s*i\\.?d\\.?", "t\\.?i\\.?n\\.?", "federal\\s+tax\\s*id"),
-                      r"(?:\d{2}-?\d{7}|" + V_MASKED + r")"), group=1, priority=94),
-    _d("ein", r"(?<!\d)\d{2}-\d{7}(?!\d)", priority=62),
+                      r"(?:\d{2}-?\d{7}|" + V_MASKED + r")"), group=1, priority=94,
+       digit=True, kw=("ein", "e.i", "ei.", "fein", "f.e", "fe.", "tax",
+                       "tin", "t.i", "ti.", "employer")),
+    _d("ein", r"(?<!\d)\d{2}-\d{7}(?!\d)", priority=62,
+       digit=True),
     _d("drivers_license", labeled(("driver'?s?\\s*licen[sc]e", "d\\.?l\\.?", "operator'?s?\\s*licen[sc]e",
-                                   "state\\s+id(?:entification)?\\s*card?")), group=1, priority=90),
-    _d("passport", labeled(("passport",)), group=1, priority=90),
-    _d("alien_number", r"\bA[-#\s]?\d{8,9}\b", priority=88),
-    _d("alien_number", labeled(("alien\\s*(?:registration)?", "a-?number", "uscis", "uscis\\s*#?", "visa", "i-?94")), group=1, priority=89),
-    _d("military_id", labeled(("military\\s*(?:service|id)", "dod\\s*id", "service\\s*number", "edipi")), group=1, priority=88),
-    _d("inmate_number", labeled(("inmate", "booking", "offender", "prisoner", "doc\\s*(?:id)?", "jail\\s*id")), group=1, priority=88),
-    _d("student_id", labeled(("student\\s*(?:id)?", "pupil\\s*id", "school\\s*id", "enrollment")), group=1, priority=86),
-    _d("voter_id", labeled(("voter\\s*(?:registration|reg\\.?|id)?",)), group=1, priority=86),
-    _d("bar_number", labeled(("bar\\s*(?:no\\.?|number|#|id)", "utah\\s+bar", "state\\s+bar", "attorney\\s*(?:reg(?:istration)?)?")), group=1, priority=86),
-    _d("notary_id", labeled(("notary\\s*(?:commission|id|public)?", "commission\\s*(?:no\\.?|number|#)")), group=1, priority=86),
+                                   "state\\s+id(?:entification)?\\s*card?")), group=1, priority=90,
+       digit=True, kw=("licen", "dl", "d.l", "operator", "state")),
+    _d("passport", labeled(("passport",)), group=1, priority=90,
+       digit=True, kw=("passport",)),
+    _d("alien_number", r"\bA[-#\s]?\d{8,9}\b", priority=88,
+       digit=True),
+    _d("alien_number", labeled(("alien\\s*(?:registration)?", "a-?number", "uscis", "uscis\\s*#?", "visa", "i-?94")), group=1, priority=89,
+       digit=True, kw=("alien", "numb", "uscis", "visa", "i94", "i-94")),
+    _d("military_id", labeled(("military\\s*(?:service|id)", "dod\\s*id", "service\\s*number", "edipi")), group=1, priority=88,
+       digit=True, kw=("military", "dod", "service", "edipi")),
+    _d("inmate_number", labeled(("inmate", "booking", "offender", "prisoner", "doc\\s*(?:id)?", "jail\\s*id")), group=1, priority=88,
+       digit=True, kw=("inmate", "booking", "offender", "prisoner", "doc", "jail")),
+    _d("student_id", labeled(("student\\s*(?:id)?", "pupil\\s*id", "school\\s*id", "enrollment")), group=1, priority=86,
+       digit=True, kw=("student", "pupil", "school", "enrollment")),
+    _d("voter_id", labeled(("voter\\s*(?:registration|reg\\.?|id)?",)), group=1, priority=86,
+       digit=True, kw=("voter",)),
+    _d("bar_number", labeled(("bar\\s*(?:no\\.?|number|#|id)", "utah\\s+bar", "state\\s+bar", "attorney\\s*(?:reg(?:istration)?)?")), group=1, priority=86,
+       digit=True, kw=("bar", "attorney")),
+    _d("notary_id", labeled(("notary\\s*(?:commission|id|public)?", "commission\\s*(?:no\\.?|number|#)")), group=1, priority=86,
+       digit=True, kw=("notary", "commission")),
     _d("professional_license", labeled(("licen[sc]e\\s*(?:no\\.?|number|#)", "certification\\s*(?:no\\.?|number|#)",
-                                        "npi", "registration\\s*(?:no\\.?|number|#)")), group=1, priority=84),
+                                        "npi", "registration\\s*(?:no\\.?|number|#)")), group=1, priority=84,
+       digit=True, kw=("licen", "certification", "npi", "registration")),
     _d("tribal_id", labeled(("tribal\\s*(?:enrollment|id|member(?:ship)?)", "enrollment\\s*(?:no\\.?|number|#)",
-                             "cdib", "certificate\\s+of\\s+degree\\s+of\\s+indian\\s+blood")), group=1, priority=86),
+                             "cdib", "certificate\\s+of\\s+degree\\s+of\\s+indian\\s+blood")), group=1, priority=86,
+       digit=True, kw=("tribal", "enrollment", "cdib", "indian")),
 
     # ------------------------------------------------------------- health ----
     _d("mrn", labeled(("m\\.?r\\.?n\\.?", "medical\\s+record", "patient\\s*(?:id|number|no\\.?|#)",
-                       "chart\\s*(?:no\\.?|number|#)", "health\\s+record")), group=1, priority=90),
+                       "chart\\s*(?:no\\.?|number|#)", "health\\s+record")), group=1, priority=90,
+       digit=True, kw=("mrn", "m.r", "mr.", "medical", "patient", "chart", "health")),
     _d("health_plan", labeled(("member\\s*(?:id|no\\.?|number|#)", "subscriber\\s*(?:id|no\\.?|number|#)",
                                "group\\s*(?:no\\.?|number|#)", "health\\s+plan", "insurance\\s+id",
-                               "medicaid", "medicare", "hicn", "mbi")), group=1, priority=88),
+                               "medicaid", "medicare", "hicn", "mbi")), group=1, priority=88,
+       digit=True, kw=("member", "subscriber", "group", "health", "insurance",
+                       "medicaid", "medicare", "hicn", "mbi")),
     _d("diagnosis_code", labeled(("icd(?:-?10|-?9)?\\s*(?:cm)?\\s*(?:code)?", "cpt\\s*(?:code)?",
                                   "dsm(?:-?5|-?iv)?\\s*(?:code)?", "diagnosis\\s+code", "hcpcs"),
-                                 r"[A-TV-Z]?\d{2,5}(?:\.\d{1,4})?"), group=1, priority=88),
-    _d("prescription", labeled(("rx", "prescription", "ndc")), group=1, priority=86),
+                                 r"[A-TV-Z]?\d{2,5}(?:\.\d{1,4})?"), group=1, priority=88,
+       digit=True, kw=("icd", "cpt", "dsm", "diagnosis", "hcpcs")),
+    _d("prescription", labeled(("rx", "prescription", "ndc")), group=1, priority=86,
+       digit=True, kw=("rx", "prescription", "ndc")),
 
     # ---------------------------------------------------------- financial ----
-    _d("credit_card", r"(?<![\d\-])(?:\d[ -]?){12,18}\d(?![\d\-])", validator=luhn_valid, priority=93),
+    _d("credit_card", r"(?<![\d\-])(?:\d[ -]?){12,18}\d(?![\d\-])", validator=luhn_valid, priority=93,
+       digit=True),
     _d("credit_card", labeled(("credit\\s*card", "debit\\s*card", "visa", "mastercard", "master\\s*card",
                                "amex", "american\\s+express", "discover", "card\\s*(?:no\\.?|number|#)"),
-                              rf"(?:{V_MASKED}|(?:\d[ -]?){{12,18}}\d)"), group=1, priority=92),
-    _d("routing_number", labeled(("routing", "aba", "rtn", "transit")), group=1, priority=91),
-    _d("iban", r"\b[A-Z]{2}\d{2}[ ]?(?:[A-Z0-9]{4}[ ]?){2,7}[A-Z0-9]{1,4}\b", priority=90, flags=0),
-    _d("swift", labeled(("swift", "bic", "swift\\s*/\\s*bic"), r"[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?"), group=1, priority=90),
-    _d("crypto_wallet", r"\b(?:bc1[a-z0-9]{25,62}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})\b", priority=90, flags=0),
-    _d("crypto_wallet", r"\b0x[a-fA-F0-9]{40}\b", priority=90),
+                              rf"(?:{V_MASKED}|(?:\d[ -]?){{12,18}}\d)"), group=1, priority=92,
+       digit=True, kw=("card", "visa", "amex", "american", "discover")),
+    _d("routing_number", labeled(("routing", "aba", "rtn", "transit")), group=1, priority=91,
+       digit=True, kw=("routing", "aba", "rtn", "transit")),
+    _d("iban", r"\b[A-Z]{2}\d{2}[ ]?(?:[A-Z0-9]{4}[ ]?){2,7}[A-Z0-9]{1,4}\b", priority=90, flags=0,
+       digit=True),
+    _d("swift", labeled(("swift", "bic", "swift\\s*/\\s*bic"), r"[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?"), group=1, priority=90,
+       kw=("swift", "bic")),
+    _d("crypto_wallet", r"\b(?:bc1[a-z0-9]{25,62}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})\b", priority=90, flags=0,
+       digit=True),
+    _d("crypto_wallet", r"\b0x[a-fA-F0-9]{40}\b", priority=90,
+       digit=True),
     _d("payment_handle",
        labeled(("pay\\s?pal", "venmo", "cash\\s?app", "zelle", "square\\s*cash", "apple\\s*pay",
                 "google\\s*pay", "wise", "revolut", "chime", "stripe", "coinbase", "robinhood"),
-               r"[$@]?[A-Za-z0-9._\-]{3,40}"), group=1, priority=89),
+               r"[$@]?[A-Za-z0-9._\-]{3,40}"), group=1, priority=89,
+       kw=("paypal", "pay pal", "venmo", "cash", "zelle", "square", "apple",
+           "google", "wise", "revolut", "chime", "stripe", "coinbase", "robinhood")),
     _d("investment_account", labeled(("401\\s?\\(?k\\)?", "403\\s?\\(?b\\)?", "457", "ira", "roth(?:\\s+ira)?",
                                       "pension", "annuity", "brokerage", "tsp", "hsa", "529",
                                       "retirement\\s+(?:account|plan)", "investment\\s+account",
-                                      "securities\\s+account", "mutual\\s+fund")), group=1, priority=87),
+                                      "securities\\s+account", "mutual\\s+fund")), group=1, priority=87,
+       digit=True, kw=("401", "403", "457", "ira", "roth", "pension", "annuity",
+                       "brokerage", "tsp", "hsa", "529", "retirement", "investment",
+                       "securities", "mutual")),
     _d("bank_account", labeled(("bank\\s+account", "checking\\s*(?:account)?", "savings\\s*(?:account)?",
                                 "deposit\\s+account", "acct", "account", "a/c", "money\\s+market",
-                                "certificate\\s+of\\s+deposit", "\\bcd\\b")), group=1, priority=82),
+                                "certificate\\s+of\\s+deposit", "\\bcd\\b")), group=1, priority=82,
+       digit=True, kw=("bank", "checking", "savings", "deposit", "acct", "account",
+                       "a/c", "money", "cd")),
     _d("loan_number", labeled(("loan", "mortgage", "escrow", "note\\s*(?:no\\.?|number|#)", "deed\\s+of\\s+trust",
-                               "heloc", "line\\s+of\\s+credit", "promissory\\s+note")), group=1, priority=86),
+                               "heloc", "line\\s+of\\s+credit", "promissory\\s+note")), group=1, priority=86,
+       digit=True, kw=("loan", "mortgage", "escrow", "note", "deed", "heloc",
+                       "credit", "promissory")),
     _d("policy_number", labeled(("polic(?:y|ies)", "insurance\\s+polic(?:y|ies)", "coverage\\s*(?:no\\.?|number|#)",
-                                 "certificate\\s+of\\s+insurance")), group=1, priority=86),
-    _d("claim_number", labeled(("claim", "file\\s*(?:no\\.?|number|#)\\s*\\(claim\\)", "adjuster\\s*file")), group=1, priority=86),
+                                 "certificate\\s+of\\s+insurance")), group=1, priority=86,
+       digit=True, kw=("polic", "coverage", "insurance")),
+    _d("claim_number", labeled(("claim", "file\\s*(?:no\\.?|number|#)\\s*\\(claim\\)", "adjuster\\s*file")), group=1, priority=86,
+       digit=True, kw=("claim", "adjuster")),
     _d("check_number", labeled(("check", "cheque", "draft", "wire\\s*(?:confirmation|reference|transfer)?",
                                 "invoice", "transaction", "confirmation", "reference\\s*(?:no\\.?|number|#)",
-                                "receipt")), group=1, priority=80),
+                                "receipt")), group=1, priority=80,
+       digit=True, kw=("check", "cheque", "draft", "wire", "invoice", "transaction",
+                       "confirmation", "reference", "receipt")),
 
     # ----------------------------------------------------------- property ----
     _d("street_address",
@@ -323,63 +416,85 @@ DETECTORS: tuple[Detector, ...] = (
        r"(?:\s*,?\s*(?:Apt\.?|Apartment|Unit|Suite|Ste\.?|Bldg\.?|Building|Floor|Fl\.?|Rm\.?|Room|#)\s*[\w\-]+)?"
        r"(?:\s*,?\s*[A-Z][\w'\-]*(?:\s+[A-Z][\w'\-]*){0,2}\s*,?\s*(?:A[LKZR]|C[AOT]|D[EC]|FL|GA|HI|I[DLNA]|"
        r"K[SY]|LA|M[EDAINSOT]|N[EVHJMYCD]|O[HKR]|PA|RI|S[CD]|T[NX]|UT|V[TA]|W[AVIY])\.?\s*\d{5}(?:-\d{4})?)?",
-       priority=75),
+       priority=75, digit=True),
     _d("street_address",
        r"(?<![\w\-])\d{2,5}\s+(?:North|South|East|West|N|S|E|W)\.?\s+\d{2,5}\s+"
        r"(?:North|South|East|West|N|S|E|W)\b\.?"
        r"(?:\s*,?\s*(?:Apt\.?|Apartment|Unit|Suite|Ste\.?|Bldg\.?|#)\s*[\w\-]+)?"
        r"(?:\s*,?\s*[A-Z][\w'\-]*(?:\s+[A-Z][\w'\-]*){0,2}\s*,?\s*"
        r"(?:[A-Z]{2}|Utah|Idaho|Nevada|Arizona|Wyoming|Colorado)\.?\s*\d{5}(?:-\d{4})?)?",
-       priority=76),
+       priority=76, digit=True),
     _d("street_address",
        r"\b(?:P\.?\s?O\.?\s+Box|Post\s+Office\s+Box)\s+\d{1,7}"
        r"(?:\s*,?\s*[A-Z][\w'\-]*(?:\s+[A-Z][\w'\-]*){0,2}\s*,?\s*[A-Z]{2}\.?\s*\d{5}(?:-\d{4})?)?",
-       priority=82),
+       priority=82, digit=True, kw=("box",)),
     _d("parcel_number", labeled(("a\\.?p\\.?n\\.?", "parcel", "assessor'?s?\\s+parcel", "tax\\s+parcel",
-                                 "property\\s+id", "sidwell", "pin\\s*(?:no\\.?|number|#)")), group=1, priority=88),
-    _d("deed_reference", r"\bBook\s+[\w\-]+,?\s+(?:at\s+)?Pages?\s+[\w\-]+", priority=86),
+                                 "property\\s+id", "sidwell", "pin\\s*(?:no\\.?|number|#)")), group=1, priority=88,
+       digit=True, kw=("parcel", "apn", "a.p", "ap.", "sidwell", "pin", "property")),
+    _d("deed_reference", r"\bBook\s+[\w\-]+,?\s+(?:at\s+)?Pages?\s+[\w\-]+", priority=86,
+       kw=("book",)),
     _d("deed_reference", labeled(("entry\\s*(?:no\\.?|number|#)", "instrument\\s*(?:no\\.?|number|#)",
                                   "recording\\s*(?:no\\.?|number|#)", "document\\s*(?:no\\.?|number|#)",
-                                  "reception\\s*(?:no\\.?|number|#)")), group=1, priority=86),
+                                  "reception\\s*(?:no\\.?|number|#)")), group=1, priority=86,
+       digit=True, kw=("entry", "instrument", "recording", "document", "reception")),
     _d("legal_description",
        r"\bLot\s+[\w\-]+,?\s+Block\s+[\w\-]+(?:,?\s+(?:of\s+)?[A-Z][\w'\-]*(?:\s+[A-Z][\w'\-]*){0,5}"
-       r"(?:\s+(?:Subdivision|Addition|Plat|Amended))?)?", priority=86),
+       r"(?:\s+(?:Subdivision|Addition|Plat|Amended))?)?", priority=86,
+       kw=("lot",)),
     _d("legal_description",
-       r"\b(?:Section\s+\d{1,2},?\s+)?Township\s+\d{1,3}\s*[NSns]\.?,?\s+Range\s+\d{1,3}\s*[EWew]\.?", priority=86),
-    _d("vin", r"\b[A-HJ-NPR-Z0-9]{17}\b", validator=valid_vin, priority=88, flags=0),
-    _d("vin", labeled(("v\\.?i\\.?n\\.?", "vehicle\\s+identification")), group=1, priority=89),
+       r"\b(?:Section\s+\d{1,2},?\s+)?Township\s+\d{1,3}\s*[NSns]\.?,?\s+Range\s+\d{1,3}\s*[EWew]\.?", priority=86,
+       digit=True, kw=("township",)),
+    _d("vin", r"\b[A-HJ-NPR-Z0-9]{17}\b", validator=valid_vin, priority=88, flags=0,
+       digit=True),
+    _d("vin", labeled(("v\\.?i\\.?n\\.?", "vehicle\\s+identification")), group=1, priority=89,
+       digit=True, kw=("vin", "v.i", "vi.", "vehicle")),
     _d("license_plate", labeled(("licen[sc]e\\s+plate", "plate\\s*(?:no\\.?|number|#)", "tag\\s*(?:no\\.?|number|#)",
-                                 "registration\\s+plate"), r"[A-Z0-9][A-Z0-9\- ]{1,9}[A-Z0-9]"), group=1, priority=88),
+                                 "registration\\s+plate"), r"[A-Z0-9][A-Z0-9\- ]{1,9}[A-Z0-9]"), group=1, priority=88,
+       kw=("plate", "tag")),
     _d("vessel_number", labeled(("hull\\s*(?:id|identification)?", "hin", "tail\\s*(?:no\\.?|number|#)",
                                  "aircraft\\s*(?:registration)?", "vessel\\s*(?:no\\.?|number|#)",
-                                 "boat\\s*(?:registration|no\\.?|number|#)")), group=1, priority=88),
-    _d("safe_deposit", labeled(("safe\\s*deposit\\s*(?:box)?", "safety\\s*deposit\\s*(?:box)?", "vault\\s*box")), group=1, priority=88),
-    _d("storage_unit", labeled(("storage\\s*unit", "storage\\s*locker", "unit\\s*(?:no\\.?|number|#)\\s*\\(storage\\)")), group=1, priority=86),
+                                 "boat\\s*(?:registration|no\\.?|number|#)")), group=1, priority=88,
+       digit=True, kw=("hull", "hin", "tail", "aircraft", "vessel", "boat")),
+    _d("safe_deposit", labeled(("safe\\s*deposit\\s*(?:box)?", "safety\\s*deposit\\s*(?:box)?", "vault\\s*box")), group=1, priority=88,
+       digit=True, kw=("deposit", "vault")),
+    _d("storage_unit", labeled(("storage\\s*unit", "storage\\s*locker", "unit\\s*(?:no\\.?|number|#)\\s*\\(storage\\)")), group=1, priority=86,
+       digit=True, kw=("storage", "unit")),
 
     # --------------------------------------------------------------- case ----
     _d("case_number", labeled(("case", "civil\\s*(?:case)?", "criminal\\s*(?:case)?", "docket", "cause",
                                "court\\s+file", "matter", "index", "action", "file",
                                "probate", "juvenile", "adversary", "appellate", "appeal"),
                               r"(?=[A-Za-z0-9\-:/.]*\d)[A-Za-z0-9][A-Za-z0-9\-:/.]{3,28}[A-Za-z0-9]"),
-       group=1, priority=93),
-    _d("case_number", r"(?<![\w\-])\d{2}[A-Z]{2,4}\d{3,6}(?![\w\-])", priority=70, flags=0),
-    _d("case_number", r"(?<![\w\-])\d{4}-[A-Z]{2,4}-\d{3,6}(?![\w\-])", priority=70, flags=0),
+       group=1, priority=93,
+       digit=True, kw=("case", "civil", "criminal", "docket", "cause", "court",
+                       "matter", "index", "action", "file", "probate", "juvenile",
+                       "adversary", "appe")),
+    _d("case_number", r"(?<![\w\-])\d{2}[A-Z]{2,4}\d{3,6}(?![\w\-])", priority=70, flags=0,
+       digit=True),
+    _d("case_number", r"(?<![\w\-])\d{4}-[A-Z]{2,4}-\d{3,6}(?![\w\-])", priority=70, flags=0,
+       digit=True),
     _d("case_name",
        r"(?-i:\b[A-Z][A-Za-z'\-]+(?:[^\S\n]+[A-Z][A-Za-z'.\-]+){0,3}[^\S\n]+v\.?s?\.[^\S\n]+"
-       r"[A-Z][A-Za-z'\-]+(?:[^\S\n]+[A-Z][A-Za-z'.\-]+){0,3})", priority=64),
+       r"[A-Z][A-Za-z'\-]+(?:[^\S\n]+[A-Z][A-Za-z'.\-]+){0,3})", priority=64,
+       kw=("v.", "vs")),
     _d("case_designator", labeled(("bar\\s+code", "tracking\\s*(?:no\\.?|number|#)", "efiling\\s*(?:id|no\\.?|number|#)",
                                    "e-?filed\\s+document", "envelope\\s*(?:no\\.?|number|#)",
                                    "submission\\s*(?:id|no\\.?|number|#)", "exhibit\\s*(?:no\\.?|number|#)\\s*\\(case\\)")),
-       group=1, priority=80),
+       group=1, priority=80,
+       digit=True, kw=("bar", "tracking", "filing", "filed", "envelope",
+                       "submission", "exhibit")),
 
     # -------------------------------------------------------------- vital ----
     _d("dob", labeled(("d\\.?o\\.?b\\.?", "date\\s+of\\s+birth", "birth\\s*date", "born\\s+on", "date\\s+born",
-                       "birthday"), V_DATE), group=1, priority=95),
-    _d("dob", rf"\bborn\s+(?:on\s+)?({V_DATE})", group=1, priority=94),
+                       "birthday"), V_DATE), group=1, priority=95,
+       digit=True, kw=("dob", "d.o", "do.", "birth", "born")),
+    _d("dob", rf"\bborn\s+(?:on\s+)?({V_DATE})", group=1, priority=94,
+       digit=True, kw=("born",)),
     _d("pob", labeled(("place\\s+of\\s+birth", "birth\\s*place", "born\\s+(?:in|at)", "city\\s+of\\s+birth",
                        "state\\s+of\\s+birth", "country\\s+of\\s+birth"),
                       r"(?-i:[A-Z][\w'\-]*(?:\s+[A-Z][\w'\-]*){0,3}(?:,\s*[A-Z][\w'\-]*(?:\s+[A-Z][\w'\-]*){0,3}){0,2})"),
-       group=1, priority=92),
+       group=1, priority=92,
+       kw=("birth", "born")),
 )
 
 
@@ -427,10 +542,17 @@ def scan(
     protected = list(protected or [])
     allowed = set(enabled) if enabled is not None else None
     found: list[Match] = []
+    lower = text.lower()
+    has_digit = any(ch.isdigit() for ch in text)
 
     for det in DETECTORS:
         if allowed is not None and det.category not in allowed:
             continue
+        if PREFILTER:
+            if det.needs_digit and not has_digit:
+                continue
+            if det.keywords and not any(k in lower for k in det.keywords):
+                continue
         for m in det.regex.finditer(text):
             try:
                 value = m.group(det.group)

@@ -268,6 +268,13 @@ class App(Tk):
         self._init_theme()
         self._build()
         self.after(100, self._drain)
+        # pay the multi-second spaCy model load in the background at startup,
+        # not inside the operator's first "scan for more names" click
+        self.after(500, self._preload_ner)
+
+    def _preload_ner(self) -> None:
+        if self.opt_ner.get():
+            threading.Thread(target=ner.load, daemon=True).start()
 
     # ------------------------------------------------------------- theme --
     def _init_theme(self) -> None:

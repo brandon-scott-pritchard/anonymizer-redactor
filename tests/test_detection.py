@@ -198,3 +198,41 @@ def test_refine_leaves_other_categories_alone():
 
 def test_norp_is_not_mapped_to_organization():
     assert "NORP" not in ner.LABEL_MAP
+
+
+# ------------------------------------------------------------- prefilters --
+
+# Adversarial texts aimed at every prefilter: digit-free values, dotted label
+# variants, keyword-free prose. Turning the prefilters off must never change
+# what scan() or allowlist_spans() returns on any of them.
+PREFILTER_PROBES = [
+    "Ordinary prose about the family home, the marriage, and the children.",
+    "The parties agree that the marital estate shall be divided equitably.",
+    "Recorded in Book Seven, at Pages Twelve through Fourteen.",
+    "Lot A, Block B, Willow Creek Subdivision.",
+    "Device address AB:CD:EF:AB:CD:EF was seen on the network.",
+    "SWIFT: ABCDEF GH and the account SWIFT/BIC CDEFABZZ.",
+    "Her PayPal handle is @jane-pays; the Venmo handle is @jsmith-slc.",
+    "Petitioner was born in Salt Lake City, Utah.",
+    "See Jones v. Jones and Smith vs. Wesson for the standard.",
+    "Clerk of the Court, Third Judicial District, Judge Amber M. Cordova.",
+    "S.S.N. 528-41-9963 and D.O.B. 04/17/1985 appear on page one.",
+    "The d.l. is X-244-9921 and the A.P.N. 22-14-377-009.",
+    "Tel. 8015550184, fax: 801-555-0199, license plate no. DXKQAA.",
+    "Certificate of insurance no. CI-994412 covers the residence.",
+    "Their 401(k) no. RT-99183772 and the plain account no. 000148829371.",
+    "An e-filed document 22FA1234 with envelope no. 8812.",
+    "Section 30-3-5 and Rule 26 and 42 U.S.C. § 1983 are cited.",
+]
+
+
+def test_prefilters_change_no_output(sample_text, monkeypatch):
+    for text in [sample_text, *PREFILTER_PROBES]:
+        fast_spans = patterns.allowlist_spans(text)
+        fast = patterns.scan(text, protected=fast_spans)
+        monkeypatch.setattr(patterns, "PREFILTER", False)
+        slow_spans = patterns.allowlist_spans(text)
+        slow = patterns.scan(text, protected=slow_spans)
+        monkeypatch.setattr(patterns, "PREFILTER", True)
+        assert fast_spans == slow_spans, f"allowlist differs on: {text!r}"
+        assert fast == slow, f"scan differs on: {text!r}"
