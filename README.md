@@ -34,16 +34,34 @@ Then launch it:
 
 On Windows, double-click `run.bat` instead.
 
-### OCR (optional but recommended)
+### OCR
 
-Scanned PDFs have no text layer. Without OCR the tool **refuses** them rather
-than passing them through looking processed:
+Scanned PDFs are pictures of text with no text layer. Two engines handle them,
+tried in order:
+
+1. **Tesseract** — preferred. `vendor_tesseract_macos.py` copies the binary, its
+   whole dylib chain and `eng.traineddata` into `vendor/`, rewrites the absolute
+   Homebrew paths to relative ones, and re-signs everything, so the frozen app
+   works on a Mac that has never installed Homebrew. A system install on PATH is
+   used if no vendored copy is present.
+2. **RapidOCR** — fallback, and an ordinary pip dependency with its ONNX models
+   inside the package. It needs no binary, no vendoring and no architecture
+   match, so OCR works out of the box everywhere — including on Windows, where
+   vendoring Tesseract is entirely optional.
+
+Only if *both* are unavailable does the tool refuse a scanned page, and it
+refuses rather than writing a file that looks redacted without being redacted.
+
+To bundle Tesseract into the macOS app:
 
 ```bash
 brew install tesseract
+python3 vendor_tesseract_macos.py
+./build_macos.sh
 ```
 
-On Windows: <https://github.com/UB-Mannheim/tesseract/wiki>
+The equivalent on Windows is `python vendor_tesseract_windows.py`, run on a
+Windows machine with Tesseract installed. Skip it and RapidOCR covers you.
 
 ---
 
@@ -153,8 +171,12 @@ are handled:
   a photographed bank statement inside a DOCX is still readable. The tool counts
   them and warns; review them by hand.
 - **Handwriting is not read by OCR.**
-- **Image-only PDFs are refused** when OCR is unavailable, rather than written
-  out looking redacted. That is deliberate.
+- **Image-only PDFs are refused** when no OCR engine is available, rather than
+  written out looking redacted. That is deliberate.
+- **OCR word boxes are approximate**, especially RapidOCR's, which detects whole
+  lines and apportions word positions across them by character offset. Boxes are
+  padded generously to compensate — a box slightly too wide costs nothing, one
+  slightly too narrow leaves text on the page.
 - **A shared surname cannot be half-removed.** If both parties are named Smith
   and you exclude one of them, "Smith" still goes — the same six letters cannot
   be simultaneously kept and replaced.
@@ -223,8 +245,10 @@ redactor/
   docx_processor.py   OOXML-level DOCX reading and rewriting
   pdf_processor.py    PyMuPDF redaction and the OCR path
   pipeline.py         orchestration, archive, report
+  ocr.py              OCR back ends and locating the bundled Tesseract
   gui.py              the four-step Tkinter front end
 build/                PyInstaller spec and frozen-app entry point
+vendor/               vendored Tesseract (gitignored; rebuild with the scripts)
 tests/                the suite described above
 samples/              example pleading in DOCX and PDF
 ```

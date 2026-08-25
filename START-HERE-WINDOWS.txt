@@ -55,23 +55,23 @@ the .exe - no Python needed on that machine.
 
 
 --------------------------------------------------------------------
-STEP 2 - OCR FOR SCANNED PDFS  (optional, recommended)
+STEP 2 - OCR FOR SCANNED PDFS  (nothing to do)
 --------------------------------------------------------------------
 
-Scanned PDFs are pictures of text with no text layer. Without OCR,
-the tool REFUSES them rather than handing back a file that looks
-redacted but is not.
+Scanned PDFs are pictures of text with no text layer. Reading them
+needs OCR, and OCR is already included - it installs automatically
+along with everything else in Step 1. There is nothing for you to do
+here.
 
-To handle them, install Tesseract:
+If you would rather use Tesseract specifically, it is optional:
 
-    https://github.com/UB-Mannheim/tesseract/wiki
+    1. Install it from
+       https://github.com/UB-Mannheim/tesseract/wiki
+       (the 64-bit installer)
+    2. Run:  python vendor_tesseract_windows.py
+    3. Rebuild with build_windows.bat
 
-Download the 64-bit installer, run it, and tick "Add to PATH" if the
-installer offers it. Otherwise add this to your PATH by hand:
-
-    C:\Program Files\Tesseract-OCR
-
-Restart the app afterwards.
+Skip all of that unless you have a reason to want it.
 
 
 --------------------------------------------------------------------
@@ -119,7 +119,9 @@ Windows SmartScreen blocks the .exe
     expected for an in-house tool.
 
 A PDF was refused
-    It is a scan with no text layer. Install Tesseract (Step 2).
+    It is a scan and OCR could not start. Re-run run.bat so the
+    dependencies finish installing, and check the log on the Run tab -
+    it names the OCR engine it found, or says why it found none.
 
 Test it on the files in the samples\ folder before you use it on
 anything real.

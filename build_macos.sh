@@ -18,6 +18,13 @@ cp -R "$HERE/redactor" "$STAGE/src/"
 cp "$HERE/requirements.txt" "$STAGE/src/"
 cp "$HERE/build/launcher.py" "$STAGE/src/"
 cp "$HERE/build/redactor.spec" "$STAGE/src/"
+if [ -d "$HERE/vendor" ]; then
+  echo "    including vendored Tesseract"
+  cp -R "$HERE/vendor" "$STAGE/src/"
+else
+  echo "    NOTE: no vendor/ directory - run vendor_tesseract_macos.py first if"
+  echo "          you want Tesseract bundled. RapidOCR still ships as a fallback."
+fi
 
 echo "==> Creating build environment"
 python3 -m venv "$BUILD_VENV"
@@ -43,7 +50,7 @@ Built: dist/Anonymizer-Redactor.app
 The app is not code-signed, so the first launch needs a right-click > Open,
 then "Open" again in the dialog. After that it opens normally.
 
-OCR still depends on the Tesseract binary being installed on the machine
-(brew install tesseract). Without it, scanned PDFs are refused rather than
-passed through unredacted.
+OCR travels with the app: the vendored Tesseract is unpacked on first use,
+and RapidOCR is bundled as a fallback. Nothing needs installing on the
+machine that runs it.
 NOTE

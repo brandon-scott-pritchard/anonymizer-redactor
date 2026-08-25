@@ -17,13 +17,14 @@ from pathlib import Path
 
 import pymupdf
 
-from . import categories, engine
+from . import categories, engine, ocr
 from .engine import Hit, PersonMatcher, Settings
 from .mapping import MappingStore
 
 OCR_DPI = 300
 MIN_TEXT_CHARS = 12          # below this a page is treated as image-only
-BOX_PADDING = 1.0            # points of slack around each redaction box
+BOX_PADDING = 1.0            # points of slack around an exact text box
+OCR_BOX_PADDING = 3.0        # OCR boxes are approximate, so they get more
 
 
 @dataclass
@@ -54,27 +55,9 @@ class PdfResult:
 # OCR availability
 # --------------------------------------------------------------------------
 
-_ocr_error: str | None = None
-
-
 def ocr_available() -> tuple[bool, str]:
-    """(can we OCR, human-readable explanation)."""
-    global _ocr_error
-    try:
-        import pytesseract
-    except Exception as exc:                      # pragma: no cover - env dependent
-        _ocr_error = f"pytesseract is not installed ({exc})"
-        return False, _ocr_error
-    try:
-        version = pytesseract.get_tesseract_version()
-    except Exception:                             # pragma: no cover - env dependent
-        _ocr_error = (
-            "the Tesseract binary was not found. Install it with "
-            "'brew install tesseract' on macOS, or from "
-            "https://github.com/UB-Mannheim/tesseract/wiki on Windows."
-        )
-        return False, _ocr_error
-    return True, f"Tesseract {version}"
+    """(can we OCR, which engine)."""
+    return ocr.describe()
 
 
 # --------------------------------------------------------------------------
@@ -108,7 +91,7 @@ def _words_to_text(words) -> tuple[str, list[tuple[int, int, pymupdf.Rect]]]:
     return "".join(pieces), spans
 
 
-def _rects_for_hit(hit: Hit, spans) -> list[pymupdf.Rect]:
+def _rects_for_hit(hit: Hit, spans, padding: float = BOX_PADDING) -> list[pymupdf.Rect]:
     """Boxes covering a hit, one per line the hit crosses."""
     lines: list[pymupdf.Rect] = []
     for start, end, rect in spans:
@@ -127,7 +110,7 @@ def _rects_for_hit(hit: Hit, spans) -> list[pymupdf.Rect]:
                 break
         if not placed:
             lines.append(pymupdf.Rect(rect))
-    return [r + (-BOX_PADDING, -BOX_PADDING, BOX_PADDING, BOX_PADDING) for r in lines]
+    return [r + (-padding, -padding, padding, padding) for r in lines]
 
 
 # --------------------------------------------------------------------------
@@ -137,32 +120,21 @@ def _rects_for_hit(hit: Hit, spans) -> list[pymupdf.Rect]:
 
 def _ocr_words(page: pymupdf.Page):
     """OCR one page, returning words in PDF coordinates."""
-    import pytesseract
     from PIL import Image
+
+    engine, _note = ocr.select_engine()
+    if engine is None:
+        return []
 
     scale = OCR_DPI / 72.0
     pixmap = page.get_pixmap(dpi=OCR_DPI, colorspace=pymupdf.csRGB)
     image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
-    data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
 
-    words = []
-    for i, raw in enumerate(data["text"]):
-        word = (raw or "").strip()
-        if not word:
-            continue
-        try:
-            confidence = float(data["conf"][i])
-        except (TypeError, ValueError):
-            confidence = -1.0
-        if confidence < 0:
-            continue
-        left, top = data["left"][i], data["top"][i]
-        width, height = data["width"][i], data["height"][i]
-        words.append((
-            left / scale, top / scale, (left + width) / scale, (top + height) / scale,
-            word, data["block_num"][i], data["line_num"][i], data["word_num"][i],
-        ))
-    return words
+    return [
+        (w.x0 / scale, w.y0 / scale, w.x1 / scale, w.y1 / scale,
+         w.text, w.block, w.line, w.word)
+        for w in engine.read(image)
+    ]
 
 
 # --------------------------------------------------------------------------
@@ -292,7 +264,8 @@ def process(
                 entity = store.entities.get(hit.entity_key)
                 if entity is not None:
                     store.record_hit(entity, document_label)
-                for rect in _rects_for_hit(hit, spans):
+                padding = OCR_BOX_PADDING if report.ocr_used else BOX_PADDING
+                for rect in _rects_for_hit(hit, spans, padding):
                     if rect.is_empty or rect.is_infinite:
                         continue
                     annot_text = ""

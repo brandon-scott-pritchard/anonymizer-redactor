@@ -4,6 +4,8 @@
 # project path contains a colon, which PyInstaller cannot handle.
 # Run it through build_macos.sh or build_windows.bat rather than by hand.
 
+from pathlib import Path
+
 from PyInstaller.utils.hooks import collect_all
 
 datas, binaries, hiddenimports = [], [], []
@@ -23,9 +25,32 @@ for package in (
     binaries += pkg_binaries
     hiddenimports += pkg_hidden
 
+# The OCR fallback ships its models inside the package, so collect_all carries
+# both the code and the .onnx files.
+for package in ("rapidocr_onnxruntime", "onnxruntime", "rapidocr"):
+    try:
+        pkg_datas, pkg_binaries, pkg_hidden = collect_all(package)
+    except Exception:
+        continue
+    datas += pkg_datas
+    binaries += pkg_binaries
+    hiddenimports += pkg_hidden
+
+# The vendored Tesseract, shipped as a tarball rather than a loose tree.
+# PyInstaller inspects every Mach-O file it is given: it rewrites load commands
+# and deduplicates libraries by basename across the whole build, which silently
+# replaced the vendored libtesseract with a different version. A .tar.gz is
+# opaque to all of that, so exactly what was vendored is what ships. ocr.py
+# unpacks it once, on first use.
+_vendor = Path(SPECPATH) / "vendor"
+if _vendor.is_dir():
+    for archive in _vendor.glob("tesseract-*.tar.gz"):
+        datas.append((str(archive), "vendor"))
+
 hiddenimports += [
     "pymupdf", "fitz", "lxml.etree", "lxml._elementpath",
     "cryptography.hazmat.primitives.kdf.pbkdf2", "pytesseract", "PIL.Image",
+    "numpy",
 ]
 
 a = Analysis(

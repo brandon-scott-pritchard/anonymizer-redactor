@@ -3,5 +3,7 @@ PyMuPDF>=1.24,<2          # PDF text extraction and true redaction
 lxml>=5.0,<7              # OOXML manipulation for DOCX
 cryptography>=42,<47      # AES encryption of the mapping key
 spacy>=3.7,<4             # offline NER suggestions (proposals only, never applied blind)
-pytesseract>=0.3.10,<1    # OCR for scanned PDFs (needs the Tesseract binary)
+pytesseract>=0.3.10,<1    # drives Tesseract, bundled in vendor/ or found on PATH
+rapidocr-onnxruntime>=1.3,<2  # OCR fallback: pip-installable, models included,
+                          # so scanned PDFs work even with no Tesseract anywhere
 Pillow>=10,<12            # image handling for the OCR path

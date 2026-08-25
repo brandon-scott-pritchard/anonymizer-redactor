@@ -19,8 +19,10 @@ INCLUDE_DIRS = ("redactor", "build", "tests", "samples")
 INCLUDE_FILES = (
     "START-HERE-WINDOWS.txt", "README.md", "requirements.txt",
     "requirements-dev.txt", "build_windows.bat", "run.bat",
+    # optional on Windows: RapidOCR already covers scanned PDFs
+    "vendor_tesseract_windows.py",
 )
-SKIP_PARTS = {"__pycache__", ".pytest_cache", ".git", ".DS_Store"}
+SKIP_PARTS = {"__pycache__", ".pytest_cache", ".git", ".DS_Store", "vendor"}
 
 if zip_path.exists():
     zip_path.unlink()
