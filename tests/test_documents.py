@@ -325,3 +325,80 @@ def test_literal_value_matching_still_respects_the_allowlist():
     assert "Rule 26" in result
     assert "Section 30-3-5" in result
     assert "224900871" not in result
+
+
+# ---------------------------------------------------- images & handwriting --
+
+def test_docx_images_are_blacked_out(tmp_path):
+    docx = pytest.importorskip("docx")
+    from PIL import Image
+    import io
+
+    photo = tmp_path / "photo.png"
+    Image.new("RGB", (40, 30), (200, 50, 50)).save(photo)
+    source = tmp_path / "WithPicture.docx"
+    document = docx.Document()
+    document.add_paragraph("Exhibit A - photograph of the residence")
+    document.add_picture(str(photo))
+    document.save(source)
+
+    store = MappingStore()
+    result = docx_processor.process(source, tmp_path / "out.docx", store, Settings())
+    assert result.images_redacted == 1
+
+    with zipfile.ZipFile(tmp_path / "out.docx") as zf:
+        media = [n for n in zf.namelist() if n.startswith("word/media/")]
+        assert media, "the image must remain in place, blacked, not vanish"
+        with Image.open(io.BytesIO(zf.read(media[0]))) as image:
+            assert image.size == (40, 30), "layout depends on the original size"
+            assert set(image.convert("RGB").getdata()) == {(0, 0, 0)}
+
+
+def test_docx_images_pass_through_when_the_option_is_off(tmp_path):
+    docx = pytest.importorskip("docx")
+    from PIL import Image
+
+    photo = tmp_path / "photo.png"
+    Image.new("RGB", (10, 10), (1, 2, 3)).save(photo)
+    source = tmp_path / "WithPicture.docx"
+    document = docx.Document()
+    document.add_paragraph("body")
+    document.add_picture(str(photo))
+    document.save(source)
+
+    store = MappingStore()
+    settings = Settings(redact_images=False)
+    result = docx_processor.process(source, tmp_path / "out.docx", store, settings)
+    assert result.images_redacted == 0
+    assert any("copied through unchanged" in w for w in result.warnings)
+
+
+def test_pdf_images_on_text_pages_are_blacked(tmp_path):
+    import pymupdf
+    from PIL import Image
+
+    photo = tmp_path / "photo.png"
+    Image.new("RGB", (60, 40), (10, 200, 10)).save(photo)
+    source = tmp_path / "withimg.pdf"
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 80), "Exhibit A - a photograph of the property follows")
+    page.insert_image(pymupdf.Rect(72, 100, 232, 200), filename=str(photo))
+    doc.save(source)
+    doc.close()
+
+    store = MappingStore()
+    result = pdf_processor.process(source, tmp_path / "out.pdf", store, Settings())
+    assert not result.refused
+    assert result.images_redacted >= 1
+    with pymupdf.open(tmp_path / "out.pdf") as done:
+        pix = done[0].get_pixmap(clip=pymupdf.Rect(90, 120, 210, 180))
+        assert set(pix.samples) == {0}, "the image region must be solid black"
+
+
+def test_prescan_records_occurrence_counts(sample_docx):
+    store = loaded_store()
+    pipeline.prescan([sample_docx], store, Settings())
+    jane = next(e for e in store.entities.values() if "Jane" in e.canonical)
+    assert jane.occurrences > 0
+    assert jane.documents == {sample_docx.name}

@@ -105,9 +105,19 @@ def caption_region(text: str, max_lines: int = 70) -> str:
 def _clean(raw: str) -> str:
     name = " ".join(raw.replace("’", "'").split())
     name = name.strip(" ,.;:-")
-    # drop a trailing role word that got swept into the match
-    name = _ROLE_RE.sub("", name).strip(" ,.;:-")
-    return " ".join(name.split())
+    # Drop a trailing role word that got swept into the match. After a comma
+    # it is always furniture ("JOHN WARD, Petitioner"); bare at the end it is
+    # only dropped when at least two name tokens remain, so a party actually
+    # surnamed Ward or Decedent keeps their name.
+    comma_role = re.search(rf",\s*(?:{ROLE_ALT})\s*$", name, re.IGNORECASE)
+    if comma_role:
+        name = name[:comma_role.start()]
+    else:
+        stripped = re.sub(rf"\s+(?:{ROLE_ALT})\s*$", "", name,
+                          flags=re.IGNORECASE).strip(" ,.;:-")
+        if len(stripped.split()) >= 2:
+            name = stripped
+    return " ".join(name.strip(" ,.;:-").split())
 
 
 def plausible_name(raw: str) -> bool:

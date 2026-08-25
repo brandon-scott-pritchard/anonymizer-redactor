@@ -96,7 +96,40 @@ class MappingStore:
         )
         self.entities[key] = entity
         self._used_replacements.add(surrogate.canonical.casefold())
+        # An earlier person may have been handed a surrogate that IS this new
+        # real person's name - presenting a real party's true name as someone
+        # else's fake would de-anonymize them. Re-issue any such surrogate.
+        # All clashing surrogates are cleared before regenerating, or the
+        # shared-family-surname scan would just echo the clashing surname back.
+        clashing = []
+        for other in self.entities.values():
+            if other is entity or not other.is_person or other.surrogate is None:
+                continue
+            if other.person is None:
+                continue
+            clash = (other.surrogate.canonical.casefold() == parsed.canonical.casefold()
+                     or (parsed.last and other.surrogate.last
+                         and other.surrogate.last.casefold() == parsed.last.casefold()))
+            if clash:
+                clashing.append(other)
+        for other in clashing:
+            self._used_replacements.discard(other.surrogate.canonical.casefold())
+            other.surrogate = None
+        for other in clashing:
+            other.surrogate = self._unique_person_surrogate(other.person)
+            other.replacement = other.surrogate.canonical
+            self._used_replacements.add(other.surrogate.canonical.casefold())
         return entity
+
+    def _real_person_names(self) -> set[str]:
+        """Real names (and surnames) no surrogate may collide with."""
+        out: set[str] = set()
+        for entity in self.entities.values():
+            if entity.is_person and entity.person is not None:
+                out.add(entity.person.canonical.casefold())
+                if entity.person.last:
+                    out.add(entity.person.last.casefold())
+        return out
 
     def _shared_surrogate_surname(self, last: str) -> str | None:
         """People who share a surname must share a fake surname.
@@ -119,6 +152,7 @@ class MappingStore:
     def _unique_person_surrogate(self, parsed: _names.PersonName) -> _names.PersonName:
         want_middle = bool(parsed.middles)
         shared_last = self._shared_surrogate_surname(parsed.last)
+        real = self._real_person_names()
         for attempt in range(64):
             candidate = surrogates.person(parsed.canonical, want_middle, attempt)
             if shared_last:
@@ -128,9 +162,17 @@ class MappingStore:
                     middles=candidate.middles,
                     last=shared_last,
                 )
-            if candidate.canonical.casefold() in self._used_replacements:
+            folded = candidate.canonical.casefold()
+            if folded in self._used_replacements:
                 continue
-            if candidate.canonical.casefold() == parsed.canonical.casefold():
+            if folded == parsed.canonical.casefold():
+                continue
+            # never hand out a real registered person's name - or surname,
+            # unless it is the deliberately shared family surrogate - as fake
+            if folded in real:
+                continue
+            if (not shared_last and candidate.last
+                    and candidate.last.casefold() in real):
                 continue
             return candidate
         return surrogates.person(parsed.canonical, want_middle, 999)

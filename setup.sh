@@ -24,8 +24,8 @@ if command -v tesseract >/dev/null 2>&1; then
   echo "==> Tesseract found: $(tesseract --version 2>&1 | head -1)"
 else
   echo "==> Tesseract is NOT installed."
-  echo "    Without it, scanned PDFs with no text layer are refused rather than"
-  echo "    passed through unredacted. Install it with:"
+  echo "    Scanned PDFs still work - RapidOCR is installed with the app and"
+  echo "    covers them. Install Tesseract only if you want that engine:"
   echo "        brew install tesseract"
 fi
 

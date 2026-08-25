@@ -234,6 +234,7 @@ class RowEditor(tk.Toplevel):
         self.bind("<Return>", lambda _e: self._save())
         self.bind("<Escape>", lambda _e: self.destroy())
         self.grab_set()
+        self.focus_set()       # grab_set redirects the pointer, not the keys
 
     def _save(self) -> None:
         self.result = (
@@ -262,6 +263,9 @@ class App(Tk):
         self._dialog: ProgressDialog | None = None
         # checked state lives here, not in the widgets - the images are paint
         self._suggest_checked: set[str] = set()
+        # every iid ever rendered, so re-renders can tell "new row, apply the
+        # confidence default" from "existing row the operator unticked"
+        self._suggest_seen: set[str] = set()
         # iid -> (name, category key); the row's identity, never parsed from iids
         self._suggest_meta: dict[str, tuple[str, str]] = {}
         self._img_checked, self._img_unchecked = _checkbox_images()
@@ -435,6 +439,7 @@ class App(Tk):
         self.opt_comments = BooleanVar(value=True)
         self.opt_embedded = BooleanVar(value=True)
         self.opt_filenames = BooleanVar(value=True)
+        self.opt_images = BooleanVar(value=True)
         self.opt_ocr = BooleanVar(value=True)
         self.opt_ner = BooleanVar(value=True)
         self.opt_labels = BooleanVar(value=False)
@@ -443,6 +448,7 @@ class App(Tk):
             ("Comments and tracked changes", self.opt_comments),
             ("Hyperlink targets, bookmarks, attachments, embedded scripts", self.opt_embedded),
             ("Client identifiers in the file names themselves", self.opt_filenames),
+            ("Every embedded image and drawn-ink handwriting (blacked out whole)", self.opt_images),
             ("OCR scanned PDFs that have no text layer", self.opt_ocr),
             ("Ask the offline model to suggest additional names", self.opt_ner),
             ("Label each PDF black box with its category", self.opt_labels),
@@ -699,6 +705,7 @@ class App(Tk):
             anonymize_filenames=self.opt_filenames.get(),
             label_redaction_boxes=self.opt_labels.get(),
             ocr_scanned_pdfs=self.opt_ocr.get(),
+            redact_images=self.opt_images.get(),
         )
 
     # ------------------------------------------------------------- names --
@@ -781,12 +788,17 @@ class App(Tk):
 
     def _render_suggestions(self):
         self.suggest_tree.delete(*self.suggest_tree.get_children())
+        # ticks the operator already made survive a re-render; confidence
+        # defaults apply only to rows never seen before
+        previous = set(self._suggest_checked)
+        seen = self._suggest_seen
         self._suggest_checked.clear()
         self._suggest_meta.clear()
         for item in self.caption_names:
             iid = f"cap::{item.key}"
-            if item.confidence == "high":
+            if (iid in previous) or (iid not in seen and item.confidence == "high"):
                 self._suggest_checked.add(iid)
+            seen.add(iid)
             self._suggest_meta[iid] = (item.name, item.category)
             self.suggest_tree.insert(
                 "", "end", iid=iid, text="",
@@ -795,9 +807,13 @@ class App(Tk):
             )
         for item in self.suggestions:
             iid = f"ner::{item.key}"
+            if iid in previous:
+                self._suggest_checked.add(iid)
+            seen.add(iid)
             self._suggest_meta[iid] = (item.text, item.category)
             self.suggest_tree.insert(
-                "", "end", iid=iid, text="", image=self._img_unchecked,
+                "", "end", iid=iid, text="",
+                image=self._img_checked if iid in self._suggest_checked else self._img_unchecked,
                 values=(item.text, categories.label_for(item.category),
                         f"x{item.count}", "; ".join(sorted(item.documents))[:40]),
             )
@@ -824,8 +840,10 @@ class App(Tk):
         if not iid:
             return
         column = self.suggest_tree.identify_column(event.x)
-        if column in ("#0", "#1"):
+        if column == "#1":
             self._suggest_toggle(iid)
+        elif column == "#0":
+            pass       # the single-click handler already toggled this press
         elif column == "#2":
             self._edit_suggestion_row(iid)
         return "break"
@@ -906,15 +924,65 @@ class App(Tk):
             return
         self._unlock(self.tab_review)
         self.notebook.select(self.tab_review)
+        # a rescan must not discard what the operator already decided: keep
+        # each row's tick, type override and edited replacement, matched by
+        # the found text
+        carryover = {
+            entity.canonical.casefold():
+                (entity.enabled, entity.category, entity.replacement)
+            for entity in self.store.entities.values()
+        }
         store = self._store_with_names()
         settings = self.settings()
         files = list(self.files)
 
         def work(report):
             pipeline.prescan(files, store, settings, report)
+            self._carry_decisions(store, carryover)
             return store
 
         self._work("Scanning documents", work, self._review_ready)
+
+    @staticmethod
+    def _carry_decisions(store: MappingStore, carryover: dict) -> None:
+        """Re-apply the operator's earlier review decisions to a fresh scan."""
+        taken = {e.replacement for e in store.entities.values()}
+        for entity in list(store.entities.values()):
+            previous = carryover.get(entity.canonical.casefold())
+            if previous is None:
+                continue
+            enabled, category, replacement = previous
+            if category != entity.category:
+                survivor = store.get(category, entity.canonical)
+                if survivor is not None and survivor is not entity:
+                    survivor.occurrences += entity.occurrences
+                    survivor.documents |= entity.documents
+                    del store.entities[entity.key]
+                    entity = survivor
+                else:
+                    del store.entities[entity.key]
+                    if categories.style_for(category) == "person":
+                        fresh = store.add_person(entity.canonical, category=category,
+                                                 role=entity.role, source=entity.source)
+                    else:
+                        fresh = store.add_value(category, entity.canonical,
+                                                source=entity.source)
+                    if fresh is None:
+                        store.entities[entity.key] = entity
+                    else:
+                        fresh.occurrences = entity.occurrences
+                        fresh.documents = entity.documents
+                        entity = fresh
+            # restore an edited replacement, but never mint a duplicate
+            # placeholder if numbering shifted between scans
+            if (replacement and replacement != entity.replacement
+                    and category == entity.category
+                    and replacement not in taken):
+                entity.replacement = replacement
+                if entity.is_person and entity.surrogate is not None:
+                    from . import names as _names
+                    entity.surrogate = _names.parse(replacement)
+            entity.enabled = enabled
 
     def _review_ready(self, store: MappingStore):
         self.store = store
@@ -963,10 +1031,13 @@ class App(Tk):
         if not iid:
             return
         column = self.review_tree.identify_column(event.x)
-        if column in ("#0", "#1"):
-            # the two single-click toggles on #0 have already fired and
-            # cancelled out; this third one is the single net toggle
+        if column == "#1":
             self._review_toggle(iid)
+        elif column == "#0":
+            # Tk delivers press one as <Button-1> and press two as ONLY
+            # <Double-1>: the single-click handler already toggled once, so
+            # doing anything here would flip it straight back
+            pass
         elif column in ("#2", "#3"):
             self._edit_review_row(iid)
         return "break"       # Times and How-found stay inert
@@ -1046,6 +1117,19 @@ class App(Tk):
 
     def _retype_entity(self, entity, new_category):
         """Re-register ``entity`` under ``new_category``; None if it will not parse."""
+        if (categories.style_for(new_category) == "person"
+                and not any(ch.isalpha() for ch in entity.canonical)):
+            # "528-41-9963" parses as a "name" and would be replaced by an
+            # invented human name; refuse rather than invent
+            return None
+        existing = self.store.get(new_category, entity.canonical)
+        if existing is not None and existing is not entity:
+            # the same text is already registered under the target type -
+            # merge into the survivor instead of clobbering its state
+            existing.occurrences += entity.occurrences
+            existing.documents |= entity.documents
+            del self.store.entities[entity.key]
+            return existing
         del self.store.entities[entity.key]
         if categories.style_for(new_category) == "person":
             fresh = self.store.add_person(entity.canonical, category=new_category,
@@ -1100,7 +1184,8 @@ class App(Tk):
             return
         if messagebox.askyesno(
                 "Send report?",
-                f"The report was saved to\n{path}\n\n"
+                f"The report was saved to\n{path}\n(stored unencrypted on this "
+                "computer - it contains the flagged text).\n\n"
                 f"Open an email to {feedback.REPORT_ADDRESS} with this report? "
                 "You will see the draft before anything is sent."):
             webbrowser.open(feedback.mailto_url(report))
@@ -1127,6 +1212,15 @@ class App(Tk):
         if not self.files:
             messagebox.showwarning("No documents", "Add at least one document first.")
             return
+        if not self.key_password.get().strip():
+            # the field can be emptied after tab 1's check; running without a
+            # password would silently ship no mapping key - unrecoverable
+            messagebox.showwarning(
+                "No password",
+                "The mapping-key password is empty. Set one on the first tab "
+                "(or press New), or the original-to-replacement table cannot "
+                "be written and the mapping is unrecoverable.")
+            return
         if not self.store.entities:
             if not messagebox.askyesno(
                 "Nothing to replace",
@@ -1136,7 +1230,9 @@ class App(Tk):
         settings = self.settings()
         if settings.ocr_scanned_pdfs:
             ok, note = pdf_processor.ocr_available()
-            if not ok:
+            if ok:
+                self._log(f"OCR engine: {note}")
+            else:
                 self._log(f"OCR unavailable: {note}")
                 self._log("Image-only PDFs will be refused rather than passed through.")
 
@@ -1223,36 +1319,52 @@ class App(Tk):
         try:
             while True:
                 message = self._queue.get_nowait()
-                kind = message[0]
-                if kind == "progress":
-                    self.status.set(message[1])
-                    fraction = message[2]
-                    if fraction:
-                        self._progress_mode("determinate")
-                        self.progress.configure(value=fraction * 100)
-                    else:
-                        # no fraction yet - keep visibly moving, not stuck at 0
-                        self._progress_mode("indeterminate")
-                    if self._dialog is not None:
-                        self._dialog.update_progress(message[1], message[2])
-                elif kind == "done":
+                try:
+                    self._dispatch(message)
+                except Exception:
+                    # a broken callback must cost one error dialog, not the
+                    # pump - with the pump dead the next step's modal would
+                    # grab the UI and never receive its "done"
                     self._busy = False
-                    self._progress_mode("determinate")
-                    self.progress.configure(value=100)
                     self._close_dialog()
-                    message[1](message[2])
-                elif kind == "error":
-                    self._busy = False
-                    self._progress_mode("determinate")
-                    self.progress.configure(value=0)
-                    self._close_dialog()
-                    self.status.set(message[1])
-                    self._log(message[2])
-                    self.run_button.configure(state="normal")
-                    messagebox.showerror("Something went wrong", message[1])
+                    self._log(traceback.format_exc())
+                    self.status.set("Something went wrong updating the window - see the log.")
         except queue.Empty:
             pass
-        self.after(100, self._drain)
+        finally:
+            try:
+                self.after(100, self._drain)
+            except tk.TclError:                    # pragma: no cover - closing
+                pass
+
+    def _dispatch(self, message):
+        kind = message[0]
+        if kind == "progress":
+            self.status.set(message[1])
+            fraction = message[2]
+            if fraction:
+                self._progress_mode("determinate")
+                self.progress.configure(value=fraction * 100)
+            else:
+                # no fraction yet - keep visibly moving, not stuck at 0
+                self._progress_mode("indeterminate")
+            if self._dialog is not None:
+                self._dialog.update_progress(message[1], message[2])
+        elif kind == "done":
+            self._busy = False
+            self._progress_mode("determinate")
+            self.progress.configure(value=100)
+            self._close_dialog()
+            message[1](message[2])
+        elif kind == "error":
+            self._busy = False
+            self._progress_mode("determinate")
+            self.progress.configure(value=0)
+            self._close_dialog()
+            self.status.set(message[1])
+            self._log(message[2])
+            self.run_button.configure(state="normal")
+            messagebox.showerror("Something went wrong", message[1])
 
     def _progress_mode(self, mode: str) -> None:
         if str(self.progress.cget("mode")) == mode:

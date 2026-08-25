@@ -291,3 +291,91 @@ def test_review_rows_are_zebra_striped(app):
     rows = app.review_tree.get_children()
     stripes = [app.review_tree.item(iid, "tags") for iid in rows]
     assert list(stripes[0]) == [] and "stripe" in stripes[1]
+
+
+# ------------------------------------------------- review-decision safety --
+
+def test_rescan_preserves_review_decisions(app):
+    from redactor.mapping import MappingStore
+
+    store, iid = _review_row(app)
+    store.entities[iid].enabled = False
+    carry = {e.canonical.casefold(): (e.enabled, e.category, e.replacement)
+             for e in store.entities.values()}
+
+    fresh = MappingStore()
+    fresh.add_person("John Michael Smith")
+    app._carry_decisions(fresh, carry)
+    survivor = next(iter(fresh.entities.values()))
+    assert not survivor.enabled, "an untick must survive a rescan"
+
+
+def test_retype_to_person_rejects_digit_strings(app):
+    from redactor.mapping import MappingStore
+
+    store = MappingStore()
+    entity = store.add_value("ssn", "528-41-9963")
+    app.store = store
+    assert app._retype_entity(entity, "person") is None
+    assert entity.key in store.entities, "a refused retype must change nothing"
+
+
+def test_retype_merges_into_an_existing_entity(app):
+    from redactor.mapping import MappingStore
+
+    store = MappingStore()
+    moved = store.add_value("pob", "Salt Lake City")
+    target = store.add_value("location", "Salt Lake City")
+    target.enabled = False
+    moved.occurrences = 3
+    app.store = store
+
+    survivor = app._retype_entity(moved, "location")
+    assert survivor is target
+    assert survivor.occurrences == 3
+    assert not survivor.enabled, "the survivor's tick must not be clobbered"
+    assert moved.key not in store.entities
+
+
+def test_double_click_on_the_checkbox_nets_one_toggle(app):
+    store, iid = _review_row(app)
+    entity = store.entities[iid]
+    before = entity.enabled
+    # the real Tk sequence: press one fires <Button-1>, press two fires ONLY
+    # <Double-1> - not a second <Button-1>
+    app._review_click(_cell_event(app.review_tree, iid, "#0"))
+    app._review_double(_cell_event(app.review_tree, iid, "#0"))
+    assert entity.enabled != before
+
+
+def test_suggestion_ticks_survive_a_rerender(app):
+    from redactor.caption import CaptionName
+
+    app.caption_names = [
+        CaptionName("Jane Ellen Smith", "Petitioner", "doc", "high"),
+        CaptionName("Rob Deakins", "Attorney", "doc", "medium"),
+    ]
+    app._render_suggestions()
+    rows = app.suggest_tree.get_children()
+    high, medium = rows[0], rows[1]
+    assert high in app._suggest_checked
+
+    app._suggest_toggle(high)      # operator unticks the default
+    app._suggest_toggle(medium)    # and ticks the medium one
+    app._render_suggestions()      # a re-read must not undo either
+    assert high not in app._suggest_checked
+    assert medium in app._suggest_checked
+
+
+def test_running_with_an_emptied_password_is_refused(app, monkeypatch):
+    import redactor.gui as gui_mod
+
+    warned = []
+    monkeypatch.setattr(gui_mod.messagebox, "showwarning",
+                        lambda *a, **k: warned.append(a))
+    app.files = [__import__("pathlib").Path("x.docx")]
+    app.key_password.set("   ")
+    started = []
+    monkeypatch.setattr(app, "_work", lambda *a, **k: started.append(1))
+    app.execute()
+    assert warned and not started

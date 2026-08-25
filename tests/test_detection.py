@@ -236,3 +236,72 @@ def test_prefilters_change_no_output(sample_text, monkeypatch):
         monkeypatch.setattr(patterns, "PREFILTER", True)
         assert fast_spans == slow_spans, f"allowlist differs on: {text!r}"
         assert fast == slow, f"scan differs on: {text!r}"
+
+
+# ------------------------------------------------- scan-fix regressions --
+# Each of these encodes a leak confirmed during the full-repo review.
+
+from redactor import engine as _engine
+from redactor.engine import Settings as _Settings
+
+
+def test_an_identifier_starting_with_r_is_not_shielded():
+    """The rules-of-procedure allowlist must not degenerate to bare R+digits."""
+    assert "drivers_license" in categories_found(
+        "Driver's License No. R12345678 was suspended.")
+
+
+@pytest.mark.parametrize("text", [
+    "Rule 26", "Rules of Civil Procedure 12", "Fed. R. Civ. P. 12(b)",
+    "Utah R. Civ. P. 26(b)",
+])
+def test_rule_citations_are_still_protected(text):
+    assert patterns.allowlist_spans(text), text
+
+
+@pytest.mark.parametrize("text,category", [
+    ("SSN: XXX-XX-6789", "ssn"),
+    ("SSN ***-**-6789", "ssn"),
+    ("Card No. XXXX-XXXX-XXXX-1234", "credit_card"),
+    ("debit card ending in 9876", "credit_card"),
+    ("DOB: 1990-01-05", "dob"),
+    ("Facsimile: 801-555-0199", "fax"),
+    ("device at fe80::1 connected", "ip_address"),
+    ("Smith v Jones settled the question.", "case_name"),
+])
+def test_previously_leaking_forms_are_caught(text, category):
+    assert category in categories_found(text)
+
+
+def test_typographic_apostrophes_match_typed_names():
+    store = MappingStore()
+    store.add_person("Sean O'Brien")
+    out, hits = _engine.scan_and_apply(
+        "Mr. O’Brien and Sean O’Brien appeared.", store, _Settings(), "doc")
+    assert "O’Brien" not in out and "O'Brien" not in out
+    assert hits
+
+
+def test_a_surrogate_never_equals_a_real_persons_name():
+    store = MappingStore()
+    first = store.add_person("John Smith")
+    fake = first.replacement
+    late_party = store.add_person(fake)       # a real person named exactly that
+    assert first.replacement.casefold() != late_party.canonical.casefold()
+    assert first.surrogate.last.casefold() != late_party.person.last.casefold()
+
+
+def test_a_party_surnamed_ward_keeps_their_name():
+    assert caption.plausible_name("John Ward")
+    text = "JOHN WARD,\n    Petitioner,\nv.\nJANE WARD,\n    Respondent."
+    found = {c.name for c in caption.harvest(text)}
+    assert "JOHN WARD" in found and "JANE WARD" in found
+
+
+def test_title_and_plural_forms_survive_single_token_off():
+    store = MappingStore()
+    store.add_person("John Smith")
+    settings = _Settings(include_single_token_names=False)
+    out, _hits = _engine.scan_and_apply(
+        "Mr. Smith and the Smiths met.", store, settings, "doc")
+    assert "Mr. Smith" not in out and "the Smiths" not in out

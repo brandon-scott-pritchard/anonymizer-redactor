@@ -101,16 +101,16 @@ def parse(raw: str) -> PersonName:
     if tokens and _SUFFIX_RE.match(tokens[-1]):
         suffix = tokens.pop().rstrip(".")
 
-    # glue particles onto the surname: "van der Berg"
-    glued: list[str] = []
-    for tok in tokens:
-        if glued and tok.lower().strip(".") in PARTICLES and tok is not tokens[-1]:
-            glued.append(tok)
-        else:
-            glued.append(tok)
-    tokens = glued
-    for i in range(len(tokens) - 1):
-        if tokens[i].lower().strip(".") in PARTICLES:
+    # Glue particles onto the surname: "van der Berg". Only a token written
+    # lowercase reads as a particle - capitalised "Al"/"St"/"Mc" are given
+    # names ("Mary Al Smith") - except in ALL-CAPS captions, where case
+    # carries no signal. The first token is never a particle: it is the
+    # first name, even for people actually named Van.
+    all_caps = raw.isupper()
+    for i in range(1, len(tokens) - 1):
+        tok = tokens[i]
+        if (tok.lower().strip(".") in PARTICLES
+                and (tok.islower() or all_caps)):
             tokens = tokens[:i] + [" ".join(tokens[i:])]
             break
 
@@ -245,9 +245,19 @@ def match_case(original: str, replacement: str) -> str:
     return replacement
 
 
+def escape_token(token: str) -> str:
+    """``re.escape`` that also accepts the typographic apostrophe.
+
+    Operators type O'Brien with a straight quote; Word's autocorrect stores
+    O’Brien with U+2019. One written form must match both or the surname
+    leaks everywhere the document uses the other.
+    """
+    return re.escape(token).replace("'", "['’]")
+
+
 def variant_regex(text: str) -> re.Pattern:
     """A word-boundary regex for one variant, tolerant of runs of whitespace."""
-    parts = [re.escape(tok) for tok in text.split()]
+    parts = [escape_token(tok) for tok in text.split()]
     body = r"\s+".join(parts)
     # A trailing apostrophe is let through so possessives ("Smith's") match,
     # while a genuine continuation ("Smithers") still does not.

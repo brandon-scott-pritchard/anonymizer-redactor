@@ -11,25 +11,38 @@ import sys
 
 
 def selftest() -> int:
+    from pathlib import Path
+
     from redactor import __version__, ner, ocr
 
-    print(f"Anonymizer / Redactor {__version__}")
-    print(f"frozen: {getattr(sys, 'frozen', False)}")
+    lines = [f"Anonymizer / Redactor {__version__}",
+             f"frozen: {getattr(sys, 'frozen', False)}"]
 
     archive = ocr._bundled_archive()
-    print(f"vendored OCR archive: {archive or 'not bundled'}")
+    lines.append(f"vendored OCR archive: {archive or 'not bundled'}")
 
     bundled = ocr.bundled_tesseract()
     if bundled:
         binary, tessdata = bundled
-        print(f"tesseract binary:     {binary}")
-        print(f"tessdata:             {tessdata}")
+        lines.append(f"tesseract binary:     {binary}")
+        lines.append(f"tessdata:             {tessdata}")
 
     ok, note = ocr.describe()
-    print(f"OCR engine:           {'OK  ' if ok else 'NONE'} {note}")
+    lines.append(f"OCR engine:           {'OK  ' if ok else 'NONE'} {note}")
 
     model_ok, model_note = ner.available()
-    print(f"language model:       {'OK  ' if model_ok else 'NONE'} {model_note}")
+    lines.append(f"language model:       {'OK  ' if model_ok else 'NONE'} {model_note}")
+
+    report = "\n".join(lines)
+    print(report)
+    # the Windows build is windowed (console=False), so stdout goes nowhere;
+    # a file beside the executable is the only visible result there
+    try:
+        target = Path(sys.executable).resolve().parent / "selftest.txt"
+        target.write_text(report + "\n", encoding="utf-8")
+        print(f"written to {target}")
+    except OSError:
+        pass
 
     return 0 if ok and model_ok else 1
 

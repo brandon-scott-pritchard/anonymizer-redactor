@@ -35,6 +35,7 @@ class PageReport:
     ocr_used: bool = False
     image_only: bool = False
     text_chars: int = 0
+    images_redacted: int = 0
 
 
 @dataclass
@@ -44,6 +45,8 @@ class PdfResult:
     hits: list[Hit] = field(default_factory=list)
     pages: list[PageReport] = field(default_factory=list)
     annotations_removed: int = 0
+    links_removed: int = 0
+    images_redacted: int = 0
     attachments_removed: int = 0
     bookmarks_removed: int = 0
     metadata_scrubbed: bool = False
@@ -118,13 +121,19 @@ def _rects_for_hit(hit: Hit, spans, padding: float = BOX_PADDING) -> list[pymupd
 # --------------------------------------------------------------------------
 
 
-def _ocr_words(page: pymupdf.Page):
-    """OCR one page, returning words in PDF coordinates."""
+def _ocr_words(page: pymupdf.Page, ocr_engine=None):
+    """OCR one page, returning words in PDF coordinates.
+
+    Returns ``None`` - not ``[]`` - when the engine cannot run: an empty list
+    means "a page with nothing on it", while None means "we could not look",
+    and the caller must refuse the page rather than deliver it as clean.
+    """
     from PIL import Image
 
-    engine, _note = ocr.select_engine()
-    if engine is None:
-        return []
+    if ocr_engine is None:
+        ocr_engine, _note = ocr.select_engine()
+    if ocr_engine is None:
+        return None
 
     scale = OCR_DPI / 72.0
     pixmap = page.get_pixmap(dpi=OCR_DPI, colorspace=pymupdf.csRGB)
@@ -133,7 +142,7 @@ def _ocr_words(page: pymupdf.Page):
     return [
         (w.x0 / scale, w.y0 / scale, w.x1 / scale, w.y1 / scale,
          w.text, w.block, w.line, w.word)
-        for w in engine.read(image)
+        for w in ocr_engine.read(image)
     ]
 
 
@@ -197,9 +206,15 @@ def is_image_only(path: Path) -> bool:
 # --------------------------------------------------------------------------
 
 
-def _strip_page_extras(page: pymupdf.Page) -> int:
-    """Remove annotations and form widgets, which carry their own text."""
-    removed = 0
+def _strip_page_extras(page: pymupdf.Page) -> tuple[int, int]:
+    """Remove annotations, form widgets, and links.
+
+    Annotations include FreeText, sticky notes and drawn Ink (a handwritten
+    signature made in a PDF viewer). Links are NOT in ``page.annots()`` - they
+    have their own accessor - and a mailto: or file:// target under redacted
+    text would otherwise survive into the delivered file.
+    """
+    removed = links = 0
     for annot in list(page.annots() or []):
         try:
             page.delete_annot(annot)
@@ -212,7 +227,13 @@ def _strip_page_extras(page: pymupdf.Page) -> int:
             removed += 1
         except Exception:                          # pragma: no cover - defensive
             continue
-    return removed
+    for link in list(page.get_links()):
+        try:
+            page.delete_link(link)
+            links += 1
+        except Exception:                          # pragma: no cover - defensive
+            continue
+    return removed, links
 
 
 def process(
@@ -232,15 +253,21 @@ def process(
     redact_settings = Settings(**{**settings.__dict__, "docx_mode": "redact"})
 
     ocr_ok, ocr_note = ocr_available()
+    # probe once per document, not once per scanned page
+    ocr_engine = ocr.select_engine()[0] if (settings.ocr_scanned_pdfs and ocr_ok) else None
     doc = pymupdf.open(source)
 
     try:
         image_only_pages: list[int] = []
+        ocr_failed_pages: list[int] = []
+        ocr_pages_delivered = False
         for index, page in enumerate(doc):
             report = PageReport(number=index + 1)
 
             if settings.scrub_embedded:
-                result.annotations_removed += _strip_page_extras(page)
+                removed, links = _strip_page_extras(page)
+                result.annotations_removed += removed
+                result.links_removed += links
 
             words = page.get_text("words")
             page_text = page.get_text("text")
@@ -249,8 +276,15 @@ def process(
             if report.text_chars < MIN_TEXT_CHARS:
                 report.image_only = True
                 if settings.ocr_scanned_pdfs and ocr_ok:
-                    words = _ocr_words(page)
+                    words = _ocr_words(page, ocr_engine)
+                    if words is None:
+                        # the engine passed the probe but failed mid-run;
+                        # delivering this page as "clean" would be a leak
+                        ocr_failed_pages.append(index + 1)
+                        result.pages.append(report)
+                        continue
                     report.ocr_used = True
+                    ocr_pages_delivered = True
                 else:
                     image_only_pages.append(index + 1)
                     result.pages.append(report)
@@ -260,12 +294,19 @@ def process(
             hits = engine.scan_text(text, store, redact_settings, matcher)
             report.hits = len(hits)
 
+            # OCR boxes come back in rendered (rotated) space; map them onto
+            # the page's own coordinates or a rotated scan gets boxes in the
+            # wrong place while the real values stay readable
+            derotate = page.derotation_matrix if report.ocr_used else None
+
             for hit in hits:
                 entity = store.entities.get(hit.entity_key)
                 if entity is not None:
                     store.record_hit(entity, document_label)
                 padding = OCR_BOX_PADDING if report.ocr_used else BOX_PADDING
                 for rect in _rects_for_hit(hit, spans, padding):
+                    if derotate is not None:
+                        rect = pymupdf.Rect(rect) * derotate
                     if rect.is_empty or rect.is_infinite:
                         continue
                     annot_text = ""
@@ -281,6 +322,26 @@ def process(
                     )
                     report.boxes += 1
 
+            # Every embedded image on a text page is blacked out whole: a
+            # photo, an exhibit scan beside a typed header, or a signature
+            # image is confidential and no text scan can read into it. A
+            # full-page scan being OCR'd is the page itself and is exempt -
+            # its recognised text was boxed above.
+            if settings.redact_images and not report.image_only:
+                for image_info in page.get_images(full=True):
+                    xref = image_info[0]
+                    try:
+                        rects = page.get_image_rects(xref)
+                    except Exception:              # pragma: no cover - defensive
+                        continue
+                    for rect in rects:
+                        if rect.is_empty or rect.is_infinite:
+                            continue
+                        page.add_redact_annot(rect, fill=(0, 0, 0))
+                        report.boxes += 1
+                        report.images_redacted += 1
+                result.images_redacted += report.images_redacted
+
             result.hits.extend(hits)
             if report.boxes:
                 # PDF_REDACT_IMAGE_PIXELS also clears image content under a box,
@@ -288,16 +349,28 @@ def process(
                 page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_PIXELS)
             result.pages.append(report)
 
-        if image_only_pages:
-            reason = ocr_note if not ocr_ok else "OCR was turned off"
+        if image_only_pages or ocr_failed_pages:
+            if ocr_failed_pages:
+                reason = "the OCR engine stopped working part-way through"
+                pages = ocr_failed_pages + image_only_pages
+            else:
+                reason = ocr_note if not ocr_ok else "OCR was turned off"
+                pages = image_only_pages
             result.refused = True
             result.warnings.append(
-                f"pages {', '.join(str(p) for p in image_only_pages)} carry no text layer "
+                f"pages {', '.join(str(p) for p in sorted(pages))} carry no text layer "
                 f"and could not be read ({reason}). The file was NOT written - a scanned "
                 "page passed through untouched would look redacted without being redacted."
             )
             result.output = None
             return result
+
+        if ocr_pages_delivered:
+            result.warnings.append(
+                "Some pages are scans read by OCR. Machine-printed text on them was "
+                "redacted; handwriting, stamps and margin notes on a scan cannot be "
+                "recognised and may still be readable. Review scanned pages by hand."
+            )
 
         if settings.scrub_metadata:
             doc.set_metadata({})

@@ -31,11 +31,14 @@ class Settings:
     extra_allowlist: list[str] = field(default_factory=list)
     scrub_metadata: bool = True
     scrub_comments: bool = True
-    scrub_headers: bool = True
     scrub_embedded: bool = True
     anonymize_filenames: bool = True
     label_redaction_boxes: bool = False
     ocr_scanned_pdfs: bool = True
+    # black out every embedded image and drop drawn-ink handwriting; a photo,
+    # a scanned signature, or a screenshot of a statement is confidential by
+    # default and no text scan can read it
+    redact_images: bool = True
 
     def category_enabled(self, key: str) -> bool:
         return key in self.enabled_categories
@@ -90,7 +93,12 @@ class EntityMatcher:
                 continue
             usable: list[tuple[_names.NameVariant, int]] = []
             for variant in entity.variants:
-                if variant.token_count == 1 and not settings.include_single_token_names:
+                # "Mr. Smith" and "the Smiths" carry one name component but
+                # are multi-word and unambiguous; only the bare single word
+                # is what the single-token switch is meant to exclude
+                bare_single = (variant.token_count == 1
+                               and variant.layout not in {"title", "plural"})
+                if bare_single and not settings.include_single_token_names:
                     continue
                 if variant.risky and not settings.include_single_token_names:
                     continue
@@ -102,16 +110,28 @@ class EntityMatcher:
             bodies = []
             lookup: dict[str, tuple[_names.NameVariant, int]] = {}
             for variant, priority in usable:
-                bodies.append(r"\s+".join(re.escape(tok) for tok in variant.text.split()))
+                bodies.append(r"\s+".join(_names.escape_token(tok)
+                                          for tok in variant.text.split()))
                 lookup.setdefault(" ".join(variant.text.split()).casefold(),
                                   (variant, priority))
             regex = re.compile(
                 rf"(?<![\w'’])(?:{'|'.join(bodies)})(?!\w)", re.IGNORECASE)
             self.rules.append((regex, entity, lookup))
 
+    def _state_fingerprint(self) -> int:
+        """Changes whenever any entity's identity, tick or replacement does.
+
+        A bare entity count missed equal-count mutations - a retype swaps the
+        key, a toggle flips enabled - and served stale literal rules.
+        """
+        return hash(tuple(sorted(
+            (key, entity.enabled, entity.replacement)
+            for key, entity in self.store.entities.items()
+        )))
+
     def _refresh_values(self) -> None:
-        """Rebuild the literal rules when the store has grown since last time."""
-        if self._value_version == len(self.store.entities):
+        """Rebuild the literal rules when the store changed since last time."""
+        if self._value_version == self._state_fingerprint():
             return
         rules: list[tuple[re.Pattern, Entity]] = []
         for entity in self.store.entities.values():
@@ -122,13 +142,14 @@ class EntityMatcher:
             text = entity.canonical.strip()
             if len(text) < MIN_LITERAL_LENGTH:
                 continue
+            body = r"\s+".join(_names.escape_token(tok) for tok in text.split())
             rules.append((
-                re.compile(rf"(?<![\w@.\-]){re.escape(text)}(?![\w@\-])", re.IGNORECASE),
+                re.compile(rf"(?<![\w@.\-]){body}(?![\w@\-])", re.IGNORECASE),
                 entity,
             ))
         rules.sort(key=lambda rule: -len(rule[1].canonical))
         self._value_rules = rules
-        self._value_version = len(self.store.entities)
+        self._value_version = self._state_fingerprint()
 
     def find_values(self, text: str, protected: list[tuple[int, int]], redact: bool) -> list[Hit]:
         self._refresh_values()
@@ -150,7 +171,8 @@ class EntityMatcher:
                 start, end = m.span()
                 if _overlaps(start, end, protected):
                     continue
-                found = lookup.get(" ".join(m.group(0).split()).casefold())
+                found = lookup.get(
+                    " ".join(m.group(0).replace("’", "'").split()).casefold())
                 if found is None:      # pragma: no cover - defensive
                     continue
                 variant, priority = found

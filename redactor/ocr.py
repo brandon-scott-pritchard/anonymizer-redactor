@@ -178,13 +178,24 @@ def _unpack(archive: Path) -> tuple[Path, Path] | None:
 
 
 def _safe_extract(tar: "tarfile.TarFile", destination: Path) -> None:
-    """Extract, refusing any member that would escape the destination."""
-    root = destination.resolve()
-    for member in tar.getmembers():
-        target = (root / member.name).resolve()
-        if not str(target).startswith(str(root)):
-            raise tarfile.TarError(f"unsafe path in archive: {member.name}")
-    tar.extractall(destination)
+    """Extract, refusing any member that would escape the destination.
+
+    The stdlib "data" filter rejects absolute paths, parent traversal, and
+    symlink tricks a lexical prefix check misses (a "<root>-evil" sibling, or
+    writing through a symlink member extracted a moment earlier).
+    """
+    try:
+        tar.extractall(destination, filter="data")
+    except TypeError:                # pragma: no cover - Python < 3.12
+        import os
+        root = destination.resolve()
+        for member in tar.getmembers():
+            if member.issym() or member.islnk():
+                raise tarfile.TarError(f"link member in archive: {member.name}")
+            target = (root / member.name).resolve()
+            if os.path.commonpath([str(root), str(target)]) != str(root):
+                raise tarfile.TarError(f"unsafe path in archive: {member.name}")
+        tar.extractall(destination)
 
 
 def bundled_tesseract() -> tuple[Path, Path] | None:

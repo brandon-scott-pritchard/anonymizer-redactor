@@ -146,7 +146,14 @@ def prescan(
             continue
         try:
             for text in units:
-                found += len(engine.scan_text(text, store, settings, matcher, register=True))
+                hits = engine.scan_text(text, store, settings, matcher, register=True)
+                found += len(hits)
+                # record occurrences, or the review screen shows Times = 0 on
+                # every row and warns that nothing appeared in any document
+                for hit in hits:
+                    entity = store.entities.get(hit.entity_key)
+                    if entity is not None:
+                        store.record_hit(entity, path.name)
         except Exception:
             continue
     progress("Scan complete", 1.0)
@@ -215,10 +222,11 @@ def _sensitive_strings(store: MappingStore) -> set[str]:
     for entity in store.entities.values():
         if not entity.enabled:
             continue
-        if len(entity.canonical) >= 3:
+        # two-letter surnames (Ng, Li) are real; a 3-char floor let them ship
+        if len(entity.canonical) >= 2:
             out.add(entity.canonical.casefold())
         for variant in entity.variants:
-            if len(variant.text) >= 3:
+            if len(variant.text) >= 2:
                 out.add(variant.text.casefold())
     return out
 
@@ -304,6 +312,12 @@ def run_job(
     used_names: set[str] = set()
     total = max(len(files), 1)
 
+    # the review prescan recorded occurrences into this same store; the run
+    # re-records everything it applies, so start the counters clean
+    for entity in store.entities.values():
+        entity.occurrences = 0
+        entity.documents.clear()
+
     for index, raw_path in enumerate(files, start=1):
         path = Path(raw_path)
         kind = classify(path)
@@ -323,16 +337,14 @@ def run_job(
         try:
             if kind == "docx":
                 detail = docx_processor.process(path, target, store, settings, matcher)
-                outcome = FileOutcome(path, kind, "processed", delivered,
-                                      len(detail.hits), list(detail.warnings), detail=detail)
             else:
                 detail = pdf_processor.process(path, target, store, settings, matcher)
-                if detail.refused:
-                    outcome = FileOutcome(path, kind, "refused", "", len(detail.hits),
-                                          list(detail.warnings), detail=detail)
-                else:
-                    outcome = FileOutcome(path, kind, "processed", delivered,
-                                          len(detail.hits), list(detail.warnings), detail=detail)
+            if detail.refused:
+                outcome = FileOutcome(path, kind, "refused", "", len(detail.hits),
+                                      list(detail.warnings), detail=detail)
+            else:
+                outcome = FileOutcome(path, kind, "processed", delivered,
+                                      len(detail.hits), list(detail.warnings), detail=detail)
         except Exception as exc:
             outcome = FileOutcome(path, kind, "error", error=f"{type(exc).__name__}: {exc}")
             outcome.warnings.append(traceback.format_exc(limit=3))
@@ -382,13 +394,16 @@ def write_report(result: RunResult, store: MappingStore, settings: Settings,
                  path: Path) -> Path:
     """A defensible summary of the run.
 
-    Deliberately contains no original values - counts by category only - so it
-    is safe to keep next to the archive.
+    Redacted values never appear - counts by category only. It DOES name the
+    original source files, so the report itself is confidential: keep it with
+    the mapping key, never inside anything delivered.
     """
     lines: list[str] = []
     add = lines.append
 
     add("ANONYMIZER / REDACTOR - RUN REPORT")
+    add("This report names the original files. Keep it with the mapping key,")
+    add("never inside anything you deliver.")
     add("=" * 62)
     add(f"Started (UTC):      {result.started.isoformat(timespec='seconds')}")
     if result.finished:

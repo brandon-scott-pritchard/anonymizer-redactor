@@ -63,7 +63,9 @@ PREFILTER = True
 # a generic identifier that must contain at least one digit
 V_ALNUM = r"(?=[A-Za-z0-9][A-Za-z0-9\-/.]*\d)[A-Za-z0-9][A-Za-z0-9\-/.]{2,29}"
 V_DIGITS = r"\d[\d\-\s]{2,25}\d"
-V_MASKED = r"(?:[Xx*•#]{3,}[\-\s]?\d{2,6}|\d{2,6}[\-\s]?[Xx*•#]{3,})"
+# Mask runs may repeat per group ("XXX-XX-6789", "****-****-1234") - a single
+# adjacent run would miss the standard formats and ship the real last four.
+V_MASKED = r"(?:(?:[Xx*•#]{2,}[\-\s]?)+\d{2,6}|\d{2,6}(?:[\-\s]?[Xx*•#]{2,})+)"
 V_ANY_ID = rf"(?:{V_MASKED}|{V_ALNUM})"
 
 # separator between a label and its value: "No.", "Number", "#", ":", "-"
@@ -79,6 +81,7 @@ _MONTHS = (
 )
 V_DATE = (
     rf"(?:\d{{1,2}}[/\-.]\d{{1,2}}[/\-.]\d{{2,4}}"
+    rf"|\d{{4}}[/\-.]\d{{1,2}}[/\-.]\d{{1,2}}"          # ISO, routine in records
     rf"|(?:{_MONTHS})\.?\s+\d{{1,2}},?\s+\d{{4}}"
     rf"|\d{{1,2}}\s+(?:{_MONTHS})\.?,?\s+\d{{4}})"
 )
@@ -132,11 +135,6 @@ def valid_vin(value: str) -> bool:
     return len(v) == 17 and not any(c in v for c in "IOQ") and any(c.isdigit() for c in v)
 
 
-def not_all_same(value: str) -> bool:
-    digits = "".join(c for c in value if c.isdigit())
-    return len(set(digits)) > 1
-
-
 # --------------------------------------------------------------------------
 # allowlist - spans the tool is forbidden to alter
 # --------------------------------------------------------------------------
@@ -164,11 +162,15 @@ ALLOWLIST_PATTERNS: tuple[re.Pattern, ...] = (
         r"(?:\s*(?:and|through|to)\s*(?:Sections?|Secs?)?\.?\s*\d[\dA-Za-z\-.:]*)*",
         re.IGNORECASE,
     ),
-    # rules of procedure / evidence
+    # rules of procedure / evidence. Every branch demands either the full word
+    # "Rule(s)" or an abbreviated citation with a mandatory qualifier - a bare
+    # optional "R." would degenerate to r"R\.?\s*\d+" and shield any
+    # identifier that happens to start with R (license "R12345678").
     re.compile(
         r"\b(?:Fed\.\s*R\.\s*(?:Civ|Crim|App|Evid|Bankr)\.\s*P\.?|"
-        r"(?:Utah|Federal|Local|Local\s+Civil)?\s*R(?:ule)?s?\.?\s*(?:of\s+[A-Z][A-Za-z]+\s+"
-        r"(?:Procedure|Evidence)\s*)?)\s*\d+(?:\.\d+)*(?:\([\da-zA-Z]+\))*",
+        r"(?:Utah|Federal|Local|Local\s+Civil)\s+R\.\s*(?:[A-Z][a-z]{0,5}\.?\s*){0,3}P\.?|"
+        r"Rules?\b(?:\s+of\s+[A-Z][A-Za-z]+\s+(?:Procedure|Evidence))?)"
+        r"\s*\d+(?:\.\d+)*(?:\([\da-zA-Z]+\))*",
         re.IGNORECASE,
     ),
     # reporter citations: 505 U.S. 833, 2019 UT App 12
@@ -270,8 +272,8 @@ DETECTORS: tuple[Detector, ...] = (
        kw=("@",)),
     _d("url", r"\b(?:https?://|ftp://|www\.)[^\s<>\"'\)\]]+", priority=88,
        kw=("http", "ftp", "www.")),
-    _d("fax", rf"(?:fax(?:simile)?|telecopier){_SEP}((?:\+?1[\s.\-]?)?(?:\(\d{{3}}\)\s?|\d{{3}}[\s.\-])\d{{3}}[\s.\-]?\d{{4}})", group=1, priority=86,
-       digit=True, kw=("fax", "telecopier")),
+    _d("fax", rf"(?:fa(?:csimile|x(?:simile)?)|telecopier){_SEP}((?:\+?1[\s.\-]?)?(?:\(\d{{3}}\)\s?|\d{{3}}[\s.\-])\d{{3}}[\s.\-]?\d{{4}})", group=1, priority=86,
+       digit=True, kw=("fax", "facsimile", "telecopier")),
     _d("phone", r"(?:\+?1[\s.\-]?)?\(\d{3}\)\s?\d{3}[\s.\-]?\d{4}(?:\s*(?:x|ext\.?|extension)\s*\d{1,6})?", priority=80,
        digit=True),
     _d("phone", r"(?<![\d\-])(?:\+?1[\s.\-])?\d{3}[\s.\-]\d{3}[\s.\-]\d{4}(?:\s*(?:x|ext\.?|extension)\s*\d{1,6})?(?![\d\-])", priority=80,
@@ -283,6 +285,10 @@ DETECTORS: tuple[Detector, ...] = (
        digit=True),
     _d("ip_address", r"\b(?:[0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}\b", priority=85,
        kw=(":",)),
+    # abbreviated IPv6 ("fe80::1") - the common written form uses "::"
+    _d("ip_address",
+       r"(?<![\w:])(?:[0-9A-Fa-f]{1,4}:){1,6}:(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,5})?(?![\w:])",
+       priority=85, kw=("::",)),
     _d("mac_address", r"\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b", priority=85),
     _d("gps", r"[-+]?\d{1,3}\.\d{4,}\s*[,\s]\s*[-+]?\d{1,3}\.\d{4,}", priority=85,
        digit=True),
@@ -362,7 +368,8 @@ DETECTORS: tuple[Detector, ...] = (
        digit=True),
     _d("credit_card", labeled(("credit\\s*card", "debit\\s*card", "visa", "mastercard", "master\\s*card",
                                "amex", "american\\s+express", "discover", "card\\s*(?:no\\.?|number|#)"),
-                              rf"(?:{V_MASKED}|(?:\d[ -]?){{12,18}}\d)"), group=1, priority=92,
+                              # a bare 4-digit tail covers "card ending in 9876"
+                              rf"(?:{V_MASKED}|(?:\d[ -]?){{12,18}}\d|\d{{4}})"), group=1, priority=92,
        digit=True, kw=("card", "visa", "amex", "american", "discover")),
     _d("routing_number", labeled(("routing", "aba", "rtn", "transit")), group=1, priority=91,
        digit=True, kw=("routing", "aba", "rtn", "transit")),
@@ -375,8 +382,8 @@ DETECTORS: tuple[Detector, ...] = (
     _d("crypto_wallet", r"\b0x[a-fA-F0-9]{40}\b", priority=90,
        digit=True),
     _d("payment_handle",
-       labeled(("pay\\s?pal", "venmo", "cash\\s?app", "zelle", "square\\s*cash", "apple\\s*pay",
-                "google\\s*pay", "wise", "revolut", "chime", "stripe", "coinbase", "robinhood"),
+       labeled(("pay ?pal", "venmo", "cash ?app", "zelle", "square ?cash", "apple ?pay",
+                "google ?pay", "wise", "revolut", "chime", "stripe", "coinbase", "robinhood"),
                r"[$@]?[A-Za-z0-9._\-]{3,40}"), group=1, priority=89,
        kw=("paypal", "pay pal", "venmo", "cash", "zelle", "square", "apple",
            "google", "wise", "revolut", "chime", "stripe", "coinbase", "robinhood")),
@@ -474,9 +481,11 @@ DETECTORS: tuple[Detector, ...] = (
     _d("case_number", r"(?<![\w\-])\d{4}-[A-Z]{2,4}-\d{3,6}(?![\w\-])", priority=70, flags=0,
        digit=True),
     _d("case_name",
-       r"(?-i:\b[A-Z][A-Za-z'\-]+(?:[^\S\n]+[A-Z][A-Za-z'.\-]+){0,3}[^\S\n]+v\.?s?\.[^\S\n]+"
+       # the "v" needs no period: "Smith v Jones" is a routine written form,
+       # and the case-sensitive lowercase v cannot be a middle initial
+       r"(?-i:\b[A-Z][A-Za-z'\-]+(?:[^\S\n]+[A-Z][A-Za-z'.\-]+){0,3}[^\S\n]+vs?\.?[^\S\n]+"
        r"[A-Z][A-Za-z'\-]+(?:[^\S\n]+[A-Z][A-Za-z'.\-]+){0,3})", priority=64,
-       kw=("v.", "vs")),
+       kw=(" v",)),
     _d("case_designator", labeled(("bar\\s+code", "tracking\\s*(?:no\\.?|number|#)", "efiling\\s*(?:id|no\\.?|number|#)",
                                    "e-?filed\\s+document", "envelope\\s*(?:no\\.?|number|#)",
                                    "submission\\s*(?:id|no\\.?|number|#)", "exhibit\\s*(?:no\\.?|number|#)\\s*\\(case\\)")),

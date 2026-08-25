@@ -76,6 +76,9 @@ def main() -> int:
         )
 
     print(f"==> Vendoring from {install}")
+    # a fresh copy every time - stale DLLs from an older Tesseract mixed with
+    # new ones make a bundle that may not load
+    shutil.rmtree(TARGET, ignore_errors=True)
     bin_dir, data_dir = TARGET / "bin", TARGET / "tessdata"
     for directory in (bin_dir, data_dir):
         directory.mkdir(parents=True, exist_ok=True)
