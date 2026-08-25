@@ -1,0 +1,23 @@
+# Build output
+dist/
+build/*.toc
+build/*.pkg
+build/Anonymizer-Redactor/
+*.spec.bak
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+
+# Tool output - never commit processed documents or mapping keys
+anonymized-*.zip
+mapping-key-*.json
+redaction-report-*.txt
+_work-*/
+
+# macOS
+.DS_Store

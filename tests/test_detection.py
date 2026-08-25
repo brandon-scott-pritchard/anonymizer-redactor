@@ -1,0 +1,167 @@
+"""Detectors, the allowlist, and name-variant expansion."""
+
+import pytest
+
+from redactor import caption, names, patterns, surrogates
+from redactor.mapping import MappingStore, read_encrypted_key, write_encrypted_key
+
+
+def categories_found(text):
+    protected = patterns.allowlist_spans(text)
+    return {m.category for m in patterns.scan(text, protected=protected)}
+
+
+@pytest.mark.parametrize("category", [
+    "ssn", "email", "phone", "fax", "street_address", "bank_account", "routing_number",
+    "credit_card", "vin", "license_plate", "ein", "payment_handle", "passport", "mrn",
+    "policy_number", "parcel_number", "deed_reference", "legal_description",
+    "case_number", "dob", "investment_account",
+])
+def test_each_category_is_detected(sample_text, category):
+    assert category in categories_found(sample_text)
+
+
+def test_statutes_rules_and_citations_are_protected(sample_text):
+    protected = patterns.allowlist_spans(sample_text)
+    covered = " ".join(sample_text[s:e] for s, e in protected)
+    for phrase in ("Utah Code Ann. Section 30-3-5", "Rule 26", "Jones v. Jones, 2019 UT App 12"):
+        assert phrase in covered
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("Utah Code Ann. Section 30-3-5(1)(a)", "Section 30-3-5(1)(a)"),
+    ("42 U.S.C. Sec. 1983", "Sec. 1983"),
+    ("Utah Code Ann. Sec 30-3-5", "Sec 30-3-5"),
+    ("Under Section 78B-12-202", "Section 78B-12-202"),
+])
+def test_section_references_survive_in_every_written_form(text, expected):
+    protected = patterns.allowlist_spans(text)
+    covered = " ".join(text[s:e] for s, e in protected)
+    assert expected in covered
+
+
+def test_judicial_officers_are_never_touched(sample_text):
+    protected = patterns.allowlist_spans(sample_text)
+    covered = " ".join(sample_text[s:e] for s, e in protected)
+    assert "Judge Amber M. Cordova" in covered
+    assert "Commissioner Russell Minas" in covered
+
+
+def test_a_bare_number_that_fails_luhn_is_not_a_card():
+    """Unlabeled digit runs must clear the checksum before we touch them."""
+    assert "credit_card" not in categories_found("The sequence 4111 1111 1111 1112 appeared.")
+    assert "credit_card" in categories_found("The sequence 4111 1111 1111 1111 appeared.")
+
+
+def test_a_labeled_card_is_redacted_even_if_the_checksum_fails():
+    """A typo in a card number does not make it safe to publish."""
+    assert "credit_card" in categories_found("Card number 4111 1111 1111 1112")
+
+
+def test_a_label_word_is_never_taken_as_the_value():
+    found = patterns.scan("Her Venmo handle is @jsmith-slc")
+    assert [m.text for m in found if m.category == "payment_handle"] == ["@jsmith-slc"]
+
+
+def test_ordinary_prose_produces_nothing():
+    prose = ("The parties met in the spring and separated the following year. "
+             "Counsel appeared and the matter was taken under advisement.")
+    assert categories_found(prose) == set()
+
+
+# ------------------------------------------------------------------- names --
+
+
+def test_name_expands_into_every_written_form():
+    parsed = names.parse("John Michael Smith")
+    forms = {v.text for v in names.variants(parsed)}
+    for expected in ("John Michael Smith", "John Smith", "Smith, John", "J. Smith",
+                     "John M. Smith", "Mr. Smith", "Smith", "John", "Michael", "Smiths"):
+        assert expected in forms
+
+
+def test_comma_form_and_particles_parse():
+    assert names.parse("Smith, Jane E.").canonical == "Jane E. Smith"
+    assert names.parse("Maria van der Berg").last == "van der Berg"
+
+
+@pytest.mark.parametrize("text,should_match", [
+    ("Smith", True), ("Smith's", True), ("Smiths", False), ("Smithers", False),
+    ("Blacksmith", False),
+])
+def test_word_boundaries_hold(text, should_match):
+    assert bool(names.variant_regex("Smith").search(text)) is should_match
+
+
+def test_surrogates_are_deterministic():
+    first = surrogates.person("John Michael Smith", want_middle=True)
+    second = surrogates.person("John Michael Smith", want_middle=True)
+    assert first.canonical == second.canonical
+    assert first.canonical != "John Michael Smith"
+
+
+def test_a_family_shares_one_surrogate_surname():
+    store = MappingStore()
+    petitioner = store.add_person("Jane Elizabeth Smith")
+    respondent = store.add_person("John Michael Smith")
+    child = store.add_person("Tommy Smith", category="minor")
+    surnames = {e.surrogate.last for e in (petitioner, respondent, child)}
+    assert len(surnames) == 1
+    firsts = {e.surrogate.first for e in (petitioner, respondent, child)}
+    assert len(firsts) == 3
+
+
+def test_two_people_never_share_a_full_surrogate_name():
+    store = MappingStore()
+    made = {store.add_person(f"Person Number{i} Smith").replacement for i in range(25)}
+    assert len(made) == 25
+
+
+# ----------------------------------------------------------------- caption --
+
+
+def test_caption_yields_parties_with_their_roles(sample_text):
+    found = {c.name: c.role for c in caption.harvest(caption.caption_region(sample_text))}
+    assert found.get("JANE ELIZABETH SMITH") == "Petitioner"
+    assert found.get("JOHN MICHAEL SMITH") == "Respondent"
+
+
+def test_caption_reader_ignores_court_and_title_furniture(sample_text):
+    names_found = {c.name for c in caption.harvest(caption.caption_region(sample_text))}
+    for furniture in ("THIRD JUDICIAL DISTRICT", "SALT LAKE COUNTY", "STATE OF UTAH"):
+        assert furniture not in names_found
+
+
+def test_in_re_captions_are_read():
+    text = "IN THE MATTER OF THE MARRIAGE OF\nROBERTA CHEN-ALVAREZ and DAVID PAUL ALVAREZ"
+    found = {c.name for c in caption.harvest(caption.caption_region(text))}
+    assert "ROBERTA CHEN-ALVAREZ" in found
+    assert "DAVID PAUL ALVAREZ" in found
+
+
+# ------------------------------------------------------------ mapping key --
+
+
+def test_mapping_key_round_trips(tmp_path):
+    store = MappingStore()
+    store.add_person("Jane Elizabeth Smith", role="Petitioner")
+    store.add_value("ssn", "528-41-9963")
+    path = write_encrypted_key(store, tmp_path / "key.json", "correct horse")
+    recovered = read_encrypted_key(path, "correct horse")
+    originals = {row["original"] for row in recovered["entities"]}
+    assert "528-41-9963" in originals
+
+
+def test_mapping_key_rejects_the_wrong_password(tmp_path):
+    store = MappingStore()
+    store.add_value("ssn", "528-41-9963")
+    path = write_encrypted_key(store, tmp_path / "key.json", "right")
+    with pytest.raises(Exception):
+        read_encrypted_key(path, "wrong")
+
+
+def test_the_key_file_never_contains_plaintext(tmp_path):
+    store = MappingStore()
+    store.add_value("ssn", "528-41-9963")
+    path = write_encrypted_key(store, tmp_path / "key.json", "pw")
+    assert "528-41-9963" not in path.read_text()
