@@ -9,7 +9,7 @@ const ANONYMIZE_NOTE =
   '"John Michael Smith" becomes something like "Tamsin Quentin Middleton", ' +
   "consistently in every document in this batch, and family members keep a " +
   "shared surname. The document still reads like a normal pleading, so a " +
-  "reader may not realise it has been altered unless you tell them. " +
+  "reader may not realize it has been altered unless you tell them. " +
   "Everything that is not a person's name (SSNs, accounts, addresses, case " +
   "numbers) becomes a tagged placeholder such as [SSN-1].";
 

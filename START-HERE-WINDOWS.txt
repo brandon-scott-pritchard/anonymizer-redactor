@@ -2,10 +2,9 @@
  ANONYMIZER / REDACTOR - WINDOWS SETUP
 ====================================================================
 
-You have two options. Option A just runs the tool. Option B also
+You have two options. Option A just runs the tool; Option B also
 builds a standalone .exe you can copy to other Windows machines.
-
-Either way, do STEP 1 first.
+Either way, do Step 1 first.
 
 
 --------------------------------------------------------------------
@@ -17,9 +16,9 @@ STEP 1 - INSTALL PYTHON  (one time, about 3 minutes)
    or newer.
 3. Run the installer.
 
-   *** ON THE FIRST SCREEN, TICK "Add python.exe to PATH" ***
+   >>> ON THE FIRST SCREEN, TICK "Add python.exe to PATH" <<<
 
-   It is a small checkbox at the bottom. Nothing below will work if
+   It's a small checkbox at the bottom, and nothing below works if
    you miss it. Then click "Install Now".
 
 4. Unzip this folder anywhere you like - Desktop is fine.
@@ -29,13 +28,19 @@ STEP 1 - INSTALL PYTHON  (one time, about 3 minutes)
 OPTION A - JUST RUN THE TOOL
 --------------------------------------------------------------------
 
-Double-click:   run.bat
+Double-click:   run_web.bat     (opens in your browser - use this one)
+         or:    run.bat         (the desktop window version)
+
+They're the same tool underneath; the browser version just looks the
+same on every machine, which is why I'd use it. And to be clear
+about what "browser" means here: it talks to a private server
+running on this computer, not to the internet. Nothing you load into
+it goes anywhere.
 
 The first time, a black window opens and installs what it needs.
-This takes 10-20 minutes and downloads roughly 500 MB. Leave it
-alone until the app window appears.
-
-Every time after that, run.bat opens the app in a few seconds.
+That takes 10-20 minutes and downloads roughly 500 MB; leave it
+alone until the app appears. Every time after that, it opens in a
+couple of seconds.
 
 
 --------------------------------------------------------------------
@@ -44,26 +49,26 @@ OPTION B - BUILD A STANDALONE .EXE
 
 Double-click:   build_windows.bat
 
-Same 10-20 minute wait the first time. When it finishes you will
-have:
+Same 10-20 minute wait the first time. When it finishes you'll have:
 
     dist\Anonymizer-Redactor\Anonymizer-Redactor.exe
 
-That whole "Anonymizer-Redactor" folder is self-contained. Copy the
+That whole "Anonymizer-Redactor" folder is self-contained; copy the
 folder (not just the .exe) to any Windows machine and double-click
-the .exe - no Python needed on that machine.
+the .exe. No Python needed on that machine.
 
 
 --------------------------------------------------------------------
 STEP 2 - OCR FOR SCANNED PDFS  (nothing to do)
 --------------------------------------------------------------------
 
-Scanned PDFs are pictures of text with no text layer. Reading them
-needs OCR, and OCR is already included - it installs automatically
-along with everything else in Step 1. There is nothing for you to do
-here.
+Scanned PDFs are pictures of text; there's no text layer to read.
+OCR handles them, and OCR is already included - it installs
+automatically with everything else in Step 1. There's nothing for
+you to do here.
 
-If you would rather use Tesseract specifically, it is optional:
+If you'd rather use Tesseract specifically (it's the engine I
+prefer, but the built-in one covers you fine), it's optional:
 
     1. Install it from
        https://github.com/UB-Mannheim/tesseract/wiki
@@ -78,32 +83,42 @@ Skip all of that unless you have a reason to want it.
 USING IT
 --------------------------------------------------------------------
 
-Four tabs, left to right:
+Four steps, left to right:
 
  1. Documents & options
-      Add your DOCX and PDF files. Choose whether DOCX files are
-      ANONYMIZED (realistic fake names) or REDACTED (black bars).
-      PDFs are always redacted.
-      Copy the mapping-key password somewhere safe.
+      Add your DOCX and PDF files, then choose what happens to the
+      DOCX files: ANONYMIZED (realistic fake names) or REDACTED
+      (black bars). PDFs are always redacted. Embedded images and
+      drawn handwriting get blacked out by default; a photographed
+      bank statement is confidential whether or not a text scan can
+      read it. Copy the mapping-key password somewhere safe.
 
  2. Names
       Opens already filled in with the party names it found in the
-      document captions. Add anyone else - one full name per line,
-      or one at a time with the Add button. Press "Scan documents
-      for more names" to have it suggest others.
+      document captions. Add anyone else, one full name per line.
+      "John Smith" and "John Michael Smith" count as the same
+      person, and close typos (Johhn, Smiith, Jonh) are caught too;
+      one person gets one fake name, however the document spells
+      them. Press "Scan documents for more names" and it'll suggest
+      others - suggestions only, nothing is applied without a tick.
 
  3. Review
-      Everything it will change. Untick anything that should stay.
-      Double-click a replacement to edit it. Nothing is written yet.
+      Everything it will change, before it changes anything. Untick
+      whatever should stay. Open a row's editor to change its type
+      or its replacement; if the tool got something wrong, say what
+      went wrong in the dropdown so it can be fixed. A rescan keeps
+      your decisions.
 
  4. Run
-      Produces three files in your output folder:
+      Produces three files:
 
         anonymized-<date>.zip        the cleaned documents
         mapping-key-<date>.json      encrypted original -> fake table
-        redaction-report-<date>.txt  what happened, with no values
+        redaction-report-<date>.txt  what happened, no values shown
 
-      Send the .zip. Never send the mapping key.
+      Send the .zip and nothing else. The mapping key is the whole
+      secret, and the report names your original files; keep both
+      away from anything you deliver.
 
 
 --------------------------------------------------------------------
@@ -111,17 +126,21 @@ IF SOMETHING GOES WRONG
 --------------------------------------------------------------------
 
 "python is not recognized"
-    Python was installed without "Add python.exe to PATH". Re-run the
-    Python installer, choose Modify, and tick it.
+    Python was installed without "Add python.exe to PATH". Re-run
+    the Python installer, choose Modify, and tick it.
 
 Windows SmartScreen blocks the .exe
-    Click "More info", then "Run anyway". It is unsigned, which is
+    Click "More info", then "Run anyway". It's unsigned, which is
     expected for an in-house tool.
 
 A PDF was refused
-    It is a scan and OCR could not start. Re-run run.bat so the
-    dependencies finish installing, and check the log on the Run tab -
-    it names the OCR engine it found, or says why it found none.
+    It's a scan and OCR couldn't read it. That refusal is the tool
+    protecting you: a scan passed through untouched would look
+    redacted without being redacted, and that's the one outcome
+    this tool will not allow. Re-run run.bat so the dependencies
+    finish installing, and check the log on the Run step - it names
+    the OCR engine it found, or says why it found none.
 
 Test it on the files in the samples\ folder before you use it on
-anything real.
+anything real. Two minutes there beats finding out on a client
+document.
