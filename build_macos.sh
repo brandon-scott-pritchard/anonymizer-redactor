@@ -15,6 +15,7 @@ trap cleanup EXIT
 echo "==> Staging sources in $STAGE"
 mkdir -p "$STAGE/src"
 cp -R "$HERE/redactor" "$STAGE/src/"
+cp -R "$HERE/webapp" "$STAGE/src/"
 cp "$HERE/requirements.txt" "$STAGE/src/"
 cp "$HERE/build/launcher.py" "$STAGE/src/"
 cp "$HERE/build/redactor.spec" "$STAGE/src/"
@@ -36,19 +37,31 @@ echo "==> Building"
 cd "$STAGE/src"
 "$BUILD_VENV/bin/pyinstaller" --noconfirm --clean redactor.spec
 
+APP_NAME="Document Redactions & Anonymization"
+
 echo "==> Copying the app back"
 mkdir -p "$HERE/dist"
-if [ -e "$HERE/dist/Anonymizer-Redactor.app" ]; then
-  rm -rf "$HERE/dist/Anonymizer-Redactor.app"
+rm -rf "$HERE/dist/$APP_NAME.app" "$HERE/dist/Anonymizer-Redactor.app"
+cp -R "$STAGE/src/dist/$APP_NAME.app" "$HERE/dist/"
+
+if [ -n "${CODESIGN_IDENTITY:-}" ]; then
+  echo "==> Signing the bundle with: $CODESIGN_IDENTITY"
+  codesign --force --deep --options runtime --timestamp \
+    -s "$CODESIGN_IDENTITY" "$HERE/dist/$APP_NAME.app"
+  codesign --verify --strict "$HERE/dist/$APP_NAME.app" && echo "    signature verifies"
+  echo "    To notarize (needed so other Macs open it without the right-click dance):"
+  echo "      ditto -c -k --keepParent \"dist/$APP_NAME.app\" /tmp/app.zip"
+  echo "      xcrun notarytool submit /tmp/app.zip --keychain-profile <profile> --wait"
+  echo "      xcrun stapler staple \"dist/$APP_NAME.app\""
 fi
-cp -R "$STAGE/src/dist/Anonymizer-Redactor.app" "$HERE/dist/"
 
 cat <<'NOTE'
 
-Built: dist/Anonymizer-Redactor.app
+Built: dist/Document Redactions & Anonymization.app
 
-The app is not code-signed, so the first launch needs a right-click > Open,
-then "Open" again in the dialog. After that it opens normally.
+Unless CODESIGN_IDENTITY was set, the app is ad-hoc signed only, so the
+first launch needs a right-click > Open, then "Open" again in the dialog.
+After that it opens normally.
 
 OCR travels with the app: the vendored Tesseract is unpacked on first use,
 and RapidOCR is bundled as a fallback. Nothing needs installing on the

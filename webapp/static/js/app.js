@@ -538,7 +538,7 @@ function App() {
   if (!meta) {
     return html`<div>
       <header class="topbar"><div class="topbar-inner">
-        <h1>Anonymizer / Redactor</h1>
+        <h1>Document Redactions & Anonymization</h1>
       </div></header>
       <div class="shell"><div class="card">${fault ? html`<p class="error">${fault}</p>`
         : html`<p class="hint">Loading…</p>`}</div></div></div>`;
@@ -550,7 +550,7 @@ function App() {
 
   return html`<div>
     <header class="topbar"><div class="topbar-inner">
-      <h1>Anonymizer / Redactor</h1>
+      <h1>Document Redactions & Anonymization</h1>
       <span class="version">${meta.version} · everything stays on this computer</span>
     </div></header>
     <div class="shell">

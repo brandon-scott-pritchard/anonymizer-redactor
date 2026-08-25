@@ -401,7 +401,7 @@ def write_report(result: RunResult, store: MappingStore, settings: Settings,
     lines: list[str] = []
     add = lines.append
 
-    add("ANONYMIZER / REDACTOR - RUN REPORT")
+    add("DOCUMENT REDACTIONS & ANONYMIZATION - RUN REPORT")
     add("This report names the original files. Keep it with the mapping key,")
     add("never inside anything you deliver.")
     add("=" * 62)

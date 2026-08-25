@@ -11,6 +11,7 @@ echo ==^> Staging sources in %STAGE%
 if exist "%STAGE%" rmdir /s /q "%STAGE%"
 mkdir "%STAGE%\src"
 xcopy /e /i /q "%HERE%redactor" "%STAGE%\src\redactor" >nul
+xcopy /e /i /q "%HERE%webapp" "%STAGE%\src\webapp" >nul
 copy /y "%HERE%requirements.txt" "%STAGE%\src\" >nul
 copy /y "%HERE%build\launcher.py" "%STAGE%\src\" >nul
 copy /y "%HERE%build\redactor.spec" "%STAGE%\src\" >nul

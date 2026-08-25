@@ -1,5 +1,5 @@
 ====================================================================
- ANONYMIZER / REDACTOR - WINDOWS SETUP
+ DOCUMENT REDACTIONS & ANONYMIZATION - WINDOWS SETUP
 ====================================================================
 
 You have two options. Option A just runs the tool; Option B also

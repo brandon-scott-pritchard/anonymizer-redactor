@@ -1,4 +1,4 @@
-# Anonymizer / Redactor
+# Document Redactions & Anonymization
 
 A deterministic tool that strips confidential client information out of legal
 documents. Select any number of DOCX and PDF files, confirm what it found, and
@@ -240,7 +240,7 @@ macOS:
 ./build_macos.sh
 ```
 
-Produces `dist/Anonymizer-Redactor.app`. It is unsigned, so the first launch
+Produces `dist/Document Redactions & Anonymization.app`. It is unsigned, so the first launch
 needs a right-click → Open, then Open again in the dialog.
 
 Windows—the `.exe` must be built on a Windows machine; it cannot be

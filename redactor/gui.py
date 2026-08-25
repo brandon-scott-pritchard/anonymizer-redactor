@@ -249,7 +249,7 @@ class RowEditor(tk.Toplevel):
 class App(Tk):
     def __init__(self):
         super().__init__()
-        self.title(f"Anonymizer / Redactor {__version__}")
+        self.title(f"Document Redactions & Anonymization {__version__}")
         self.geometry("1120x780")
         self.minsize(980, 700)
 

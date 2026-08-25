@@ -276,7 +276,7 @@ class MappingStore:
 
     def to_json(self) -> str:
         payload = {
-            "tool": "Anonymizer / Redactor",
+            "tool": "Document Redactions & Anonymization",
             "generated_utc": self.started.isoformat(),
             "entities": self.rows(),
             "filenames": [

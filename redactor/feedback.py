@@ -100,5 +100,5 @@ def mailto_url(report: dict, log_path: Path = FEEDBACK_PATH) -> str:
     if len(body) > _BODY_LIMIT:
         note = f"\n\n[Truncated - the full report is in {log_path}]"
         body = body[: _BODY_LIMIT - len(note)] + note
-    subject = "Anonymizer-Redactor classification report"
+    subject = "Document Redactions & Anonymization classification report"
     return f"mailto:{REPORT_ADDRESS}?subject={quote(subject)}&body={quote(body)}"

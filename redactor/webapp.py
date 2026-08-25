@@ -14,6 +14,7 @@ Run with ``python -m redactor.webapp``.
 from __future__ import annotations
 
 import secrets
+import sys
 import tempfile
 import threading
 import uuid
@@ -29,7 +30,15 @@ from . import __version__, caption, categories, feedback, ner, pipeline, review
 from .engine import Settings
 from .mapping import MappingStore
 
-STATIC_DIR = Path(__file__).resolve().parent.parent / "webapp" / "static"
+def _static_dir() -> Path:
+    """The React assets: inside the frozen bundle, or beside the source tree."""
+    frozen = getattr(sys, "_MEIPASS", None)
+    if frozen and (Path(frozen) / "webapp" / "static").is_dir():
+        return Path(frozen) / "webapp" / "static"
+    return Path(__file__).resolve().parent.parent / "webapp" / "static"
+
+
+STATIC_DIR = _static_dir()
 
 TOKEN = secrets.token_urlsafe(32)
 COOKIE = "anonymizer_token"
@@ -157,7 +166,7 @@ def _entities_payload() -> dict:
 # --------------------------------------------------------------------------
 
 
-app = FastAPI(title="Anonymizer / Redactor", version=__version__)
+app = FastAPI(title="Document Redactions & Anonymization", version=__version__)
 
 
 @app.middleware("http")
@@ -419,15 +428,24 @@ def main() -> int:
 
     import uvicorn
 
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
+    argv = sys.argv[1:]
+    port = 0
+    if "--port" in argv:
+        try:
+            port = int(argv[argv.index("--port") + 1])
+        except (IndexError, ValueError):
+            port = 0
+    if not port:
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
 
     url = f"http://127.0.0.1:{port}/?token={TOKEN}"
-    print(f"Anonymizer / Redactor {__version__}")
+    print(f"Document Redactions & Anonymization {__version__}")
     print(f"Opening {url}")
-    print("Everything stays on this computer. Close this window to stop the app.")
-    threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+    print("Everything stays on this computer. Quit the app to stop it.")
+    if "--no-browser" not in argv:
+        threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
     return 0
 

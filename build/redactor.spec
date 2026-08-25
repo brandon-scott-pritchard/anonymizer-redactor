@@ -4,9 +4,12 @@
 # project path contains a colon, which PyInstaller cannot handle.
 # Run it through build_macos.sh or build_windows.bat rather than by hand.
 
+import os
 import platform
 import sys
 from pathlib import Path
+
+APP_NAME = "Document Redactions & Anonymization"
 
 from PyInstaller.utils.hooks import collect_all
 
@@ -70,6 +73,21 @@ hiddenimports += [
     "numpy",
 ]
 
+# The web front end: static assets plus the pieces uvicorn and fastapi load
+# dynamically, which static analysis cannot see.
+_webstatic = Path(SPECPATH) / "webapp" / "static"
+if _webstatic.is_dir():
+    datas.append((str(_webstatic), "webapp/static"))
+    print("spec: bundling the web front end")
+hiddenimports += [
+    "uvicorn.logging", "uvicorn.loops", "uvicorn.loops.auto",
+    "uvicorn.loops.asyncio", "uvicorn.protocols", "uvicorn.protocols.http",
+    "uvicorn.protocols.http.auto", "uvicorn.protocols.http.h11_impl",
+    "uvicorn.protocols.websockets", "uvicorn.protocols.websockets.auto",
+    "uvicorn.lifespan", "uvicorn.lifespan.on", "uvicorn.lifespan.off",
+    "anyio._backends._asyncio", "multipart", "python_multipart",
+]
+
 a = Analysis(
     ["launcher.py"],
     pathex=["."],
@@ -83,6 +101,8 @@ a = Analysis(
 )
 pyz = PYZ(a.pure)
 
+# Set CODESIGN_IDENTITY to a "Developer ID Application: ..." identity to sign
+# during the build; unset, PyInstaller ad-hoc signs on Apple Silicon.
 exe = EXE(
     pyz, a.scripts, [],
     exclude_binaries=True,
@@ -90,6 +110,7 @@ exe = EXE(
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
+    codesign_identity=os.environ.get("CODESIGN_IDENTITY"),
 )
 coll = COLLECT(
     exe, a.binaries, a.datas,
@@ -98,9 +119,11 @@ coll = COLLECT(
 )
 app = BUNDLE(
     coll,
-    name="Anonymizer-Redactor.app",
+    name=f"{APP_NAME}.app",
     bundle_identifier="family.thepritchard.anonymizer-redactor",
     info_plist={
+        "CFBundleName": APP_NAME,
+        "CFBundleDisplayName": APP_NAME,
         "CFBundleShortVersionString": "1.0.0",
         "NSHighResolutionCapable": True,
         "LSMinimumSystemVersion": "11.0",

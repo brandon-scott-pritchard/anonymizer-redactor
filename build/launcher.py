@@ -15,7 +15,7 @@ def selftest() -> int:
 
     from redactor import __version__, ner, ocr
 
-    lines = [f"Anonymizer / Redactor {__version__}",
+    lines = [f"Document Redactions & Anonymization {__version__}",
              f"frozen: {getattr(sys, 'frozen', False)}"]
 
     archive = ocr._bundled_archive()
@@ -50,9 +50,13 @@ def selftest() -> int:
 def main() -> int:
     if "--selftest" in sys.argv:
         return selftest()
-    from redactor.gui import main as gui_main
-    gui_main()
-    return 0
+    if "--desktop" in sys.argv:
+        # the old Tkinter front end, kept for anyone that wants it
+        from redactor.gui import main as gui_main
+        gui_main()
+        return 0
+    from redactor.webapp import main as web_main
+    return web_main()
 
 
 if __name__ == "__main__":
