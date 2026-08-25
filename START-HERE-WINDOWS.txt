@@ -1,0 +1,125 @@
+====================================================================
+ ANONYMIZER / REDACTOR - WINDOWS SETUP
+====================================================================
+
+You have two options. Option A just runs the tool. Option B also
+builds a standalone .exe you can copy to other Windows machines.
+
+Either way, do STEP 1 first.
+
+
+--------------------------------------------------------------------
+STEP 1 - INSTALL PYTHON  (one time, about 3 minutes)
+--------------------------------------------------------------------
+
+1. Go to  https://www.python.org/downloads/windows/
+2. Download the latest "Windows installer (64-bit)" for Python 3.11
+   or newer.
+3. Run the installer.
+
+   *** ON THE FIRST SCREEN, TICK "Add python.exe to PATH" ***
+
+   It is a small checkbox at the bottom. Nothing below will work if
+   you miss it. Then click "Install Now".
+
+4. Unzip this folder anywhere you like - Desktop is fine.
+
+
+--------------------------------------------------------------------
+OPTION A - JUST RUN THE TOOL
+--------------------------------------------------------------------
+
+Double-click:   run.bat
+
+The first time, a black window opens and installs what it needs.
+This takes 10-20 minutes and downloads roughly 500 MB. Leave it
+alone until the app window appears.
+
+Every time after that, run.bat opens the app in a few seconds.
+
+
+--------------------------------------------------------------------
+OPTION B - BUILD A STANDALONE .EXE
+--------------------------------------------------------------------
+
+Double-click:   build_windows.bat
+
+Same 10-20 minute wait the first time. When it finishes you will
+have:
+
+    dist\Anonymizer-Redactor\Anonymizer-Redactor.exe
+
+That whole "Anonymizer-Redactor" folder is self-contained. Copy the
+folder (not just the .exe) to any Windows machine and double-click
+the .exe - no Python needed on that machine.
+
+
+--------------------------------------------------------------------
+STEP 2 - OCR FOR SCANNED PDFS  (optional, recommended)
+--------------------------------------------------------------------
+
+Scanned PDFs are pictures of text with no text layer. Without OCR,
+the tool REFUSES them rather than handing back a file that looks
+redacted but is not.
+
+To handle them, install Tesseract:
+
+    https://github.com/UB-Mannheim/tesseract/wiki
+
+Download the 64-bit installer, run it, and tick "Add to PATH" if the
+installer offers it. Otherwise add this to your PATH by hand:
+
+    C:\Program Files\Tesseract-OCR
+
+Restart the app afterwards.
+
+
+--------------------------------------------------------------------
+USING IT
+--------------------------------------------------------------------
+
+Four tabs, left to right:
+
+ 1. Documents & options
+      Add your DOCX and PDF files. Choose whether DOCX files are
+      ANONYMIZED (realistic fake names) or REDACTED (black bars).
+      PDFs are always redacted.
+      Copy the mapping-key password somewhere safe.
+
+ 2. Names
+      Opens already filled in with the party names it found in the
+      document captions. Add anyone else - one full name per line,
+      or one at a time with the Add button. Press "Scan documents
+      for more names" to have it suggest others.
+
+ 3. Review
+      Everything it will change. Untick anything that should stay.
+      Double-click a replacement to edit it. Nothing is written yet.
+
+ 4. Run
+      Produces three files in your output folder:
+
+        anonymized-<date>.zip        the cleaned documents
+        mapping-key-<date>.json      encrypted original -> fake table
+        redaction-report-<date>.txt  what happened, with no values
+
+      Send the .zip. Never send the mapping key.
+
+
+--------------------------------------------------------------------
+IF SOMETHING GOES WRONG
+--------------------------------------------------------------------
+
+"python is not recognized"
+    Python was installed without "Add python.exe to PATH". Re-run the
+    Python installer, choose Modify, and tick it.
+
+Windows SmartScreen blocks the .exe
+    Click "More info", then "Run anyway". It is unsigned, which is
+    expected for an in-house tool.
+
+A PDF was refused
+    It is a scan with no text layer. Install Tesseract (Step 2).
+
+Test it on the files in the samples\ folder before you use it on
+anything real.

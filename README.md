@@ -176,12 +176,19 @@ macOS:
 Produces `dist/Anonymizer-Redactor.app`. It is unsigned, so the first launch
 needs a right-click → **Open**, then **Open** again in the dialog.
 
-Windows — run this **on a Windows machine**; a `.exe` cannot be produced from
-macOS:
+Windows — the `.exe` must be built **on a Windows machine**; it cannot be
+cross-built from macOS. Package the sources to send over:
 
+```bash
+./make_windows_kit.sh
 ```
-build_windows.bat
-```
+
+That writes `Anonymizer-Redactor-Windows.zip` (about 100 KB — sources only, no
+virtual environment, no git history, no macOS app). Copy it to the Windows
+machine, unzip, and follow `START-HERE-WINDOWS.txt` inside. It walks through
+installing Python, then either `run.bat` to just use the tool or
+`build_windows.bat` to produce
+`dist\Anonymizer-Redactor\Anonymizer-Redactor.exe`.
 
 Both scripts stage to a temporary directory, build a clean environment, bundle
 the language model, and copy the result back into `dist/`.

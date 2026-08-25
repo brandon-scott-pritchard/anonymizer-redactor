@@ -1,5 +1,6 @@
 # Build output
 dist/
+Anonymizer-Redactor-Windows.zip
 build/*.toc
 build/*.pkg
 build/Anonymizer-Redactor/
