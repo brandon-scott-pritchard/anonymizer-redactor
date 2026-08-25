@@ -129,6 +129,7 @@ def _review_row(app):
     store = MappingStore()
     store.add_person("John Michael Smith")
     app._review_ready(store)
+    app._unlock(app.tab_review)
     app.notebook.select(app.tab_review)
     app.update_idletasks()
     app.update()
@@ -190,6 +191,7 @@ def test_a_click_on_a_suggestion_name_cell_does_not_toggle(app):
 
     app.caption_names = [CaptionName("Jane Ellen Smith", "Petitioner", "doc", "medium")]
     app._render_suggestions()
+    app._unlock(app.tab_names)
     app.notebook.select(app.tab_names)
     app.update_idletasks()
     app.update()
@@ -250,6 +252,7 @@ def test_suggestion_type_change_updates_the_row_and_the_name_list(app, monkeypat
 
     app.caption_names = [CaptionName("Jane Ellen Smith", "Petitioner", "doc", "high")]
     app._render_suggestions()
+    app._unlock(app.tab_names)
     app.notebook.select(app.tab_names)
     app.update_idletasks()
     app.update()
@@ -263,3 +266,28 @@ def test_suggestion_type_change_updates_the_row_and_the_name_list(app, monkeypat
     app._suggest_checked.add(iid)
     app.add_checked_suggestions()
     assert "Jane Ellen Smith | minor" in app.names_text.get("1.0", "end")
+
+
+# ------------------------------------------------------------ wizard chrome --
+
+def test_later_tabs_start_locked_and_unlock_in_order(app):
+    for tab in (app.tab_names, app.tab_review, app.tab_run):
+        assert app.notebook.tab(tab, "state") == "disabled"
+    # selecting a locked tab must not switch to it
+    app.notebook.select(app.tab_review)
+    assert app.notebook.index("current") == 0
+    app._unlock(app.tab_names)
+    app.notebook.select(app.tab_names)
+    assert app.notebook.index("current") == 1
+
+
+def test_review_rows_are_zebra_striped(app):
+    from redactor.mapping import MappingStore
+
+    store = MappingStore()
+    for name in ("Jane Elizabeth Smith", "John Michael Smith", "Tommy Smith"):
+        store.add_person(name)
+    app._review_ready(store)
+    rows = app.review_tree.get_children()
+    stripes = [app.review_tree.item(iid, "tags") for iid in rows]
+    assert list(stripes[0]) == [] and "stripe" in stripes[1]

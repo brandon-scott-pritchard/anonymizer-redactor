@@ -23,6 +23,7 @@ import traceback
 from pathlib import Path
 from tkinter import BooleanVar, StringVar, Tk, filedialog, messagebox
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk
 
 import webbrowser
@@ -287,6 +288,16 @@ class App(Tk):
         style = ttk.Style(self)
         if "clam" in style.theme_names():
             style.theme_use("clam")
+        # scale every named font once instead of scattering point sizes; the
+        # checkbuttons, entries and labels all inherit from these
+        for name in ("TkDefaultFont", "TkTextFont", "TkHeadingFont", "TkMenuFont"):
+            try:
+                tkfont.nametofont(name).configure(size=13)
+            except tk.TclError:              # pragma: no cover - platform quirk
+                pass
+        style.configure("H1.TLabel", font=("", 14, "bold"))
+        style.configure("Hint.TLabel", foreground="#666666")
+        style.configure("Warn.TLabel", foreground="#8a4b00")
         style.configure("TButton", padding=(10, 6))
         style.map("TButton",
                   background=[("pressed", "#c9d7e4"), ("active", "#e3ebf2")])
@@ -296,6 +307,22 @@ class App(Tk):
         style.configure("Primary.TButton", padding=(12, 7), font=("", 11, "bold"))
         style.configure("Big.Treeview", rowheight=32, font=("", 13))
         style.configure("Big.Treeview.Heading", font=("", 12, "bold"))
+
+    def _nav_bar(self, frame, row: int, columnspan: int = 1,
+                 back: ttk.Frame | None = None,
+                 next_text: str = "", next_command=None) -> None:
+        """The identical bottom bar every tab gets: Back left, Continue right."""
+        bar = ttk.Frame(frame)
+        bar.grid(row=row, column=0, columnspan=columnspan, sticky="ew", pady=(12, 0))
+        if back is not None:
+            self._button(bar, text="← Back",
+                       command=lambda: self.notebook.select(back)).pack(side="left")
+        if next_text:
+            self._button(bar, text=next_text, style="Primary.TButton",
+                       command=next_command).pack(side="right")
+
+    def _unlock(self, tab: ttk.Frame) -> None:
+        self.notebook.tab(tab, state="normal")
 
     def _button(self, parent, **kwargs) -> ttk.Button:
         """A button that visibly reacts to being clicked."""
@@ -342,6 +369,9 @@ class App(Tk):
         self.notebook.add(self.tab_names, text="  2. Names  ")
         self.notebook.add(self.tab_review, text="  3. Review  ")
         self.notebook.add(self.tab_run, text="  4. Run  ")
+        # later steps unlock as their prerequisites are met - see go_to_*
+        for tab in (self.tab_names, self.tab_review, self.tab_run):
+            self.notebook.tab(tab, state="disabled")
 
         self._build_files_tab()
         self._build_names_tab()
@@ -363,7 +393,7 @@ class App(Tk):
         frame.rowconfigure(1, weight=1)
 
         ttk.Label(frame, text="Documents (.docx and .pdf)",
-                  font=("", 12, "bold")).grid(row=0, column=0, sticky="w")
+                  style="H1.TLabel").grid(row=0, column=0, sticky="w")
 
         list_frame = ttk.Frame(frame)
         list_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 12), pady=(4, 8))
@@ -392,12 +422,12 @@ class App(Tk):
         ttk.Radiobutton(mode_box, text="Redact  (black bars, nothing invented)",
                         variable=self.docx_mode, value="redact",
                         command=self._update_mode_note).pack(anchor="w")
-        self.mode_note = tk.Label(mode_box, text=ANONYMIZE_NOTE, wraplength=380,
-                                  justify="left", anchor="w", fg="#8a4b00")
+        self.mode_note = ttk.Label(mode_box, text=ANONYMIZE_NOTE, wraplength=380,
+                                   justify="left", anchor="w", style="Warn.TLabel")
         self.mode_note.pack(anchor="w", pady=(6, 4), fill="x")
         ttk.Separator(mode_box).pack(fill="x", pady=4)
-        tk.Label(mode_box, text=PDF_NOTE, wraplength=380, justify="left",
-                 anchor="w", fg="#444").pack(anchor="w", fill="x")
+        ttk.Label(mode_box, text=PDF_NOTE, wraplength=380, justify="left",
+                  anchor="w", style="Hint.TLabel").pack(anchor="w", fill="x")
 
         opt_box = ttk.LabelFrame(options, text="Also scrub", padding=8)
         opt_box.grid(row=1, column=0, sticky="ew", pady=(0, 8))
@@ -431,18 +461,18 @@ class App(Tk):
         self.show_key = BooleanVar(value=False)
         ttk.Checkbutton(key_box, text="Show", variable=self.show_key,
                         command=self._toggle_key).pack(anchor="w")
-        tk.Label(key_box, wraplength=380, justify="left", anchor="w", fg="#444",
-                 text=("The original-to-replacement table is encrypted with this password and "
-                       "written next to the archive, never inside it. Copy it somewhere safe - "
-                       "without it the mapping cannot be recovered.")).pack(anchor="w", fill="x")
+        ttk.Label(key_box, wraplength=380, justify="left", anchor="w", style="Hint.TLabel",
+                  text=("The original-to-replacement table is encrypted with this password and "
+                        "written next to the archive, never inside it. Copy it somewhere safe - "
+                        "without it the mapping cannot be recovered.")).pack(anchor="w", fill="x")
 
         allow_box = ttk.LabelFrame(options, text="Never change these terms (one per line)", padding=8)
         allow_box.grid(row=3, column=0, sticky="ew")
         self.allowlist_text = tk.Text(allow_box, height=4, wrap="word")
         self.allowlist_text.pack(fill="x")
-        tk.Label(allow_box, wraplength=380, justify="left", anchor="w", fg="#444",
-                 text=("Courts, judges, commissioners, statutes, rules and reported citations "
-                       "are already protected automatically.")).pack(anchor="w", fill="x", pady=(4, 0))
+        ttk.Label(allow_box, wraplength=380, justify="left", anchor="w", style="Hint.TLabel",
+                  text=("Courts, judges, commissioners, statutes, rules and reported citations "
+                        "are already protected automatically.")).pack(anchor="w", fill="x", pady=(4, 0))
 
         out_row = ttk.Frame(frame)
         out_row.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10, 0))
@@ -450,8 +480,9 @@ class App(Tk):
         self.output_dir = StringVar(value=str(Path.home() / "Desktop"))
         ttk.Entry(out_row, textvariable=self.output_dir).pack(side="left", fill="x", expand=True, padx=6)
         self._button(out_row, text="Browse…", command=self.choose_output).pack(side="left")
-        self._button(out_row, text="Continue to names →",
-                   command=self.go_to_names).pack(side="left", padx=(12, 0))
+
+        self._nav_bar(frame, row=4, columnspan=2,
+                      next_text="Continue to names →", next_command=self.go_to_names)
 
     def _toggle_key(self):
         self.key_entry.configure(show="" if self.show_key.get() else "•")
@@ -459,7 +490,7 @@ class App(Tk):
     def _update_mode_note(self):
         anonymize = self.docx_mode.get() == "anonymize"
         self.mode_note.configure(text=ANONYMIZE_NOTE if anonymize else REDACT_NOTE,
-                                 fg="#8a4b00" if anonymize else "#333")
+                                 style="Warn.TLabel" if anonymize else "Hint.TLabel")
 
     # ------------------------------------------------------------ tab two --
     def _build_names_tab(self):
@@ -468,12 +499,12 @@ class App(Tk):
         frame.columnconfigure(1, weight=1)
         frame.rowconfigure(2, weight=1)
 
-        tk.Label(frame, justify="left", anchor="w", wraplength=1040,
-                 text=("Every name here is matched in all of its written forms - full name, "
-                       "first name alone, surname alone, \"Smith, John\", \"J. Smith\", "
-                       "\"Mr. Smith\", the possessive \"Smith's\" and the plural \"the Smiths\" - "
-                       "and any combination of the parts you enter."),
-                 ).grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        ttk.Label(frame, justify="left", anchor="w", wraplength=1040,
+                  text=("Every name here is matched in all of its written forms - full name, "
+                        "first name alone, surname alone, \"Smith, John\", \"J. Smith\", "
+                        "\"Mr. Smith\", the possessive \"Smith's\" and the plural \"the Smiths\" - "
+                        "and any combination of the parts you enter."),
+                  ).grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
 
         add_row = ttk.LabelFrame(frame, text="Add one name at a time", padding=8)
         add_row.grid(row=1, column=0, sticky="ew", padx=(0, 8))
@@ -489,7 +520,7 @@ class App(Tk):
         self._button(inner, text="Add", command=self.add_single_name).pack(side="left")
 
         ttk.Label(frame, text="Name list - one full name per line",
-                  font=("", 11, "bold")).grid(row=1, column=1, sticky="sw")
+                  style="H1.TLabel").grid(row=1, column=1, sticky="sw")
 
         self.names_text = tk.Text(frame, wrap="none", height=18, font=("Menlo", 12))
         self.names_text.grid(row=2, column=1, sticky="nsew", pady=(4, 8))
@@ -498,7 +529,7 @@ class App(Tk):
         suggest_frame.grid(row=2, column=0, sticky="nsew", padx=(0, 8), pady=(4, 8))
         suggest_frame.rowconfigure(1, weight=1)
         suggest_frame.columnconfigure(0, weight=1)
-        ttk.Label(suggest_frame, text="Suggestions", font=("", 11, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Label(suggest_frame, text="Suggestions", style="H1.TLabel").grid(row=0, column=0, sticky="w")
 
         columns = ("name", "role", "confidence", "source")
         self.suggest_tree = ttk.Treeview(suggest_frame, columns=columns, show="tree headings",
@@ -513,6 +544,7 @@ class App(Tk):
         sscroll = ttk.Scrollbar(suggest_frame, command=self.suggest_tree.yview)
         self.suggest_tree.configure(yscrollcommand=sscroll.set)
         sscroll.grid(row=1, column=1, sticky="ns")
+        self._sortable(self.suggest_tree, columns)
         self.suggest_tree.bind("<Button-1>", self._suggest_click)
         self.suggest_tree.bind("<Double-1>", self._suggest_double)
         for button in ("<Button-2>", "<Button-3>"):
@@ -528,8 +560,9 @@ class App(Tk):
         self._button(buttons, text="Re-read captions", command=self.refresh_captions).pack(side="left", padx=(18, 0))
         self._button(buttons, text="Scan documents for more names",
                    command=self.scan_for_suggestions).pack(side="left", padx=6)
-        self._button(buttons, text="Continue to review →",
-                   command=self.go_to_review).pack(side="right")
+
+        self._nav_bar(frame, row=4, columnspan=2, back=self.tab_files,
+                      next_text="Continue to review →", next_command=self.go_to_review)
 
     # ---------------------------------------------------------- tab three --
     def _build_review_tab(self):
@@ -537,11 +570,11 @@ class App(Tk):
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(1, weight=1)
 
-        tk.Label(frame, justify="left", anchor="w", wraplength=1040,
-                 text=("Everything below will change. Untick anything that should stay. "
-                       "Double-click the Found or Replaced-with columns to edit an item. "
-                       "Nothing has been written yet."),
-                 ).grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        ttk.Label(frame, justify="left", anchor="w", wraplength=1040,
+                  text=("Everything below will change. Untick anything that should stay. "
+                        "Double-click the Found or Replaced-with columns to edit an item. "
+                        "Nothing has been written yet."),
+                  ).grid(row=0, column=0, sticky="ew", pady=(0, 8))
 
         columns = ("type", "original", "replacement", "hits", "source")
         self.review_tree = ttk.Treeview(frame, columns=columns, show="tree headings",
@@ -559,6 +592,7 @@ class App(Tk):
         rscroll = ttk.Scrollbar(frame, command=self.review_tree.yview)
         self.review_tree.configure(yscrollcommand=rscroll.set)
         rscroll.grid(row=1, column=1, sticky="ns")
+        self._sortable(self.review_tree, columns)
         self.review_tree.bind("<Button-1>", self._review_click)
         self.review_tree.bind("<Double-1>", self._review_double)
         self.review_tree.bind("<space>", self._review_space)
@@ -566,7 +600,8 @@ class App(Tk):
             self.review_tree.bind(button, lambda e: self._tree_menu(
                 self.review_tree, self._edit_review_row, e))
 
-        self.review_warning = tk.Label(frame, justify="left", anchor="w", wraplength=1040, fg="#8a4b00")
+        self.review_warning = ttk.Label(frame, justify="left", anchor="w",
+                                        wraplength=1040, style="Warn.TLabel")
         self.review_warning.grid(row=2, column=0, sticky="ew", pady=(6, 4))
 
         buttons = ttk.Frame(frame)
@@ -574,7 +609,9 @@ class App(Tk):
         self._button(buttons, text="Tick all", command=lambda: self._set_all_review(True)).pack(side="left")
         self._button(buttons, text="Untick all", command=lambda: self._set_all_review(False)).pack(side="left", padx=6)
         self._button(buttons, text="Rescan documents", command=self.go_to_review).pack(side="left", padx=(18, 0))
-        self._button(buttons, text="Continue to run →", command=self.go_to_run).pack(side="right")
+
+        self._nav_bar(frame, row=4, back=self.tab_names,
+                      next_text="Continue to run →", next_command=self.go_to_run)
 
     # ----------------------------------------------------------- tab four --
     def _build_run_tab(self):
@@ -582,8 +619,8 @@ class App(Tk):
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(2, weight=1)
 
-        self.run_summary = tk.Label(frame, justify="left", anchor="w", wraplength=1040,
-                                    text="Ready when you are.")
+        self.run_summary = ttk.Label(frame, justify="left", anchor="w", wraplength=1040,
+                                     text="Ready when you are.")
         self.run_summary.grid(row=0, column=0, sticky="ew", pady=(0, 8))
 
         buttons = ttk.Frame(frame)
@@ -603,6 +640,8 @@ class App(Tk):
         lscroll = ttk.Scrollbar(frame, command=self.log.yview)
         self.log.configure(yscrollcommand=lscroll.set)
         lscroll.grid(row=2, column=1, sticky="ns")
+
+        self._nav_bar(frame, row=3, columnspan=2, back=self.tab_review)
 
     # ------------------------------------------------------------- files --
     def add_files(self):
@@ -671,6 +710,7 @@ class App(Tk):
             messagebox.showwarning("No password",
                                    "Set a password for the mapping key, or press New to generate one.")
             return
+        self._unlock(self.tab_names)
         self.notebook.select(self.tab_names)
         if not self.caption_names:
             self.refresh_captions()
@@ -714,6 +754,31 @@ class App(Tk):
     def _paint_check(self, tree: ttk.Treeview, iid: str, checked: bool) -> None:
         tree.item(iid, image=self._img_checked if checked else self._img_unchecked)
 
+    def _restripe(self, tree: ttk.Treeview) -> None:
+        """Zebra rows, reapplied after every repaint or re-sort."""
+        tree.tag_configure("stripe", background="#f2f5f9")
+        for index, iid in enumerate(tree.get_children()):
+            tree.item(iid, tags=("stripe",) if index % 2 else ())
+
+    def _sortable(self, tree: ttk.Treeview, columns: tuple[str, ...]) -> None:
+        for column in columns:
+            tree.heading(column, command=lambda c=column: self._sort_tree(tree, c, False))
+
+    def _sort_tree(self, tree: ttk.Treeview, column: str, descending: bool) -> None:
+        def sort_key(iid):
+            value = tree.set(iid, column)
+            try:
+                return (0, float(value.lstrip("x")), "")
+            except ValueError:
+                return (1, 0.0, value.casefold())
+
+        for index, iid in enumerate(sorted(tree.get_children(), key=sort_key,
+                                           reverse=descending)):
+            tree.move(iid, "", index)
+        tree.heading(column,
+                     command=lambda: self._sort_tree(tree, column, not descending))
+        self._restripe(tree)
+
     def _render_suggestions(self):
         self.suggest_tree.delete(*self.suggest_tree.get_children())
         self._suggest_checked.clear()
@@ -736,6 +801,7 @@ class App(Tk):
                 values=(item.text, categories.label_for(item.category),
                         f"x{item.count}", "; ".join(sorted(item.documents))[:40]),
             )
+        self._restripe(self.suggest_tree)
 
     def _suggest_toggle(self, iid: str) -> None:
         if iid in self._suggest_checked:
@@ -838,6 +904,7 @@ class App(Tk):
         if not self.files:
             messagebox.showwarning("No documents", "Add at least one document first.")
             return
+        self._unlock(self.tab_review)
         self.notebook.select(self.tab_review)
         store = self._store_with_names()
         settings = self.settings()
@@ -861,6 +928,7 @@ class App(Tk):
                 values=(entity.label, entity.canonical, entity.replacement,
                         entity.occurrences, entity.source),
             )
+        self._restripe(self.review_tree)
         risky = sorted({v.text for e in store.persons() for v in e.variants if v.risky})
         unused = [e.canonical for e in store.entities.values() if e.occurrences == 0]
         notes = []
@@ -1047,6 +1115,7 @@ class App(Tk):
 
     # --------------------------------------------------------------- run --
     def go_to_run(self):
+        self._unlock(self.tab_run)
         self.notebook.select(self.tab_run)
         active = len(self.store.active())
         self.run_summary.configure(
@@ -1157,16 +1226,24 @@ class App(Tk):
                 kind = message[0]
                 if kind == "progress":
                     self.status.set(message[1])
-                    self.progress.configure(value=message[2] * 100)
+                    fraction = message[2]
+                    if fraction:
+                        self._progress_mode("determinate")
+                        self.progress.configure(value=fraction * 100)
+                    else:
+                        # no fraction yet - keep visibly moving, not stuck at 0
+                        self._progress_mode("indeterminate")
                     if self._dialog is not None:
                         self._dialog.update_progress(message[1], message[2])
                 elif kind == "done":
                     self._busy = False
+                    self._progress_mode("determinate")
                     self.progress.configure(value=100)
                     self._close_dialog()
                     message[1](message[2])
                 elif kind == "error":
                     self._busy = False
+                    self._progress_mode("determinate")
                     self.progress.configure(value=0)
                     self._close_dialog()
                     self.status.set(message[1])
@@ -1176,6 +1253,16 @@ class App(Tk):
         except queue.Empty:
             pass
         self.after(100, self._drain)
+
+    def _progress_mode(self, mode: str) -> None:
+        if str(self.progress.cget("mode")) == mode:
+            return
+        if mode == "indeterminate":
+            self.progress.configure(mode="indeterminate")
+            self.progress.start(80)
+        else:
+            self.progress.stop()
+            self.progress.configure(mode="determinate")
 
     def _close_dialog(self) -> None:
         """Always before a messagebox - two grabs at once wedges the UI."""
