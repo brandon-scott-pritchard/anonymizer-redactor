@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import platform
 import shutil
 import sys
 import tarfile
@@ -44,11 +45,22 @@ class OcrWord:
 
 
 def _platform_folder() -> str:
+    """Platform *and* architecture.
+
+    An Intel Mac and an Apple Silicon Mac need different binaries, so the
+    architecture is part of the identity - shipping one to the other produces a
+    file that simply will not execute.
+    """
+    machine = platform.machine().lower()
+    if machine in {"amd64", "x64"}:
+        machine = "x86_64"
+    elif machine in {"aarch64"}:
+        machine = "arm64"
     if sys.platform == "darwin":
-        return "macos"
+        return f"macos-{machine}"
     if sys.platform.startswith("win"):
-        return "windows"
-    return "linux"
+        return f"windows-{machine}"
+    return f"linux-{machine}"
 
 
 def _vendor_roots() -> list[Path]:

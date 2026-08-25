@@ -56,12 +56,25 @@ To bundle Tesseract into the macOS app:
 
 ```bash
 brew install tesseract
-python3 vendor_tesseract_macos.py
+python3 vendor_tesseract_macos.py --arch both
 ./build_macos.sh
 ```
 
+`--arch both` vendors Apple Silicon **and** Intel. One will not execute on the
+other, so each gets its own directory and its own archive, and `ocr.py` picks by
+`platform.machine()` at run time. The Apple Silicon build comes from Homebrew;
+the Intel one comes from conda-forge, because homebrew-core no longer publishes
+Intel bottles for Tesseract. Only the archive matching the build's architecture
+is bundled, so neither app carries the other's binaries.
+
 The equivalent on Windows is `python vendor_tesseract_windows.py`, run on a
 Windows machine with Tesseract installed. Skip it and RapidOCR covers you.
+
+> **Intel Macs need an Intel build of the app itself.** PyInstaller freezes for
+> whichever machine runs `build_macos.sh`, so the `.app` produced on Apple
+> Silicon will not launch on an Intel Mac no matter which Tesseract is inside
+> it. Run `build_macos.sh` on an Intel Mac to produce that one; the vendored
+> Intel Tesseract is already there waiting for it.
 
 ---
 
@@ -171,6 +184,9 @@ are handled:
   a photographed bank statement inside a DOCX is still readable. The tool counts
   them and warns; review them by hand.
 - **Handwriting is not read by OCR.**
+- **The macOS app is architecture-specific.** It runs on the kind of Mac it was
+  built on. Tesseract is vendored for both, but the app itself is not universal
+  — building for Intel means running the build on an Intel Mac.
 - **Image-only PDFs are refused** when no OCR engine is available, rather than
   written out looking redacted. That is deliberate.
 - **OCR word boxes are approximate**, especially RapidOCR's, which detects whole

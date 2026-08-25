@@ -4,6 +4,8 @@
 # project path contains a colon, which PyInstaller cannot handle.
 # Run it through build_macos.sh or build_windows.bat rather than by hand.
 
+import platform
+import sys
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all
@@ -42,10 +44,25 @@ for package in ("rapidocr_onnxruntime", "onnxruntime", "rapidocr"):
 # replaced the vendored libtesseract with a different version. A .tar.gz is
 # opaque to all of that, so exactly what was vendored is what ships. ocr.py
 # unpacks it once, on first use.
+# Only the archive matching this build's architecture: a frozen app is already
+# arm64-or-Intel, so carrying the other one is dead weight.
+_machine = platform.machine().lower()
+_machine = {"amd64": "x86_64", "x64": "x86_64", "aarch64": "arm64"}.get(_machine, _machine)
+if sys.platform == "darwin":
+    _folder = f"macos-{_machine}"
+elif sys.platform.startswith("win"):
+    _folder = f"windows-{_machine}"
+else:
+    _folder = f"linux-{_machine}"
+
 _vendor = Path(SPECPATH) / "vendor"
 if _vendor.is_dir():
-    for archive in _vendor.glob("tesseract-*.tar.gz"):
-        datas.append((str(archive), "vendor"))
+    _archive = _vendor / f"tesseract-{_folder}.tar.gz"
+    if _archive.is_file():
+        datas.append((str(_archive), "vendor"))
+        print(f"spec: bundling {_archive.name}")
+    else:
+        print(f"spec: no vendored Tesseract for {_folder}; RapidOCR will cover OCR")
 
 hiddenimports += [
     "pymupdf", "fitz", "lxml.etree", "lxml._elementpath",

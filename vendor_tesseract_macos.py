@@ -7,14 +7,23 @@ graph, copies each non-system library next to the binary, rewrites the load
 commands to relative paths, and re-signs everything - because editing a Mach-O
 header invalidates its signature and macOS will refuse to load it.
 
-    python3 vendor_tesseract_macos.py
+    python3 vendor_tesseract_macos.py                # this Mac's architecture
+    python3 vendor_tesseract_macos.py --arch x86_64  # also build for Intel
+    python3 vendor_tesseract_macos.py --arch both
 
-Run it once on a Mac that has ``brew install tesseract``. The result is
-committed-free and rebuildable; PyInstaller picks ``vendor/`` up automatically.
+Apple Silicon and Intel need separate binaries - one will not execute on the
+other - so each architecture is vendored into its own directory and its own
+archive, and ocr.py picks by ``platform.machine()`` at run time.
+
+For the host architecture the Homebrew install is the source. For the other
+one Homebrew is no help, because homebrew-core no longer publishes Intel
+bottles for Tesseract, so the binary comes from conda-forge, which still does.
 """
 
 from __future__ import annotations
 
+import argparse
+import os
 import platform
 import shutil
 import tarfile
@@ -23,7 +32,8 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-TARGET = HERE / "vendor" / "tesseract" / "macos"
+VENDOR = HERE / "vendor"
+ARCHES = ("arm64", "x86_64")
 
 # Libraries the operating system always provides. Copying these would be both
 # pointless and, for the frameworks, wrong.
@@ -37,6 +47,67 @@ def run(*args: str) -> str:
     if result.returncode != 0:
         raise SystemExit(f"command failed: {' '.join(args)}\n{result.stderr}")
     return result.stdout
+
+
+def host_arch() -> str:
+    machine = platform.machine().lower()
+    return "arm64" if machine in {"arm64", "aarch64"} else "x86_64"
+
+
+def find_conda() -> str | None:
+    for candidate in ("conda", "mamba", "micromamba"):
+        found = shutil.which(candidate)
+        if found:
+            return found
+    for candidate in (Path("/opt/anaconda3/bin/conda"), Path("/opt/miniconda3/bin/conda"),
+                      Path.home() / "anaconda3" / "bin" / "conda",
+                      Path.home() / "miniconda3" / "bin" / "conda"):
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def fetch_from_conda_forge(arch: str) -> Path:
+    """Download a Tesseract for ``arch`` into a scratch prefix and return its bin.
+
+    homebrew-core stopped publishing Intel bottles for Tesseract, so a Mac with
+    Apple Silicon has no Homebrew route to an x86_64 build. conda-forge still
+    ships both.
+    """
+    conda = find_conda()
+    if conda is None:
+        raise SystemExit(
+            f"cannot build the {arch} bundle: no conda/mamba found, and Homebrew\n"
+            f"has no Intel bottle for Tesseract. Install Miniforge, or run this\n"
+            f"script on a {arch} Mac where 'brew install tesseract' works."
+        )
+
+    subdir = "osx-arm64" if arch == "arm64" else "osx-64"
+    prefix = Path(os.environ.get("TMPDIR", "/tmp")) / f"anonymizer-tesseract-{subdir}"
+    binary = prefix / "bin" / "tesseract"
+    if binary.exists():
+        print(f"    reusing {prefix}")
+        return binary
+
+    print(f"    fetching tesseract for {subdir} from conda-forge (takes a minute)")
+    environment = dict(os.environ, CONDA_SUBDIR=subdir)
+    result = subprocess.run(
+        [conda, "create", "-p", str(prefix), "-c", "conda-forge", "tesseract", "-y", "--quiet"],
+        env=environment, capture_output=True, text=True,
+    )
+    if result.returncode != 0 or not binary.exists():
+        raise SystemExit(f"conda could not fetch tesseract for {subdir}:\n{result.stderr[-2000:]}")
+    return binary
+
+
+def source_for(arch: str) -> Path:
+    """Where to copy this architecture's Tesseract from."""
+    if arch == host_arch():
+        found = shutil.which("tesseract")
+        if found:
+            return Path(found).resolve()
+        print(f"    nothing on PATH for {arch}; falling back to conda-forge")
+    return fetch_from_conda_forge(arch).resolve()
 
 
 # Homebrew libraries reference some of their own dependencies through @rpath
@@ -100,20 +171,16 @@ def sign(path: Path) -> None:
                    capture_output=True)
 
 
-def main() -> int:
-    if sys.platform != "darwin":
-        raise SystemExit("this script vendors the macOS build; run it on a Mac")
+def vendor(arch: str) -> None:
+    SEARCH_DIRS.clear()
+    folder = f"macos-{arch}"
+    TARGET = VENDOR / "tesseract" / folder
 
-    source = shutil.which("tesseract")
-    if not source:
-        raise SystemExit(
-            "tesseract was not found on PATH.\n"
-            "Install it first:  brew install tesseract"
-        )
-    source = Path(source).resolve()
-    print(f"==> Vendoring {source}")
-    print(f"    architecture: {platform.machine()}")
+    source = source_for(arch)
+    print(f"==> Vendoring {arch} from {source}")
 
+    if TARGET.exists():
+        shutil.rmtree(TARGET)
     bin_dir, lib_dir, data_dir = TARGET / "bin", TARGET / "lib", TARGET / "tessdata"
     for directory in (bin_dir, lib_dir, data_dir):
         directory.mkdir(parents=True, exist_ok=True)
@@ -183,8 +250,15 @@ def main() -> int:
     check = subprocess.run([str(binary), "--version"], capture_output=True, text=True,
                            env={"TESSDATA_PREFIX": str(data_dir), "PATH": "/usr/bin:/bin"})
     if check.returncode != 0:
-        raise SystemExit(f"the vendored binary does not run:\n{check.stderr}")
-    print("    " + check.stdout.splitlines()[0])
+        if arch != host_arch():
+            # an Intel binary needs Rosetta to run on Apple Silicon; without it
+            # the bundle is still fine, it just cannot be checked from here
+            print(f"    could not run the {arch} binary on this {host_arch()} Mac "
+                  f"(Rosetta may be absent) - written unverified")
+        else:
+            raise SystemExit(f"the vendored binary does not run:\n{check.stderr}")
+    else:
+        print("    " + check.stdout.splitlines()[0])
 
     remaining = [d for d in dependencies(binary, keep_relative=True)
                  if not d.startswith("@executable_path")]
@@ -196,15 +270,35 @@ def main() -> int:
     # build - which silently swapped these for a different Tesseract version.
     # A tarball is opaque to that machinery, so what ships is exactly what was
     # vendored here. ocr.py unpacks it once on first use.
-    archive = TARGET.parent.parent / "tesseract-macos.tar.gz"
+    archive = VENDOR / f"tesseract-{folder}.tar.gz"
     print(f"==> Packing {archive.name}")
     with tarfile.open(archive, "w:gz") as tar:
         tar.add(TARGET, arcname="tesseract")
 
     size = sum(f.stat().st_size for f in TARGET.rglob("*") if f.is_file()) / 1e6
     print(f"==> Done: {TARGET.relative_to(HERE)} ({size:.0f} MB), "
-          f"archive {archive.stat().st_size / 1e6:.0f} MB")
-    print("    Rebuild the app with ./build_macos.sh to include it.")
+          f"archive {archive.stat().st_size / 1e6:.0f} MB\n")
+
+
+def main() -> int:
+    if sys.platform != "darwin":
+        raise SystemExit("this script vendors the macOS build; run it on a Mac")
+
+    parser = argparse.ArgumentParser(description="Vendor Tesseract into vendor/")
+    parser.add_argument("--arch", choices=(*ARCHES, "both"), default=host_arch(),
+                        help="which architecture to vendor (default: this Mac's)")
+    arguments = parser.parse_args()
+
+    wanted = ARCHES if arguments.arch == "both" else (arguments.arch,)
+    for arch in wanted:
+        vendor(arch)
+
+    print("Rebuild the app with ./build_macos.sh to include these.")
+    if "x86_64" in wanted and host_arch() == "arm64":
+        print()
+        print("Note: this supplies Tesseract for Intel, not an Intel app. The app")
+        print("itself is built for whichever Mac runs build_macos.sh, so an Intel")
+        print(".app still has to be built on an Intel Mac.")
     return 0
 
 

@@ -18,6 +18,7 @@ import string
 import subprocess
 import sys
 import threading
+import time
 import traceback
 from pathlib import Path
 from tkinter import BooleanVar, StringVar, Tk, filedialog, messagebox, simpledialog
@@ -69,6 +70,82 @@ def _reveal(path: Path) -> None:
         pass
 
 
+class ProgressDialog(tk.Toplevel):
+    """A modal shown while a step runs.
+
+    Work happens on a background thread, so without this the window simply sits
+    there and looks hung. The elapsed counter and the moving dots keep ticking
+    even when a step reports no progress for a while, which is the difference
+    between "still working" and "crashed".
+    """
+
+    def __init__(self, parent: tk.Misc, title: str):
+        super().__init__(parent)
+        self.title(title)
+        self.resizable(False, False)
+        self.transient(parent)
+        # deliberately not closeable - the step owns this window's lifetime
+        self.protocol("WM_DELETE_WINDOW", lambda: None)
+
+        body = ttk.Frame(self, padding=22)
+        body.pack(fill="both", expand=True)
+
+        ttk.Label(body, text=title, font=("", 14, "bold")).pack(anchor="w")
+        self.message = ttk.Label(body, text="Starting…", wraplength=420, anchor="w")
+        self.message.pack(anchor="w", fill="x", pady=(8, 10))
+
+        self.bar = ttk.Progressbar(body, length=420, mode="determinate", maximum=100)
+        self.bar.pack(fill="x")
+
+        self.detail = ttk.Label(body, text="", foreground="#666666", anchor="w")
+        self.detail.pack(anchor="w", fill="x", pady=(8, 0))
+
+        ttk.Label(body, foreground="#666666", wraplength=420, anchor="w", justify="left",
+                  text="This closes by itself when the step finishes. Large PDFs and "
+                       "scanned pages take the longest.").pack(anchor="w", fill="x", pady=(10, 0))
+
+        self._started = time.monotonic()
+        self._dots = 0
+        self._job = None
+        self._tick()
+        self._centre_on(parent)
+        self.grab_set()
+
+    def _centre_on(self, parent: tk.Misc) -> None:
+        self.update_idletasks()
+        try:
+            x = parent.winfo_rootx() + (parent.winfo_width() - self.winfo_width()) // 2
+            y = parent.winfo_rooty() + (parent.winfo_height() - self.winfo_height()) // 3
+            self.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        except tk.TclError:      # pragma: no cover - window may be gone
+            pass
+
+    def _tick(self) -> None:
+        elapsed = int(time.monotonic() - self._started)
+        self._dots = (self._dots % 3) + 1      # 1..3, never blank
+        minutes, seconds = divmod(elapsed, 60)
+        clock = f"{minutes}m {seconds:02d}s" if minutes else f"{seconds}s"
+        self.detail.configure(text=f"{'•' * self._dots:<3}   {clock} elapsed")
+        self._job = self.after(400, self._tick)
+
+    def update_progress(self, message: str, fraction: float) -> None:
+        self.message.configure(text=message)
+        self.bar.configure(value=max(0.0, min(1.0, fraction)) * 100)
+
+    def close(self) -> None:
+        if self._job is not None:
+            try:
+                self.after_cancel(self._job)
+            except tk.TclError:      # pragma: no cover - defensive
+                pass
+            self._job = None
+        try:
+            self.grab_release()
+        except tk.TclError:          # pragma: no cover - defensive
+            pass
+        self.destroy()
+
+
 class App(Tk):
     def __init__(self):
         super().__init__()
@@ -84,9 +161,62 @@ class App(Tk):
         self.run_result: pipeline.RunResult | None = None
         self._queue: "queue.Queue[tuple]" = queue.Queue()
         self._busy = False
+        self._dialog: ProgressDialog | None = None
 
+        self._init_theme()
         self._build()
         self.after(100, self._drain)
+
+    # ------------------------------------------------------------- theme --
+    def _init_theme(self) -> None:
+        """Use a theme that honours colour changes.
+
+        macOS's native aqua theme ignores background colours on buttons, so the
+        click flash would be invisible there. clam renders it identically on
+        both platforms.
+        """
+        style = ttk.Style(self)
+        if "clam" in style.theme_names():
+            style.theme_use("clam")
+        style.configure("TButton", padding=(10, 6))
+        style.map("TButton",
+                  background=[("pressed", "#c9d7e4"), ("active", "#e3ebf2")])
+        style.configure("Flash.TButton", padding=(10, 6),
+                        background="#4a7fb5", foreground="#ffffff")
+        style.map("Flash.TButton", background=[("!disabled", "#4a7fb5")])
+        style.configure("Primary.TButton", padding=(12, 7), font=("", 11, "bold"))
+
+    def _button(self, parent, **kwargs) -> ttk.Button:
+        """A button that visibly reacts to being clicked."""
+        command = kwargs.pop("command", None)
+        button = ttk.Button(parent, **kwargs)
+        button.configure(command=lambda: self._clicked(button, command))
+        return button
+
+    def _clicked(self, button: ttk.Button, command) -> None:
+        self._flash(button)
+        if command is not None:
+            # let the flash paint before any work starts on this thread
+            self.after(10, command)
+
+    def _flash(self, button: ttk.Button) -> None:
+        if getattr(button, "_flashing", False):
+            return
+        try:
+            original = str(button.cget("style")) or "TButton"
+        except tk.TclError:              # pragma: no cover - defensive
+            return
+        button._flashing = True
+        button.configure(style="Flash.TButton")
+
+        def restore():
+            try:
+                button.configure(style=original)
+            except tk.TclError:          # pragma: no cover - defensive
+                pass
+            button._flashing = False
+
+        self.after(160, restore)
 
     # ------------------------------------------------------------------ ui --
     def _build(self):
@@ -134,9 +264,9 @@ class App(Tk):
 
         buttons = ttk.Frame(frame)
         buttons.grid(row=2, column=0, sticky="w", pady=(0, 10))
-        ttk.Button(buttons, text="Add documents…", command=self.add_files).pack(side="left")
-        ttk.Button(buttons, text="Remove selected", command=self.remove_files).pack(side="left", padx=6)
-        ttk.Button(buttons, text="Clear", command=self.clear_files).pack(side="left")
+        self._button(buttons, text="Add documents…", command=self.add_files).pack(side="left")
+        self._button(buttons, text="Remove selected", command=self.remove_files).pack(side="left", padx=6)
+        self._button(buttons, text="Clear", command=self.clear_files).pack(side="left")
 
         options = ttk.Frame(frame)
         options.grid(row=1, column=1, rowspan=2, sticky="nsew")
@@ -185,7 +315,7 @@ class App(Tk):
         entry_row.pack(fill="x")
         self.key_entry = ttk.Entry(entry_row, textvariable=self.key_password, show="•")
         self.key_entry.pack(side="left", fill="x", expand=True)
-        ttk.Button(entry_row, text="New", width=5,
+        self._button(entry_row, text="New", width=5,
                    command=lambda: self.key_password.set(_password())).pack(side="left", padx=4)
         self.show_key = BooleanVar(value=False)
         ttk.Checkbutton(key_box, text="Show", variable=self.show_key,
@@ -208,8 +338,8 @@ class App(Tk):
         ttk.Label(out_row, text="Save results to:").pack(side="left")
         self.output_dir = StringVar(value=str(Path.home() / "Desktop"))
         ttk.Entry(out_row, textvariable=self.output_dir).pack(side="left", fill="x", expand=True, padx=6)
-        ttk.Button(out_row, text="Browse…", command=self.choose_output).pack(side="left")
-        ttk.Button(out_row, text="Continue to names →",
+        self._button(out_row, text="Browse…", command=self.choose_output).pack(side="left")
+        self._button(out_row, text="Continue to names →",
                    command=self.go_to_names).pack(side="left", padx=(12, 0))
 
     def _toggle_key(self):
@@ -245,7 +375,7 @@ class App(Tk):
         self.new_name_kind = StringVar(value="Person")
         ttk.Combobox(inner, textvariable=self.new_name_kind, width=12, state="readonly",
                      values=("Person", "Minor child")).pack(side="left", padx=6)
-        ttk.Button(inner, text="Add", command=self.add_single_name).pack(side="left")
+        self._button(inner, text="Add", command=self.add_single_name).pack(side="left")
 
         ttk.Label(frame, text="Name list - one full name per line",
                   font=("", 11, "bold")).grid(row=1, column=1, sticky="sw")
@@ -276,14 +406,14 @@ class App(Tk):
 
         buttons = ttk.Frame(frame)
         buttons.grid(row=3, column=0, columnspan=2, sticky="ew")
-        ttk.Button(buttons, text="Add ticked to the name list →",
+        self._button(buttons, text="Add ticked to the name list →",
                    command=self.add_checked_suggestions).pack(side="left")
-        ttk.Button(buttons, text="Tick all", command=lambda: self._set_all_suggestions(True)).pack(side="left", padx=6)
-        ttk.Button(buttons, text="Untick all", command=lambda: self._set_all_suggestions(False)).pack(side="left")
-        ttk.Button(buttons, text="Re-read captions", command=self.refresh_captions).pack(side="left", padx=(18, 0))
-        ttk.Button(buttons, text="Scan documents for more names",
+        self._button(buttons, text="Tick all", command=lambda: self._set_all_suggestions(True)).pack(side="left", padx=6)
+        self._button(buttons, text="Untick all", command=lambda: self._set_all_suggestions(False)).pack(side="left")
+        self._button(buttons, text="Re-read captions", command=self.refresh_captions).pack(side="left", padx=(18, 0))
+        self._button(buttons, text="Scan documents for more names",
                    command=self.scan_for_suggestions).pack(side="left", padx=6)
-        ttk.Button(buttons, text="Continue to review →",
+        self._button(buttons, text="Continue to review →",
                    command=self.go_to_review).pack(side="right")
 
     # ---------------------------------------------------------- tab three --
@@ -320,10 +450,10 @@ class App(Tk):
 
         buttons = ttk.Frame(frame)
         buttons.grid(row=3, column=0, sticky="ew")
-        ttk.Button(buttons, text="Tick all", command=lambda: self._set_all_review(True)).pack(side="left")
-        ttk.Button(buttons, text="Untick all", command=lambda: self._set_all_review(False)).pack(side="left", padx=6)
-        ttk.Button(buttons, text="Rescan documents", command=self.go_to_review).pack(side="left", padx=(18, 0))
-        ttk.Button(buttons, text="Continue to run →", command=self.go_to_run).pack(side="right")
+        self._button(buttons, text="Tick all", command=lambda: self._set_all_review(True)).pack(side="left")
+        self._button(buttons, text="Untick all", command=lambda: self._set_all_review(False)).pack(side="left", padx=6)
+        self._button(buttons, text="Rescan documents", command=self.go_to_review).pack(side="left", padx=(18, 0))
+        self._button(buttons, text="Continue to run →", command=self.go_to_run).pack(side="right")
 
     # ----------------------------------------------------------- tab four --
     def _build_run_tab(self):
@@ -337,12 +467,13 @@ class App(Tk):
 
         buttons = ttk.Frame(frame)
         buttons.grid(row=1, column=0, sticky="ew", pady=(0, 8))
-        self.run_button = ttk.Button(buttons, text="Run", command=self.execute)
+        self.run_button = self._button(buttons, text="Run", command=self.execute,
+                                       style="Primary.TButton")
         self.run_button.pack(side="left")
-        self.open_button = ttk.Button(buttons, text="Open results folder", state="disabled",
+        self.open_button = self._button(buttons, text="Open results folder", state="disabled",
                                       command=self.open_results)
         self.open_button.pack(side="left", padx=6)
-        self.copy_button = ttk.Button(buttons, text="Copy mapping-key password", state="disabled",
+        self.copy_button = self._button(buttons, text="Copy mapping-key password", state="disabled",
                                       command=self.copy_password)
         self.copy_button.pack(side="left")
 
@@ -720,6 +851,7 @@ class App(Tk):
         self._busy = True
         self.status.set(f"{label}…")
         self.progress.configure(value=0)
+        self._dialog = ProgressDialog(self, label)
 
         def report(message: str, fraction: float):
             self._queue.put(("progress", message, fraction))
@@ -742,13 +874,17 @@ class App(Tk):
                 if kind == "progress":
                     self.status.set(message[1])
                     self.progress.configure(value=message[2] * 100)
+                    if self._dialog is not None:
+                        self._dialog.update_progress(message[1], message[2])
                 elif kind == "done":
                     self._busy = False
                     self.progress.configure(value=100)
+                    self._close_dialog()
                     message[1](message[2])
                 elif kind == "error":
                     self._busy = False
                     self.progress.configure(value=0)
+                    self._close_dialog()
                     self.status.set(message[1])
                     self._log(message[2])
                     self.run_button.configure(state="normal")
@@ -756,6 +892,12 @@ class App(Tk):
         except queue.Empty:
             pass
         self.after(100, self._drain)
+
+    def _close_dialog(self) -> None:
+        """Always before a messagebox - two grabs at once wedges the UI."""
+        if self._dialog is not None:
+            self._dialog.close()
+            self._dialog = None
 
     def _log(self, text: str):
         self.log.configure(state="normal")

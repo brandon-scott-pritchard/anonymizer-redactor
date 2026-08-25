@@ -53,4 +53,8 @@ then "Open" again in the dialog. After that it opens normally.
 OCR travels with the app: the vendored Tesseract is unpacked on first use,
 and RapidOCR is bundled as a fallback. Nothing needs installing on the
 machine that runs it.
+
+This .app is built for the architecture of THIS Mac. To produce an Intel
+build, run this script on an Intel Mac - the Intel Tesseract is already
+vendored and waiting.
 NOTE
