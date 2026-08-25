@@ -254,3 +254,74 @@ def test_excluding_one_of_two_people_who_share_a_surname(sample_docx, tmp_path):
     body = "\n".join(docx_processor.extract_text(out).values())
     assert "John Michael" in body
     assert "John Michael Smith" not in body
+
+
+# ------------------------------------------------- regressions: leak classes --
+
+
+@pytest.mark.parametrize("filename", [
+    "Smith_Divorce_Findings.docx",       # separator-delimited
+    "SmithDivorcePetition.docx",         # glued, no separators at all
+    "Smith2024Decree.docx",              # glued to digits
+    "JSmith-Findings.docx",              # glued behind an initial
+    "SMITH_John_Decree.docx",            # upper case
+    "smith_divorce.docx",                # lower case
+    "Smith, Jane - Petition.docx",       # comma form
+])
+def test_no_filename_form_leaks_the_surname(filename, tmp_path):
+    """A surname glued to its neighbours has no word boundary to match on.
+
+    Before this was fixed, SmithDivorcePetition.docx shipped unchanged: the
+    matcher could not see the name, and the safety check only looked for the
+    full canonical "Jane Elizabeth Smith", never the surname alone.
+    """
+    from redactor.engine import EntityMatcher
+    from pathlib import Path
+
+    store = loaded_store()
+    settings = Settings()
+    delivered = pipeline.anonymized_filename(
+        Path(filename), store, settings, EntityMatcher(store, settings), 1)
+    assert "smith" not in delivered.casefold()
+    assert delivered.endswith(".docx")
+
+
+def test_a_name_with_an_internal_capital_is_not_mangled():
+    """Splitting glued names must not break MacDonald into Mac Donald."""
+    from redactor.engine import EntityMatcher
+    from pathlib import Path
+
+    store = loaded_store()
+    settings = Settings()
+    delivered = pipeline.anonymized_filename(
+        Path("MacDonald_Petition.docx"), store, settings,
+        EntityMatcher(store, settings), 1)
+    assert delivered == "MacDonald_Petition.docx"
+
+
+def test_a_bare_recurrence_of_a_known_value_is_caught():
+    """Labels appear once; the value itself recurs.
+
+    "Case No. 224900871" matches on its label. A bare "224900871" further down
+    matched nothing at all until registered values were also matched literally.
+    """
+    from redactor.engine import Settings as S, scan_and_apply
+
+    store = MappingStore()
+    text = ("Case No. 224900871 is assigned. The 224900871 matter was heard. "
+            "Account no. 000148829371, and later just 000148829371.")
+    result = scan_and_apply(text, store, S(), "t")[0]
+    assert "224900871" not in result
+    assert "000148829371" not in result
+
+
+def test_literal_value_matching_still_respects_the_allowlist():
+    from redactor.engine import Settings as S, scan_and_apply
+
+    store = MappingStore()
+    text = ("Case No. 26 is assigned. Rule 26 governs, and Section 30-3-5 applies. "
+            "See also Case No. 224900871 and the 224900871 matter.")
+    result = scan_and_apply(text, store, S(), "t")[0]
+    assert "Rule 26" in result
+    assert "Section 30-3-5" in result
+    assert "224900871" not in result

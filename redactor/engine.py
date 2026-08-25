@@ -63,10 +63,21 @@ class Hit:
 # --------------------------------------------------------------------------
 
 
-class PersonMatcher:
-    """Compiled regexes for every enabled person entity's written forms."""
+# A value already registered is matched literally wherever it appears again.
+# Without this, "Case No. 224900871" is caught by its label while a bare
+# "224900871" three paragraphs later is not, and ships unredacted.
+VALUE_LITERAL_PRIORITY = 86
+MIN_LITERAL_LENGTH = 4
+
+
+class EntityMatcher:
+    """Compiled regexes for every enabled entity - people and known values."""
 
     def __init__(self, store: MappingStore, settings: Settings):
+        self.store = store
+        self.settings = settings
+        self._value_rules: list[tuple[re.Pattern, Entity]] = []
+        self._value_version = -1
         self.rules: list[tuple[re.Pattern, Entity, _names.NameVariant, int]] = []
         for entity in store.persons():
             if not entity.enabled or not settings.category_enabled(entity.category):
@@ -82,6 +93,40 @@ class PersonMatcher:
                 )
         # longest written form first so "John Michael Smith" wins over "Smith"
         self.rules.sort(key=lambda r: (-r[3], -len(r[2].text)))
+
+    def _refresh_values(self) -> None:
+        """Rebuild the literal rules when the store has grown since last time."""
+        if self._value_version == len(self.store.entities):
+            return
+        rules: list[tuple[re.Pattern, Entity]] = []
+        for entity in self.store.entities.values():
+            if entity.is_person or not entity.enabled:
+                continue
+            if not self.settings.category_enabled(entity.category):
+                continue
+            text = entity.canonical.strip()
+            if len(text) < MIN_LITERAL_LENGTH:
+                continue
+            rules.append((
+                re.compile(rf"(?<![\w@.\-]){re.escape(text)}(?![\w@\-])", re.IGNORECASE),
+                entity,
+            ))
+        rules.sort(key=lambda rule: -len(rule[1].canonical))
+        self._value_rules = rules
+        self._value_version = len(self.store.entities)
+
+    def find_values(self, text: str, protected: list[tuple[int, int]], redact: bool) -> list[Hit]:
+        self._refresh_values()
+        hits: list[Hit] = []
+        for regex, entity in self._value_rules:
+            for m in regex.finditer(text):
+                start, end = m.span()
+                if _overlaps(start, end, protected):
+                    continue
+                replacement = REDACTION_TEXT if redact else entity.replacement
+                hits.append(Hit(start, end, m.group(0), entity.category,
+                                replacement, entity.key, VALUE_LITERAL_PRIORITY))
+        return hits
 
     def find(self, text: str, protected: list[tuple[int, int]], redact: bool) -> list[Hit]:
         hits: list[Hit] = []
@@ -115,7 +160,7 @@ def scan_text(
     text: str,
     store: MappingStore,
     settings: Settings,
-    matcher: PersonMatcher | None = None,
+    matcher: EntityMatcher | None = None,
     register: bool = True,
 ) -> list[Hit]:
     """Every change to make in ``text``, non-overlapping, left to right."""
@@ -124,7 +169,7 @@ def scan_text(
 
     redact = settings.docx_mode == "redact"
     protected = patterns.allowlist_spans(text, settings.extra_allowlist)
-    matcher = matcher or PersonMatcher(store, settings)
+    matcher = matcher or EntityMatcher(store, settings)
 
     hits: list[Hit] = list(matcher.find(text, protected, redact))
 
@@ -143,6 +188,10 @@ def scan_text(
             Hit(match.start, match.end, match.text, match.category,
                 replacement, entity.key, match.priority)
         )
+
+    # Last, because the pattern pass above is what registers new values, and a
+    # bare recurrence of one must be matched in this same piece of text.
+    hits.extend(matcher.find_values(text, protected, redact))
 
     return _resolve(hits)
 
@@ -173,7 +222,7 @@ def scan_and_apply(
     store: MappingStore,
     settings: Settings,
     document: str,
-    matcher: PersonMatcher | None = None,
+    matcher: EntityMatcher | None = None,
 ) -> tuple[str, list[Hit]]:
     hits = scan_text(text, store, settings, matcher)
     for hit in hits:
@@ -181,3 +230,8 @@ def scan_and_apply(
         if entity is not None:
             store.record_hit(entity, document)
     return apply_hits(text, hits), hits
+
+
+# The class used to cover people only; the name is kept so existing imports and
+# any saved workflows continue to work.
+PersonMatcher = EntityMatcher

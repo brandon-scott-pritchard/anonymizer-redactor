@@ -186,6 +186,56 @@ class RunResult:
 
 _SEPARATORS = re.compile(r"[_\-.\s]+")
 
+# A name glued to its neighbours has no word boundary for the matcher to find:
+# SmithDivorcePetition, Smith2024Decree, JSmith-Findings. Splitting on case and
+# letter/digit transitions gives those a boundary. It is only used as a second
+# attempt, because splitting unconditionally would mangle names that legitimately
+# carry an internal capital - MacDonald, DeLuca, O'Brien.
+_GLUE = re.compile(
+    r"(?<=[a-z0-9])(?=[A-Z])"          # smithDivorce -> smith Divorce
+    r"|(?<=[A-Z])(?=[A-Z][a-z])"       # JSmith       -> J Smith
+    r"|(?<=[A-Za-z])(?=\d)"            # Smith2024    -> Smith 2024
+    r"|(?<=\d)(?=[A-Za-z])"            # 2024Smith    -> 2024 Smith
+)
+
+
+def _sensitive_strings(store: MappingStore) -> set[str]:
+    """Every string that must not survive into a delivered filename.
+
+    Includes each person's individual written forms, not just the full name -
+    a filename almost never carries "Jane Elizabeth Smith", it carries "Smith".
+    """
+    out: set[str] = set()
+    for entity in store.entities.values():
+        if not entity.enabled:
+            continue
+        if len(entity.canonical) >= 3:
+            out.add(entity.canonical.casefold())
+        for variant in entity.variants:
+            if len(variant.text) >= 3:
+                out.add(variant.text.casefold())
+    return out
+
+
+def _leaks(candidate: str, sensitive: set[str]) -> bool:
+    """Substring test, deliberately ignoring word boundaries.
+
+    This is the last line of defence, so it is stricter than the matcher: if a
+    client's name appears anywhere in the proposed filename, in any form, the
+    name is rejected outright in favour of a neutral one.
+    """
+    lowered = candidate.casefold()
+    return any(term in lowered for term in sensitive)
+
+
+def _tidy(text: str) -> str:
+    # only whitespace collapses here - the stem was already split on separators
+    # before scanning, so any hyphen left is part of a replacement like [CASENO-1]
+    cleaned = re.sub(r"\s+", "_", text.strip())
+    cleaned = re.sub(r"[^\w\[\]\-]+", "_", cleaned)
+    cleaned = re.sub(r"_{2,}", "_", cleaned)
+    return cleaned.strip("_")
+
 
 def anonymized_filename(path: Path, store: MappingStore, settings: Settings,
                         matcher: PersonMatcher, index: int) -> str:
@@ -198,22 +248,21 @@ def anonymized_filename(path: Path, store: MappingStore, settings: Settings,
     if not settings.anonymize_filenames:
         return f"{stem}{suffix}"
 
+    sensitive = _sensitive_strings(store)
     spaced = _SEPARATORS.sub(" ", stem).strip()
-    replaced = engine.apply_hits(
-        spaced, engine.scan_text(spaced, store, settings, matcher, register=True)
-    )
-    cleaned = _SEPARATORS.sub("_", replaced.strip())
-    cleaned = re.sub(r"[^\w\[\]\-]+", "_", cleaned).strip("_")
 
-    # if anything recognisable survived, fall back to a neutral name
-    lowered = cleaned.casefold()
-    for entity in store.entities.values():
-        if entity.canonical.casefold() and entity.canonical.casefold() in lowered:
-            cleaned = ""
-            break
-    if not cleaned:
-        cleaned = f"document_{index:02d}"
-    return f"{cleaned}{suffix}"
+    # First a conservative pass; if anything recognisable survives it, try again
+    # with the glued forms broken apart.
+    for candidate in (spaced, _GLUE.sub(" ", spaced)):
+        replaced = engine.apply_hits(
+            candidate, engine.scan_text(candidate, store, settings, matcher, register=True)
+        )
+        cleaned = _tidy(replaced)
+        if cleaned and not _leaks(cleaned, sensitive):
+            return f"{cleaned}{suffix}"
+
+    # Nothing safe could be salvaged from the original name.
+    return f"document_{index:02d}{suffix}"
 
 
 def _unique(name: str, used: set[str]) -> str:
