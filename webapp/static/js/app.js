@@ -536,27 +536,32 @@ function App() {
   };
 
   if (!meta) {
-    return html`<div class="shell"><header class="app"><h1>Anonymizer / Redactor</h1></header>
-      <div class="card">${fault ? html`<p class="error">${fault}</p>`
-        : html`<p class="hint">Loading…</p>`}</div></div>`;
+    return html`<div>
+      <header class="topbar"><div class="topbar-inner">
+        <h1>Anonymizer / Redactor</h1>
+      </div></header>
+      <div class="shell"><div class="card">${fault ? html`<p class="error">${fault}</p>`
+        : html`<p class="hint">Loading…</p>`}</div></div></div>`;
   }
 
   const state = { files, options, password, showPassword, namesText, captions,
                   suggestions, suggChecked, suggCats, entities, risky, unused,
                   editing, runInfo, busy };
 
-  return html`<div class="shell">
-    <header class="app">
+  return html`<div>
+    <header class="topbar"><div class="topbar-inner">
       <h1>Anonymizer / Redactor</h1>
       <span class="version">${meta.version} · everything stays on this computer</span>
-    </header>
-    <${Stepper} step=${step} unlocked=${unlocked} go=${actions.go} />
-    ${fault ? html`<div class="card"><p class="error">${fault}</p></div>` : null}
-    ${step === 0 ? html`<${FilesStep} state=${state} set=${set} actions=${actions} />` : null}
-    ${step === 1 ? html`<${NamesStep} state=${state} set=${set} actions=${actions} meta=${meta} />` : null}
-    ${step === 2 ? html`<${ReviewStep} state=${state} actions=${actions} meta=${meta} />` : null}
-    ${step === 3 ? html`<${RunStep} state=${state} actions=${actions} />` : null}
-    <${Progress} busy=${busy} />
+    </div></header>
+    <div class="shell">
+      <${Stepper} step=${step} unlocked=${unlocked} go=${actions.go} />
+      ${fault ? html`<div class="card"><p class="error">${fault}</p></div>` : null}
+      ${step === 0 ? html`<${FilesStep} state=${state} set=${set} actions=${actions} />` : null}
+      ${step === 1 ? html`<${NamesStep} state=${state} set=${set} actions=${actions} meta=${meta} />` : null}
+      ${step === 2 ? html`<${ReviewStep} state=${state} actions=${actions} meta=${meta} />` : null}
+      ${step === 3 ? html`<${RunStep} state=${state} actions=${actions} />` : null}
+      <${Progress} busy=${busy} />
+    </div>
   </div>`;
 }
 
