@@ -21,11 +21,13 @@ import threading
 import time
 import traceback
 from pathlib import Path
-from tkinter import BooleanVar, StringVar, Tk, filedialog, messagebox, simpledialog
+from tkinter import BooleanVar, StringVar, Tk, filedialog, messagebox
 import tkinter as tk
 from tkinter import ttk
 
-from . import __version__, caption, categories, ner, pdf_processor, pipeline
+import webbrowser
+
+from . import __version__, caption, categories, feedback, ner, pdf_processor, pipeline
 from .engine import Settings
 from .mapping import MappingStore
 
@@ -171,6 +173,76 @@ class ProgressDialog(tk.Toplevel):
         self.destroy()
 
 
+# Category label shown in the dialog -> category key, and the short list
+# offered for name suggestions.
+_KEY_FOR_LABEL = {c.label: c.key for c in categories.CATEGORIES}
+_NAME_CATEGORY_KEYS = ("person", "minor", "organization", "location")
+
+
+class RowEditor(tk.Toplevel):
+    """Modal editor for one table row: type, replacement, what went wrong.
+
+    ``result`` is ``None`` on Cancel/Escape, otherwise
+    ``(category_label, replacement_or_None, error_type)``.
+    """
+
+    def __init__(self, parent: tk.Misc, *, found: str, category_label: str,
+                 category_choices: list[str], replacement: str | None = None):
+        super().__init__(parent)
+        self.title("Edit item")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.result: tuple[str, str | None, str] | None = None
+
+        body = ttk.Frame(self, padding=16)
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(1, weight=1)
+
+        ttk.Label(body, text="Found:").grid(row=0, column=0, sticky="w", pady=(0, 8))
+        ttk.Label(body, text=found, font=("", 12, "bold"), wraplength=380,
+                  ).grid(row=0, column=1, sticky="w", pady=(0, 8))
+
+        ttk.Label(body, text="Type:").grid(row=1, column=0, sticky="w", pady=(0, 8))
+        self._category = StringVar(value=category_label)
+        ttk.Combobox(body, textvariable=self._category, state="readonly",
+                     values=category_choices, width=36,
+                     ).grid(row=1, column=1, sticky="ew", pady=(0, 8))
+
+        row = 2
+        self._replacement: StringVar | None = None
+        if replacement is not None:
+            ttk.Label(body, text="Replace with:").grid(row=row, column=0, sticky="w", pady=(0, 8))
+            self._replacement = StringVar(value=replacement)
+            ttk.Entry(body, textvariable=self._replacement, width=38,
+                      ).grid(row=row, column=1, sticky="ew", pady=(0, 8))
+            row += 1
+
+        ttk.Label(body, text="What went wrong?").grid(row=row, column=0, sticky="w", pady=(0, 8))
+        self._error = StringVar(value=feedback.NO_ERROR)
+        ttk.Combobox(body, textvariable=self._error, state="readonly",
+                     values=list(feedback.ERROR_TYPES), width=36,
+                     ).grid(row=row, column=1, sticky="ew", pady=(0, 8))
+        row += 1
+
+        buttons = ttk.Frame(body)
+        buttons.grid(row=row, column=0, columnspan=2, sticky="e", pady=(8, 0))
+        ttk.Button(buttons, text="Cancel", command=self.destroy).pack(side="left", padx=(0, 8))
+        ttk.Button(buttons, text="Save", style="Primary.TButton",
+                   command=self._save).pack(side="left")
+
+        self.bind("<Return>", lambda _e: self._save())
+        self.bind("<Escape>", lambda _e: self.destroy())
+        self.grab_set()
+
+    def _save(self) -> None:
+        self.result = (
+            self._category.get(),
+            self._replacement.get() if self._replacement is not None else None,
+            self._error.get(),
+        )
+        self.destroy()
+
+
 class App(Tk):
     def __init__(self):
         super().__init__()
@@ -189,6 +261,8 @@ class App(Tk):
         self._dialog: ProgressDialog | None = None
         # checked state lives here, not in the widgets - the images are paint
         self._suggest_checked: set[str] = set()
+        # iid -> (name, category key); the row's identity, never parsed from iids
+        self._suggest_meta: dict[str, tuple[str, str]] = {}
         self._img_checked, self._img_unchecked = _checkbox_images()
 
         self._init_theme()
@@ -434,6 +508,9 @@ class App(Tk):
         sscroll.grid(row=1, column=1, sticky="ns")
         self.suggest_tree.bind("<Button-1>", self._suggest_click)
         self.suggest_tree.bind("<Double-1>", self._suggest_double)
+        for button in ("<Button-2>", "<Button-3>"):
+            self.suggest_tree.bind(button, lambda e: self._tree_menu(
+                self.suggest_tree, self._edit_suggestion_row, e))
 
         buttons = ttk.Frame(frame)
         buttons.grid(row=3, column=0, columnspan=2, sticky="ew")
@@ -478,6 +555,9 @@ class App(Tk):
         self.review_tree.bind("<Button-1>", self._review_click)
         self.review_tree.bind("<Double-1>", self._review_double)
         self.review_tree.bind("<space>", self._review_space)
+        for button in ("<Button-2>", "<Button-3>"):
+            self.review_tree.bind(button, lambda e: self._tree_menu(
+                self.review_tree, self._edit_review_row, e))
 
         self.review_warning = tk.Label(frame, justify="left", anchor="w", wraplength=1040, fg="#8a4b00")
         self.review_warning.grid(row=2, column=0, sticky="ew", pady=(6, 4))
@@ -630,21 +710,24 @@ class App(Tk):
     def _render_suggestions(self):
         self.suggest_tree.delete(*self.suggest_tree.get_children())
         self._suggest_checked.clear()
+        self._suggest_meta.clear()
         for item in self.caption_names:
             iid = f"cap::{item.key}"
             if item.confidence == "high":
                 self._suggest_checked.add(iid)
+            self._suggest_meta[iid] = (item.name, item.category)
             self.suggest_tree.insert(
                 "", "end", iid=iid, text="",
                 image=self._img_checked if iid in self._suggest_checked else self._img_unchecked,
                 values=(item.name, item.role, item.confidence, item.source),
-                tags=("minor",) if item.category == "minor" else (),
             )
         for item in self.suggestions:
-            label = categories.label_for(item.category)
+            iid = f"ner::{item.key}"
+            self._suggest_meta[iid] = (item.text, item.category)
             self.suggest_tree.insert(
-                "", "end", iid=f"ner::{item.key}", text="", image=self._img_unchecked,
-                values=(item.text, label, f"x{item.count}", "; ".join(sorted(item.documents))[:40]),
+                "", "end", iid=iid, text="", image=self._img_unchecked,
+                values=(item.text, categories.label_for(item.category),
+                        f"x{item.count}", "; ".join(sorted(item.documents))[:40]),
             )
 
     def _suggest_toggle(self, iid: str) -> None:
@@ -670,6 +753,8 @@ class App(Tk):
         column = self.suggest_tree.identify_column(event.x)
         if column in ("#0", "#1"):
             self._suggest_toggle(iid)
+        elif column == "#2":
+            self._edit_suggestion_row(iid)
         return "break"
 
     def _set_all_suggestions(self, checked: bool):
@@ -690,16 +775,14 @@ class App(Tk):
 
     def add_checked_suggestions(self):
         added = 0
-        for item in self.suggest_tree.get_children():
-            if item not in self._suggest_checked:
+        for iid in self.suggest_tree.get_children():
+            if iid not in self._suggest_checked:
                 continue
-            name = self.suggest_tree.item(item, "values")[0]
-            minor = "minor" in self.suggest_tree.item(item, "tags")
-            if item.startswith("ner::") and item.split("::", 1)[1].startswith(("organization:", "location:")):
-                kind = item.split("::", 1)[1].split(":", 1)[0]
-                self._append_name_line(f"{name} | {kind}")
+            name, category = self._suggest_meta[iid]
+            if category in {"minor", "organization", "location"}:
+                self._append_name_line(f"{name} | {category}")
             else:
-                self._append_name_line(f"{name}{' | minor' if minor else ''}")
+                self._append_name_line(name)
             added += 1
         self.status.set(f"{added} name(s) added to the list." if added else "Nothing was ticked.")
 
@@ -818,25 +901,134 @@ class App(Tk):
             self._review_toggle(iid)
         return "break"
 
+    def _tree_menu(self, tree: ttk.Treeview, editor, event) -> None:
+        iid = tree.identify_row(event.y)
+        if not iid:
+            return
+        menu = tk.Menu(tree, tearoff=0)
+        menu.add_command(label="Change type / edit…", command=lambda: editor(iid))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _open_row_editor(self, **kwargs) -> tuple[str, str | None, str] | None:
+        dialog = RowEditor(self, **kwargs)
+        self.wait_window(dialog)
+        return dialog.result
+
     def _edit_review_row(self, iid: str) -> None:
         entity = self.store.entities.get(iid)
         if entity is None:
             return
-        value = simpledialog.askstring(
-            "Replacement", f"Replace “{entity.canonical}” with:",
-            initialvalue=entity.replacement, parent=self)
-        if value is None:                      # Cancel - not the same as empty
+        old_category = entity.category
+        old_replacement = entity.replacement
+        result = self._open_row_editor(
+            found=entity.canonical,
+            category_label=entity.label,
+            category_choices=[c.label for c in categories.CATEGORIES],
+            replacement=entity.replacement,
+        )
+        if result is None:                     # Cancel - not the same as empty
             return
-        if not value.strip():
+        new_label, replacement, error_type = result
+        if replacement is not None and not replacement.strip():
             self.status.set("The replacement cannot be empty - nothing was changed.")
             return
-        entity.replacement = value
-        if entity.is_person and entity.surrogate is not None:
-            from . import names as _names
-            entity.surrogate = _names.parse(value)
-        values = list(self.review_tree.item(iid, "values"))
-        values[2] = value
-        self.review_tree.item(iid, values=values)
+
+        new_category = _KEY_FOR_LABEL.get(new_label, old_category)
+        if new_category != old_category:
+            entity = self._retype_entity(entity, new_category)
+            if entity is None:
+                self.status.set(f"“{new_label}” did not accept that value - nothing was changed.")
+                return
+        if replacement is not None and replacement != old_replacement:
+            entity.replacement = replacement
+            if entity.is_person and entity.surrogate is not None:
+                from . import names as _names
+                entity.surrogate = _names.parse(replacement)
+
+        if new_category != old_category:
+            self._review_ready(self.store)     # keys changed - repaint the table
+            self.status.set("Type changed - Rescan documents to refresh counts and matches.")
+        else:
+            values = list(self.review_tree.item(iid, "values"))
+            values[2] = entity.replacement
+            self.review_tree.item(iid, values=values)
+
+        if error_type != feedback.NO_ERROR:
+            self._offer_report(feedback.build_report(
+                error_type=error_type,
+                text=entity.canonical,
+                predicted_category=old_category,
+                corrected_category=entity.category,
+                corrected_replacement=(replacement if replacement != old_replacement else None),
+                source=entity.source,
+                occurrences=entity.occurrences,
+                documents=[Path(d).name for d in entity.documents],
+                origin="review",
+            ))
+
+    def _retype_entity(self, entity, new_category):
+        """Re-register ``entity`` under ``new_category``; None if it will not parse."""
+        del self.store.entities[entity.key]
+        if categories.style_for(new_category) == "person":
+            fresh = self.store.add_person(entity.canonical, category=new_category,
+                                          role=entity.role, source=entity.source)
+        else:
+            fresh = self.store.add_value(new_category, entity.canonical,
+                                         source=entity.source)
+        if fresh is None:
+            self.store.entities[entity.key] = entity
+            return None
+        fresh.enabled = entity.enabled
+        fresh.occurrences = entity.occurrences
+        fresh.documents = entity.documents
+        return fresh
+
+    def _edit_suggestion_row(self, iid: str) -> None:
+        meta = self._suggest_meta.get(iid)
+        if meta is None:
+            return
+        name, old_category = meta
+        result = self._open_row_editor(
+            found=name,
+            category_label=categories.label_for(old_category),
+            category_choices=[categories.label_for(k) for k in _NAME_CATEGORY_KEYS],
+        )
+        if result is None:
+            return
+        new_label, _replacement, error_type = result
+        new_category = _KEY_FOR_LABEL.get(new_label, old_category)
+        if new_category != old_category:
+            self._suggest_meta[iid] = (name, new_category)
+            values = list(self.suggest_tree.item(iid, "values"))
+            values[1] = categories.label_for(new_category)
+            self.suggest_tree.item(iid, values=values)
+
+        if error_type != feedback.NO_ERROR:
+            self._offer_report(feedback.build_report(
+                error_type=error_type,
+                text=name,
+                predicted_category=old_category,
+                corrected_category=new_category,
+                source="caption" if iid.startswith("cap::") else "ner",
+                origin="suggestions",
+            ))
+
+    def _offer_report(self, report: dict) -> None:
+        """Log the correction; offer a mail draft. Never block the edit."""
+        try:
+            path = feedback.log_report(report)
+        except OSError as exc:
+            self.status.set(f"Could not write the feedback log: {exc}")
+            return
+        if messagebox.askyesno(
+                "Send report?",
+                f"The report was saved to\n{path}\n\n"
+                f"Open an email to {feedback.REPORT_ADDRESS} with this report? "
+                "You will see the draft before anything is sent."):
+            webbrowser.open(feedback.mailto_url(report))
 
     def _set_all_review(self, enabled: bool):
         for iid in self.review_tree.get_children():

@@ -158,13 +158,11 @@ def test_double_click_on_the_type_column_toggles(app):
 
 
 def test_double_click_on_the_times_column_is_inert(app, monkeypatch):
-    from tkinter import simpledialog
-
     store, iid = _review_row(app)
     entity = store.entities[iid]
     opened = []
-    monkeypatch.setattr(simpledialog, "askstring",
-                        lambda *a, **k: opened.append(1) or None)
+    monkeypatch.setattr(app, "_open_row_editor",
+                        lambda **k: opened.append(1) or None)
     before = entity.enabled
     app._review_double(_cell_event(app.review_tree, iid, "#4"))
     assert entity.enabled == before
@@ -172,16 +170,17 @@ def test_double_click_on_the_times_column_is_inert(app, monkeypatch):
 
 
 def test_double_click_on_found_opens_the_editor_and_cancel_changes_nothing(app, monkeypatch):
-    from redactor.gui import simpledialog
+    from redactor import feedback
 
     store, iid = _review_row(app)
     entity = store.entities[iid]
     original = entity.replacement
-    monkeypatch.setattr(simpledialog, "askstring", lambda *a, **k: None)
+    monkeypatch.setattr(app, "_open_row_editor", lambda **k: None)
     app._review_double(_cell_event(app.review_tree, iid, "#2"))
     assert entity.replacement == original, "Cancel must not clear the replacement"
 
-    monkeypatch.setattr(simpledialog, "askstring", lambda *a, **k: "Tamsin Q. Middleton")
+    monkeypatch.setattr(app, "_open_row_editor",
+                        lambda **k: ("Person name", "Tamsin Q. Middleton", feedback.NO_ERROR))
     app._review_double(_cell_event(app.review_tree, iid, "#2"))
     assert entity.replacement == "Tamsin Q. Middleton"
 
@@ -202,3 +201,65 @@ def test_a_click_on_a_suggestion_name_cell_does_not_toggle(app):
 
     app._suggest_click(_cell_event(app.suggest_tree, iid, "#0"))
     assert iid in app._suggest_checked
+
+
+# --------------------------------------------------- type change & reports --
+
+def test_saving_a_new_type_reregisters_the_entity(app, monkeypatch):
+    from redactor import feedback
+
+    store, iid = _review_row(app)
+    monkeypatch.setattr(app, "_open_row_editor",
+                        lambda **k: ("Organization / employer / school",
+                                     k.get("replacement"), feedback.NO_ERROR))
+    app._review_double(_cell_event(app.review_tree, iid, "#2"))
+
+    keys = list(store.entities)
+    assert len(keys) == 1
+    assert store.entities[keys[0]].category == "organization"
+    assert store.entities[keys[0]].canonical == "John Michael Smith"
+
+
+def test_an_error_report_is_logged_and_the_email_offered(app, monkeypatch, tmp_path):
+    import redactor.gui as gui_mod
+    from redactor import feedback
+
+    store, iid = _review_row(app)
+    logged = []
+    opened = []
+    monkeypatch.setattr(feedback, "log_report",
+                        lambda report: logged.append(report) or tmp_path / "feedback.jsonl")
+    monkeypatch.setattr(gui_mod.messagebox, "askyesno", lambda *a, **k: True)
+    monkeypatch.setattr(gui_mod.webbrowser, "open", lambda url: opened.append(url))
+    monkeypatch.setattr(app, "_open_row_editor",
+                        lambda **k: ("Organization / employer / school",
+                                     k.get("replacement"),
+                                     "Person flagged as organization"))
+    app._review_double(_cell_event(app.review_tree, iid, "#2"))
+
+    assert len(logged) == 1
+    assert logged[0]["predicted_category"] == "person"
+    assert logged[0]["corrected_category"] == "organization"
+    assert len(opened) == 1
+    assert opened[0].startswith(f"mailto:{feedback.REPORT_ADDRESS}")
+
+
+def test_suggestion_type_change_updates_the_row_and_the_name_list(app, monkeypatch):
+    from redactor import feedback
+    from redactor.caption import CaptionName
+
+    app.caption_names = [CaptionName("Jane Ellen Smith", "Petitioner", "doc", "high")]
+    app._render_suggestions()
+    app.notebook.select(app.tab_names)
+    app.update_idletasks()
+    app.update()
+    iid = app.suggest_tree.get_children()[0]
+
+    monkeypatch.setattr(app, "_open_row_editor",
+                        lambda **k: ("Minor child", None, feedback.NO_ERROR))
+    app._suggest_double(_cell_event(app.suggest_tree, iid, "#2"))
+
+    assert app._suggest_meta[iid] == ("Jane Ellen Smith", "minor")
+    app._suggest_checked.add(iid)
+    app.add_checked_suggestions()
+    assert "Jane Ellen Smith | minor" in app.names_text.get("1.0", "end")
