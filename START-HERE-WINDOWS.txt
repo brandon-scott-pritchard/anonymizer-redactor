@@ -67,8 +67,8 @@ OCR handles them, and OCR is already included - it installs
 automatically with everything else in Step 1. There's nothing for
 you to do here.
 
-If you'd rather use Tesseract specifically (it's the engine I
-prefer, but the built-in one covers you fine), it's optional:
+If you'd rather use Tesseract specifically (the built-in engine
+covers you fine without it), it's optional:
 
     1. Install it from
        https://github.com/UB-Mannheim/tesseract/wiki
