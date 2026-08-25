@@ -14,6 +14,12 @@ xcopy /e /i /q "%HERE%redactor" "%STAGE%\src\redactor" >nul
 copy /y "%HERE%requirements.txt" "%STAGE%\src\" >nul
 copy /y "%HERE%build\launcher.py" "%STAGE%\src\" >nul
 copy /y "%HERE%build\redactor.spec" "%STAGE%\src\" >nul
+REM The vendored Tesseract tarball, if vendor_tesseract_windows.py was run.
+REM Without it the exe still has OCR - RapidOCR is bundled from pip.
+if exist "%HERE%vendor\tesseract-windows-*.tar.gz" (
+    mkdir "%STAGE%\src\vendor"
+    copy /y "%HERE%vendor\tesseract-windows-*.tar.gz" "%STAGE%\src\vendor\" >nul
+)
 
 echo ==^> Creating build environment
 python -m venv "%BUILD_VENV%"
@@ -33,6 +39,9 @@ xcopy /e /i /q "%STAGE%\src\dist\Anonymizer-Redactor" "%HERE%dist\Anonymizer-Red
 echo.
 echo Built: dist\Anonymizer-Redactor\Anonymizer-Redactor.exe
 echo.
-echo OCR still needs the Tesseract binary installed on the machine:
-echo   https://github.com/UB-Mannheim/tesseract/wiki
+echo OCR is built in: RapidOCR ships inside the exe, so scanned PDFs work
+echo with no further setup. To bundle the preferred Tesseract engine too,
+echo install it from https://github.com/UB-Mannheim/tesseract/wiki, run
+echo   python vendor_tesseract_windows.py
+echo and build again.
 endlocal

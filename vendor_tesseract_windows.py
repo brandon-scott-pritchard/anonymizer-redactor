@@ -18,13 +18,27 @@ Tesseract only if you want that engine specifically.
 
 from __future__ import annotations
 
+import platform
 import shutil
 import tarfile
 import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-TARGET = HERE / "vendor" / "tesseract" / "windows"
+
+
+def _folder() -> str:
+    """Same platform-and-architecture identity ocr.py and the spec use.
+
+    The names must agree exactly - the spec bundles, and ocr.py unpacks,
+    ``tesseract-{folder}.tar.gz`` and nothing else.
+    """
+    machine = platform.machine().lower()
+    machine = {"amd64": "x86_64", "x64": "x86_64", "aarch64": "arm64"}.get(machine, machine)
+    return f"windows-{machine}"
+
+
+TARGET = HERE / "vendor" / "tesseract" / _folder()
 
 LIKELY_INSTALLS = (
     Path(r"C:\Program Files\Tesseract-OCR"),
@@ -89,13 +103,13 @@ def main() -> int:
             shutil.copy2(item, destination)
         print(f"    {name}")
 
-    archive = TARGET.parent.parent / "tesseract-windows.tar.gz"
+    archive = TARGET.parent.parent / f"tesseract-{_folder()}.tar.gz"
     print(f"==> Packing {archive.name}")
     with tarfile.open(archive, "w:gz") as tar:
         tar.add(TARGET, arcname="tesseract")
 
     size = sum(f.stat().st_size for f in TARGET.rglob("*") if f.is_file()) / 1e6
-    print(f"==> Done: vendor\\tesseract\\windows ({size:.0f} MB)")
+    print(f"==> Done: {TARGET.relative_to(HERE)} ({size:.0f} MB)")
     print("    Now run build_windows.bat to fold it into the .exe.")
     return 0
 
