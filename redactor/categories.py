@@ -60,6 +60,9 @@ CATEGORIES: tuple[Category, ...] = (
     _c("military_id", "Military service number", "MILID", "Government ID"),
     _c("inmate_number", "Inmate / booking number", "INMATE", "Government ID"),
     _c("student_id", "Student ID", "STUDENTID", "Government ID"),
+    # On a pay stub this sits beside the SSN and identifies the employee just as
+    # well within the employer's records.
+    _c("employee_id", "Employee / payroll number", "EMPLOYEEID", "Government ID"),
     _c("voter_id", "Voter registration number", "VOTERID", "Government ID"),
     _c("bar_number", "Bar number", "BARNO", "Government ID"),
     _c("notary_id", "Notary commission number", "NOTARY", "Government ID"),
@@ -74,6 +77,10 @@ CATEGORIES: tuple[Category, ...] = (
 
     # ------------------------------------------------------------- financial
     _c("bank_account", "Bank account number", "ACCOUNT", "Financial"),
+    # Shares the ACCOUNT tag on purpose: the counter keys on the tag, so a
+    # masked tail and the full number it belongs to draw from one series and
+    # read as the same kind of thing on the delivered page.
+    _c("masked_account", "Masked account / card tail", "ACCOUNT", "Financial"),
     _c("routing_number", "Routing number", "ROUTING", "Financial"),
     _c("iban", "IBAN", "IBAN", "Financial"),
     _c("swift", "SWIFT / BIC", "SWIFT", "Financial"),

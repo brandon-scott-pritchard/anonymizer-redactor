@@ -197,6 +197,15 @@ class EntityMatcher:
                      else MIN_LITERAL_LENGTH)
             if len(text) < floor:
                 continue
+            # Defence in depth against a money figure that got registered as an
+            # identifier. A literal rule matches everywhere, in every later
+            # document, so one bad registration is not one wrong redaction - a
+            # single "Escrow 412.55" took out the pay stub's federal withholding
+            # and three insurance rows in a P&L, in documents where no detector
+            # fired at all. patterns._wrong_shape stops it being registered;
+            # this stops it being applied even if something else registers it.
+            if patterns._wrong_shape(entity.category, text):
+                continue
             body = r"\s+".join(_names.escape_token(tok) for tok in text.split())
             # same underscore reasoning as the person boundary, plus the
             # address characters that must not abut a matched value
@@ -289,6 +298,29 @@ def _overlaps(start: int, end: int, spans) -> bool:
 # --------------------------------------------------------------------------
 # scanning
 # --------------------------------------------------------------------------
+
+
+def register_text(text: str, store: MappingStore, settings: Settings) -> int:
+    """Register every value the detectors find in ``text``. Change nothing.
+
+    For text that is not in the document as written - a table row read across
+    its cells, a cell paired with its column heading. The pair is what a
+    labelled detector needs to see, but the string itself exists nowhere, so it
+    must never produce a hit. Registering is enough: once the account number is
+    a known value, the literal matcher in :meth:`EntityMatcher.find_values`
+    finds it sitting alone in its own cell, where it really is.
+    """
+    if not text or not text.strip():
+        return 0
+    protected = patterns.allowlist_spans(text, settings.do_not_change)
+    enabled = [k for k in settings.enabled_categories
+               if categories.style_for(k) != "person"]
+    added = 0
+    for match in patterns.scan(text, enabled=enabled, protected=protected):
+        if store.get(match.category, match.text) is None:
+            store.add_value(match.category, match.text, source="table")
+            added += 1
+    return added
 
 
 def scan_text(

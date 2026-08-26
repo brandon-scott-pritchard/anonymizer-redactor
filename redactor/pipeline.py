@@ -13,7 +13,8 @@ from typing import Callable, Iterable, Sequence
 from dataclasses import replace as _replace
 
 from . import (caption, categories, children, docx_processor, engine, mapping,
-               names, ner, officials, pdf_processor, places)
+               names, ner, officials, pdf_processor, places,
+               transactions)
 from .engine import PersonMatcher, Settings
 from .mapping import MappingStore
 
@@ -190,21 +191,37 @@ def collect_suggestions(
     # shares its name with somebody in this document is that person here.
     progress("Looking for town and city names", 0.55)
     found = places.harvest_documents(texts, protected, frozenset(known))
-    place_items = [ner.Suggestion(place.name, "location", 1, {place.source})
+    rules_found = [ner.Suggestion(place.name, "location", 1, {place.source})
                    for place in found]
 
+    # The people a bank statement names and a pleading never does: whoever is on
+    # the other end of a transfer. Proposed as people, so a ticked one gets an
+    # invented name and the statement still reads as a statement.
+    tables: dict[str, list] = {}
+    for raw_path in files:
+        path = Path(raw_path)
+        if path.name in texts and classify(path) == "docx":
+            try:
+                tables[path.name] = list(docx_processor.iter_tables(path))
+            except Exception:
+                continue
+    rules_found += [
+        ner.Suggestion(party.name, "person", 1, {party.source})
+        for party in transactions.harvest_documents(texts, tables, frozenset(known))
+    ]
+
     if not settings.use_ner:
-        return place_items, ["Model suggestions were turned off for this run."]
+        return rules_found, ["Model suggestions were turned off for this run."]
 
     ok, note = ner.available()
     if not ok:
-        return place_items, [note]
+        return rules_found, [note]
 
     progress("Reviewing documents for additional names", 0.6)
     raw = ner.suggest(texts, protected)
 
-    seen = {item.key for item in place_items}
-    filtered = place_items + [s for s in raw
+    seen = {item.key for item in rules_found}
+    filtered = rules_found + [s for s in raw
                               if s.text.casefold() not in known
                               and s.key not in seen]
 
@@ -227,6 +244,71 @@ def collect_suggestions(
     return filtered, notes
 
 
+# A column heading is a few words. Anything longer is prose that happened to
+# land in the first row, and pairing a paragraph with every cell beneath it
+# invents label/value pairs that were never on the page.
+_TABLE_LABEL_MAX = 60
+
+
+def register_table_context(files: Sequence[Path], store: MappingStore,
+                           settings: Settings, progress: Progress = _noop) -> int:
+    """Read the label/value pairs a table splits across two cells.
+
+    A DOCX table cell is its own paragraph, so the scanner is handed
+    ``'Savings account'`` and ``'000488227145'`` as two separate strings, and
+    every labelled detector in patterns.py needs them in one. On a financial
+    declaration's asset schedule that is not an edge case, it is the whole
+    document: every account number in the assets and debts tables survived.
+
+    Four readings, because a table puts the label in four different places: the
+    column heading, the cell directly above, the cell to the left, and the
+    first cell of the row. All four register only - the strings are
+    reconstructions and appear nowhere on the page, so applying anything to
+    them would be applying it to text that does not exist.
+
+    The cell directly above is what an IRS form needs. A 1099 is a grid of
+    alternating label and value rows, so the heading for "HCS-0044-2211" is not
+    in row 0 at all - row 0 says "RECIPIENT'S TIN" and the real label,
+    "Account number (see instructions)", is in the row immediately above. Only
+    reading row 0 as the header shipped the account number.
+
+    Every pair is joined with a colon, and that is load-bearing rather than
+    cosmetic. Reading a whole row across with spaces let the bare-digits card
+    detector run from the account column into the money column and register
+    "44-8821-0033 950" as a credit card. A colon cannot appear inside any
+    identifier shape, so it fences each cell off from the next.
+    """
+    found = 0
+    total = max(len(files), 1)
+    for index, raw_path in enumerate(files):
+        path = Path(raw_path)
+        if classify(path) != "docx":
+            continue
+        progress(f"Reading tables in {path.name}", index / total)
+        try:
+            tables = list(docx_processor.iter_tables(path))
+        except Exception:
+            continue
+        for rows in tables:
+            if not rows:
+                continue
+            header = rows[0]
+            for index, row in enumerate(rows):
+                above = rows[index - 1] if index else []
+                for column, cell in enumerate(row):
+                    if not cell:
+                        continue
+                    for label in (header[column] if column < len(header) else "",
+                                  above[column] if column < len(above) else "",
+                                  row[column - 1] if column else "",
+                                  row[0] if column else ""):
+                        if (label and label != cell
+                                and len(label) <= _TABLE_LABEL_MAX):
+                            found += engine.register_text(
+                                f"{label}: {cell}", store, settings)
+    return found
+
+
 def prescan(
     files: Sequence[Path],
     store: MappingStore,
@@ -240,7 +322,9 @@ def prescan(
     """
     matcher = PersonMatcher(store, settings)
     total = max(len(files), 1)
-    found = 0
+    # Tables first: a label/value pair split across two cells has to be a known
+    # value before the paragraph walk reaches the cell holding the bare number.
+    found = register_table_context(files, store, settings, progress)
     for index, raw_path in enumerate(files):
         path = Path(raw_path)
         kind = classify(path)

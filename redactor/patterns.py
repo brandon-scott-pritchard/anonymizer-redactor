@@ -66,14 +66,41 @@ V_ALNUM = r"(?=[A-Za-z0-9][A-Za-z0-9\-/.]*\d)[A-Za-z0-9][A-Za-z0-9\-/.]{2,29}"
 V_DIGITS = r"\d[\d\-\s]{2,25}\d"
 # Mask runs may repeat per group ("XXX-XX-6789", "****-****-1234") - a single
 # adjacent run would miss the standard formats and ship the real last four.
-V_MASKED = r"(?:(?:[Xx*•#]{2,}[\-\s]?)+\d{2,6}|\d{2,6}(?:[\-\s]?[Xx*•#]{2,})+)"
+# The ellipsis run is a mask too: statements print "Acct #: ...3907" and
+# "...6613" as often as they print asterisks. Two dots minimum, so a decimal
+# point can never open one.
+V_MASKED = (r"(?:(?:[Xx*•#]{2,}|\.{2,4})[\-\s]?)+\d{2,6}"
+            r"|\d{2,6}(?:[\-\s]?(?:[Xx*•#]{2,}|\.{2,4}))+")
+# Digits printed in groups, which is how utility, cable and wireless accounts
+# are written: "8102 4477 9301". V_ALNUM forbids the space, so only the first
+# group was captured and "Account Number: [ACCOUNT-14] 4477 9301" shipped
+# two thirds of the number while looking redacted. Groups of three or more
+# digits, so a date ("03 14 2026") cannot enter.
+V_GROUPED = r"\d{3,6}(?:[\-\s]\d{3,6}){1,4}"
 V_ANY_ID = rf"(?:{V_MASKED}|{V_ALNUM})"
+# What the financial detectors accept: the grouped form as well.
+V_ACCOUNT_ID = rf"(?:{V_MASKED}|{V_GROUPED}|{V_ALNUM})"
 
 # separator between a label and its value: "No.", "Number", "#", ":", "-"
+# The bracketed aside is not decoration: IRS forms and bank statements are full
+# of them - "Share Certificate (CD) number 44-8821-0033",
+# "Account number (see instructions) HCS-0044-2211" - and without it the same
+# line without its parenthesis matched while the real one did not.
 _SEP = (
-    r"(?:\s*(?:num(?:ber)?|no\.?|nos\.?|#|id(?:entification)?|acct\.?|account|"
-    r"ending(?:\s+in)?|handle|profile|user\s?name|username|login|tag|cash\s?tag|"
-    r"is|are|was|were|of|for|at|with)){0,4}\s*[:\-–—=#]?\s*"
+    r"(?:\s*(?:num(?:ber)?|no\.?|nos\.?|#|id(?:entif(?:ication|ying))?|acct\.?|"
+    r"account|ending(?:\s+in)?|handle|profile|user\s?name|username|login|tag|"
+    r"cash\s?tag|is|are|was|were|of|for|at|with|"
+    # A transaction line puts a verb between the rail and the reference:
+    # "VENMO PAYMENT 3948217364" shipped its transaction id because nothing
+    # could step over the word PAYMENT.
+    r"payment|pmt|transfer|transaction|ref|reference|posted|to|from|"
+    # a label qualifies itself before it gets to the value: "Student ID at
+    # school of record:", "Loan number of record:"
+    r"school|record|primary|current|assigned)"
+    # a column heading writes its alternatives with a slash - "Account /
+    # identifying number" is the heading on the Utah asset schedule, and
+    # without the slash the whole column read as unlabelled
+    r"|\s*/|\s*\([^)\n]{1,30}\)|\s*\)){0,6}\s*[:\-–—=#]?\s*"
 )
 
 _MONTHS = (
@@ -357,14 +384,22 @@ DETECTORS: tuple[Detector, ...] = (
                       r"(?:\d{3}[-\s]?\d{2}[-\s]?\d{4}|" + V_MASKED + r")"), group=1, priority=96,
        digit=True, kw=("soc", "ssn", "s.s", "ss.")),
     _d("ein", labeled(("e\\.?i\\.?n\\.?", "f\\.?e\\.?i\\.?n\\.?", "employer\\s+identification",
-                       "tax\\s*(?:payer)?\\s*i\\.?d\\.?", "t\\.?i\\.?n\\.?", "federal\\s+tax\\s*id"),
-                      r"(?:\d{2}-?\d{7}|" + V_MASKED + r")"), group=1, priority=94,
+                       "tax\\s*(?:payer)?\\s*i\\.?d\\.?", "t\\.?i\\.?n\\.?", "federal\\s+tax\\s*id",
+                       # a state employer account, a business registration and a
+                       # paid preparer's PTIN all identify the filer as surely
+                       # as the federal EIN does
+                       "state\\s+id(?:entification)?\\s*(?:number)?", "state\\s+employer",
+                       "entity\\s*(?:no\\.?|number|#)", "ptin"),
+                      r"(?:\d{2}-?\d{7}|[A-Z]{0,2}-?\d{2,10}(?:-\d{2,4})?|" + V_MASKED + r")"),
+       group=1, priority=94,
        digit=True, kw=("ein", "e.i", "ei.", "fein", "f.e", "fe.", "tax",
-                       "tin", "t.i", "ti.", "employer")),
+                       "tin", "t.i", "ti.", "employer", "state", "entity", "ptin")),
     _d("ein", r"(?<!\d)\d{2}-\d{7}(?!\d)", priority=62,
        digit=True),
+    # "card?" parsed as "car" + optional "d", so this branch could never match
+    # without the letters c-a-r in the text. It wanted the whole word optional.
     _d("drivers_license", labeled(("driver'?s?\\s*licen[sc]e", "d\\.?l\\.?", "operator'?s?\\s*licen[sc]e",
-                                   "state\\s+id(?:entification)?\\s*card?")), group=1, priority=90,
+                                   "state\\s+id(?:entification)?(?:\\s*card)?")), group=1, priority=90,
        digit=True, kw=("licen", "dl", "d.l", "operator", "state")),
     _d("passport", labeled(("passport",)), group=1, priority=90,
        digit=True, kw=("passport",)),
@@ -378,15 +413,22 @@ DETECTORS: tuple[Detector, ...] = (
        digit=True, kw=("inmate", "booking", "offender", "prisoner", "doc", "jail")),
     _d("student_id", labeled(("student\\s*(?:id)?", "pupil\\s*id", "school\\s*id", "enrollment")), group=1, priority=86,
        digit=True, kw=("student", "pupil", "school", "enrollment")),
+    _d("employee_id", labeled(("employee\\s*(?:no\\.?|number|id|#)?", "emp\\s*(?:no\\.?|id|#)",
+                               "payroll\\s*(?:no\\.?|number|id|#)", "associate\\s*(?:no\\.?|id)",
+                               "badge", "personnel\\s*(?:no\\.?|number|id)")), group=1, priority=85,
+       digit=True, kw=("employee", "emp", "payroll", "associate", "badge", "personnel")),
     _d("voter_id", labeled(("voter\\s*(?:registration|reg\\.?|id)?",)), group=1, priority=86,
        digit=True, kw=("voter",)),
     _d("bar_number", labeled(("bar\\s*(?:no\\.?|number|#|id)", "utah\\s+bar", "state\\s+bar", "attorney\\s*(?:reg(?:istration)?)?")), group=1, priority=86,
        digit=True, kw=("bar", "attorney")),
     _d("notary_id", labeled(("notary\\s*(?:commission|id|public)?", "commission\\s*(?:no\\.?|number|#)")), group=1, priority=86,
        digit=True, kw=("notary", "commission")),
-    _d("professional_license", labeled(("licen[sc]e\\s*(?:no\\.?|number|#)", "certification\\s*(?:no\\.?|number|#)",
-                                        "npi", "registration\\s*(?:no\\.?|number|#)")), group=1, priority=84,
-       digit=True, kw=("licen", "certification", "npi", "registration")),
+    _d("professional_license", labeled(("licen[sc]e\\s*(?:no\\.?|number|#)?", "certification\\s*(?:no\\.?|number|#)",
+                                        "npi", "registration\\s*(?:no\\.?|number|#)",
+                                        # a financial adviser's identifiers, which
+                                        # appear on every brokerage statement
+                                        "\\bcrd\\b", "\\biard\\b")), group=1, priority=84,
+       digit=True, kw=("licen", "certification", "npi", "registration", "crd", "iard")),
     _d("tribal_id", labeled(("tribal\\s*(?:enrollment|id|member(?:ship)?)", "enrollment\\s*(?:no\\.?|number|#)",
                              "cdib", "certificate\\s+of\\s+degree\\s+of\\s+indian\\s+blood")), group=1, priority=86,
        digit=True, kw=("tribal", "enrollment", "cdib", "indian")),
@@ -410,13 +452,30 @@ DETECTORS: tuple[Detector, ...] = (
     # ---------------------------------------------------------- financial ----
     _d("credit_card", r"(?<![\d\-])(?:\d[ -]?){12,18}\d(?![\d\-])", validator=luhn_valid, priority=93,
        digit=True),
+    # Bare "card" is admitted as a label, but only in front of a masked form or
+    # a four-digit tail - "card ending in 4417" is how every statement prints
+    # it, and it was the worst-caught identifier in the audit. Restricting the
+    # value is what keeps "card 1 of 2" and "card holder" out.
     _d("credit_card", labeled(("credit\\s*card", "debit\\s*card", "visa", "mastercard", "master\\s*card",
-                               "amex", "american\\s+express", "discover", "card\\s*(?:no\\.?|number|#)"),
-                              # a bare 4-digit tail covers "card ending in 9876"
-                              rf"(?:{V_MASKED}|(?:\d[ -]?){{12,18}}\d|\d{{4}})"), group=1, priority=92,
+                               "amex", "american\\s+express", "discover", "card\\s*(?:no\\.?|number|#)",
+                               "card"),
+                              # A bare 4-digit tail covers "card ending in 9876".
+                              # It needs both digit boundaries: without them the
+                              # bare "card" label above sliced "1234" out of
+                              # "State ID card 12345678".
+                              rf"(?:{V_MASKED}|(?:\d[ -]?){{12,18}}\d|(?<!\d)\d{{4}}(?!\d))"),
+       group=1, priority=92,
        digit=True, kw=("card", "visa", "amex", "american", "discover")),
     _d("routing_number", labeled(("routing", "aba", "rtn", "transit")), group=1, priority=91,
        digit=True, kw=("routing", "aba", "rtn", "transit")),
+    # A bare nine-digit run that passes the ABA checksum. This wires up
+    # valid_routing, which had been written and then never referenced, and it
+    # covers the MICR line at the foot of a cheque and the wire-instruction
+    # block, neither of which carries a label. Honest cost: the checksum passes
+    # roughly one in ten random nine-digit strings, so this sits at proposal
+    # priority where a labelled hit always outranks it.
+    _d("routing_number", r"(?<![\d\-])\d{9}(?![\d\-])", validator=valid_routing,
+       priority=60, digit=True),
     _d("iban", r"\b[A-Z]{2}\d{2}[ ]?(?:[A-Z0-9]{4}[ ]?){2,7}[A-Z0-9]{1,4}\b", priority=90, flags=0,
        digit=True),
     _d("swift", labeled(("swift", "bic", "swift\\s*/\\s*bic"), r"[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?"), group=1, priority=90,
@@ -425,26 +484,49 @@ DETECTORS: tuple[Detector, ...] = (
        digit=True),
     _d("crypto_wallet", r"\b0x[a-fA-F0-9]{40}\b", priority=90,
        digit=True),
+    # The transaction id on a payment-app line, which is not a handle: it
+    # identifies the transfer, and a long digit run after the rail's name is
+    # never the payer's username. Above payment_handle so it wins the position.
+    _d("check_number",
+       labeled(("venmo", "pay ?pal", "zelle", "cash ?app", "square ?cash"), r"\d{8,20}"),
+       group=1, priority=90, digit=True,
+       kw=("venmo", "paypal", "pay pal", "zelle", "cash", "square")),
     _d("payment_handle",
        labeled(("pay ?pal", "venmo", "cash ?app", "zelle", "square ?cash", "apple ?pay",
                 "google ?pay", "wise", "revolut", "chime", "stripe", "coinbase", "robinhood"),
                r"[$@]?[A-Za-z0-9._\-]{3,40}"), group=1, priority=89,
        kw=("paypal", "pay pal", "venmo", "cash", "zelle", "square", "apple",
            "google", "wise", "revolut", "chime", "stripe", "coinbase", "robinhood")),
-    _d("investment_account", labeled(("401\\s?\\(?k\\)?", "403\\s?\\(?b\\)?", "457", "ira", "roth(?:\\s+ira)?",
-                                      "pension", "annuity", "brokerage", "tsp", "hsa", "529",
+    # 457 and 529 are bare digit runs, and labeled() adds no word boundary of
+    # its own: unguarded they matched *inside* an amount, so "Total 4571.30"
+    # became "Total 457[INVACCOUNT-1]" - not a redaction but a silent rewrite,
+    # with a fragment of the real figure left standing to make it look clean.
+    # 401(k) and 403(b) were never exposed to this because they end in a letter.
+    _d("investment_account", labeled(("401\\s?\\(?k\\)?", "403\\s?\\(?b\\)?",
+                                      "(?<!\\d)457(?!\\d)", "ira", "roth(?:\\s+ira)?",
+                                      "pension", "annuity", "brokerage", "tsp", "hsa",
+                                      "(?<!\\d)529(?!\\d)",
                                       "retirement\\s+(?:account|plan)", "investment\\s+account",
-                                      "securities\\s+account", "mutual\\s+fund")), group=1, priority=87,
+                                      "securities\\s+account", "mutual\\s+fund",
+                                      "plan\\s*(?:no\\.?|number|#)", "participant",
+                                      "contract\\s*(?:no\\.?|number|#)"),
+                                     V_ACCOUNT_ID), group=1, priority=87,
        digit=True, kw=("401", "403", "457", "ira", "roth", "pension", "annuity",
                        "brokerage", "tsp", "hsa", "529", "retirement", "investment",
-                       "securities", "mutual")),
+                       "securities", "mutual", "plan", "participant", "contract")),
     _d("bank_account", labeled(("bank\\s+account", "checking\\s*(?:account)?", "savings\\s*(?:account)?",
                                 "deposit\\s+account", "acct", "account", "a/c", "money\\s+market",
-                                "certificate\\s+of\\s+deposit", "\\bcd\\b")), group=1, priority=82,
+                                "certificate\\s+of\\s+deposit", "\\bcd\\b",
+                                # a utility meter and a service account are both
+                                # tied to the service address, so both identify
+                                # where somebody lives
+                                "meter", "service\\s*(?:account|no\\.?|number)"),
+                               V_ACCOUNT_ID), group=1, priority=82,
        digit=True, kw=("bank", "checking", "savings", "deposit", "acct", "account",
-                       "a/c", "money", "cd")),
+                       "a/c", "money", "cd", "meter", "service")),
     _d("loan_number", labeled(("loan", "mortgage", "escrow", "note\\s*(?:no\\.?|number|#)", "deed\\s+of\\s+trust",
-                               "heloc", "line\\s+of\\s+credit", "promissory\\s+note")), group=1, priority=86,
+                               "heloc", "line\\s+of\\s+credit", "promissory\\s+note"),
+                              V_ACCOUNT_ID), group=1, priority=86,
        digit=True, kw=("loan", "mortgage", "escrow", "note", "deed", "heloc",
                        "credit", "promissory")),
     _d("policy_number", labeled(("polic(?:y|ies)", "insurance\\s+polic(?:y|ies)", "coverage\\s*(?:no\\.?|number|#)",
@@ -454,16 +536,30 @@ DETECTORS: tuple[Detector, ...] = (
        digit=True, kw=("claim", "adjuster")),
     _d("check_number", labeled(("check", "cheque", "draft", "wire\\s*(?:confirmation|reference|transfer)?",
                                 "invoice", "transaction", "confirmation", "reference\\s*(?:no\\.?|number|#)",
-                                "receipt")), group=1, priority=80,
+                                "receipt", "\\bref\\b", "trace\\s*(?:no\\.?|number|#)",
+                                "auth(?:orization)?\\s*(?:code|no\\.?|number)")), group=1, priority=80,
        digit=True, kw=("check", "cheque", "draft", "wire", "invoice", "transaction",
-                       "confirmation", "reference", "receipt")),
+                       "confirmation", "reference", "receipt", "ref", "trace", "auth")),
+    # A masked tail with no label at all - "****3907", "XXXX-XXXX-XXXX-4417",
+    # "...6613". Nothing caught these, and two of them shipped whole because the
+    # value-literal boundary in engine.py refuses to match after a "-" or a "."
+    # (right for emails, wrong for a masked account). Priority 72 sits below
+    # every labelled financial detector, so a labelled hit still wins.
+    _d("masked_account", rf"(?<![\w\-]){V_MASKED}(?![\w\-])", priority=72, digit=True),
 
     # ----------------------------------------------------------- property ----
     _d("street_address",
        r"\b\d{1,6}[A-Z]?\s+(?:(?:North|South|East|West|N\.?|S\.?|E\.?|W\.?|NE|NW|SE|SW)\s+)?"
        r"(?:[A-Z0-9][\w'\-]*\.?\s+){0,4}"
        r"(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Circle|Cir|Way|Wy|"
-       r"Place|Pl|Terrace|Ter|Parkway|Pkwy|Highway|Hwy|Trail|Trl|Loop|Square|Sq|Plaza|Alley|Route|Rte)\b\.?"
+       r"Place|Pl|Terrace|Ter|Parkway|Pkwy|Highway|Hwy|Trail|Trl|Loop|Square|Sq|Plaza|Alley|Route|Rte|"
+       # A subdivision names its streets Bend, Row, Run and Crossing as readily
+       # as Street and Avenue, and a home address that the suffix list has no
+       # word for is a home address that ships. These are USPS-standard suffixes.
+       r"Bend|Row|Run|Crossing|Xing|Landing|Lndg|Commons|Cove|Cv|Creek|Crk|Ridge|Rdg|"
+       r"Hollow|Holw|Meadow|Meadows|Mdw|Glen|Gln|Grove|Grv|Knoll|Knl|Bluff|Blf|"
+       r"Trace|Trce|Path|Walk|Way|Point|Pt|Pass|Park|Bay|Hill|Hills|Vista|Mews|"
+       r"Canyon|Cyn|Valley|Vly|Summit|Spur|Bend|Chase|Reach|Bridge|Ferry|Ford)\b\.?"
        r"(?:\s*,?\s*(?:Apt\.?|Apartment|Unit|Suite|Ste\.?|Bldg\.?|Building|Floor|Fl\.?|Rm\.?|Room|#)\s*[\w\-]+)?"
        r"(?:\s*,?\s*[A-Z][\w'\-]*(?:\s+[A-Z][\w'\-]*){0,2}\s*,?\s*(?:A[LKZR]|C[AOT]|D[EC]|FL|GA|HI|I[DLNA]|"
        r"K[SY]|LA|M[EDAINSOT]|N[EVHJMYCD]|O[HKR]|PA|RI|S[CD]|T[NX]|UT|V[TA]|W[AVIY])\.?\s*\d{5}(?:-\d{4})?)?",
@@ -512,8 +608,10 @@ DETECTORS: tuple[Detector, ...] = (
        digit=True, kw=("storage", "unit")),
 
     # --------------------------------------------------------------- case ----
+    # "action" needs its left boundary or it matches inside Trans*action*, and
+    # "Transaction 04/12/2026 posted" then registers the date as a case number.
     _d("case_number", labeled(("case", "civil\\s*(?:case)?", "criminal\\s*(?:case)?", "docket", "cause",
-                               "court\\s+file", "matter", "index", "action", "file",
+                               "court\\s+file", "matter", "index", "\\baction", "file",
                                "probate", "juvenile", "adversary", "appellate", "appeal"),
                               r"(?=[A-Za-z0-9\-:/.]*\d)[A-Za-z0-9][A-Za-z0-9\-:/.]{3,28}[A-Za-z0-9]"),
        group=1, priority=93,
@@ -566,6 +664,8 @@ _REJECT_VALUES = frozenset(
     rules section sections date dates type card plan group member subscriber policy
     claim file files matter case cases docket unit box record records information
     none n/a na unknown tbd various same above below herein thereof
+    payment payments transfer transfers deposit deposits withdrawal withdrawals
+    purchase purchases debit debits credit credits sent received pending posted
     """.split()
 )
 
@@ -575,6 +675,49 @@ def _value_is_junk(value: str) -> bool:
     if not cleaned:
         return True
     return cleaned in _REJECT_VALUES
+
+
+# A sum of money, not an identifier. V_ALNUM permits ".", so a figure written
+# without a thousands separator is a perfectly valid identifier shape, and in a
+# financial document the label sitting in front of it is always a financial one:
+#
+#     Savings account 842.16 was moved…   -> bank_account   '842.16'
+#     Escrow 412.55 collected monthly     -> loan_number    '412.55'
+#     Roth IRA 640.00                     -> investment_account '640.00'
+#
+# A declaration whose figures have been altered is not a redacted document, it
+# is a false statement filed under penalty - so this is the one place the tool
+# refuses a match on the shape of the value alone. Nothing legitimate is lost:
+# no real account, loan, policy or claim number is written as a decimal with
+# exactly two places.
+_CURRENCY_SHAPE = re.compile(r"^\$?\d{1,3}(?:,\d{3})*\.\d{2}$|^\$?\d+\.\d{2}$")
+
+# Stated as an exception list rather than as a list of financial categories,
+# because the financial ones are not the only labels that sit next to money.
+# "Summit Ridge Visa    8,412.19    212.00" on a debt schedule matched the
+# *alien_number* detector, whose label vocabulary contains "visa" for the
+# immigration document, and took the monthly payment with it. Guessing which
+# categories can end up beside a dollar figure is a game that keeps being lost,
+# so the rule is the other way round: a currency shape is money unless the
+# category is one where a decimal numeral is the native notation. An ICD-9
+# diagnosis code really is written "250.00"; GPS coordinates really are
+# decimals; nothing else here is.
+_DECIMAL_NATIVE = frozenset({"diagnosis_code", "gps"})
+
+# A cheque number is never a date, and neither is a case number. "Transaction
+# 04/12/2026 posted" registered the date as a case number and blacked it out.
+_DATE_ONLY = re.compile(rf"^{V_DATE}$|^\d{{1,2}}[/\-]\d{{4}}$")
+_DATE_REJECTING = frozenset({"check_number", "case_number", "case_designator"})
+
+
+def _wrong_shape(category: str, value: str) -> bool:
+    """True when the value is money or a date and the category cannot be either."""
+    cleaned = value.strip()
+    if category not in _DECIMAL_NATIVE and _CURRENCY_SHAPE.match(cleaned):
+        return True
+    if category in _DATE_REJECTING and _DATE_ONLY.match(cleaned):
+        return True
+    return False
 
 
 def _overlaps(start: int, end: int, spans: Sequence[tuple[int, int]]) -> bool:
@@ -617,6 +760,8 @@ def scan(
             value = value.rstrip(" .,;:")
             end = start + len(value)
             if not value.strip() or _value_is_junk(value):
+                continue
+            if _wrong_shape(det.category, value):
                 continue
             if det.validator and not det.validator(value):
                 continue

@@ -170,17 +170,46 @@ def iter_tables(path: Path):
             except etree.XMLSyntaxError:
                 continue
             for table in root.iter(w("tbl")):
-                rows: list[list[str]] = []
-                for row in table.iter(w("tr")):
-                    cells = [
-                        " ".join("".join(_node_text(node) for node in cell.iter(
-                            w("t"), w("tab"), w("br"))).split())
-                        for cell in row.iter(w("tc"))
-                    ]
-                    if any(cells):
-                        rows.append(cells)
+                rows = _table_rows(table)
                 if rows:
                     yield rows
+
+
+def _cell_text(cell: etree._Element) -> str:
+    """One cell's readable text.
+
+    Only the cell's *own* paragraphs: a table nested inside this cell is a
+    table in its own right and gets yielded separately, so pulling its text up
+    here would report it twice. Paragraphs join with a space rather than with
+    nothing - two paragraphs in one cell used to arrive as
+    "Account No.000488213907", which is the same fusing bug the tab handling
+    above exists to prevent, one level up.
+    """
+    paragraphs = []
+    for para in cell.findall(w("p")):
+        text = " ".join("".join(
+            _node_text(node) for node in para.iter(w("t"), w("tab"), w("br"))
+        ).split())
+        if text:
+            paragraphs.append(text)
+    return " ".join(paragraphs)
+
+
+def _table_rows(table: etree._Element) -> list[list[str]]:
+    """Rows of cell text for one table, ignoring any table nested inside it.
+
+    ``iter`` is a descendant axis, so walking rows and cells with it made a
+    table nested in a cell part of its ancestor as well as a table on its own:
+    a two-column table came back with a six-cell row, and the inner table was
+    read three times. Rows and cells are direct children, and only direct
+    children.
+    """
+    rows: list[list[str]] = []
+    for row in table.findall(w("tr")):
+        cells = [_cell_text(cell) for cell in row.findall(w("tc"))]
+        if any(cells):
+            rows.append(cells)
+    return rows
 
 
 def caption_sources(path: Path) -> dict[str, str]:

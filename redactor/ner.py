@@ -64,7 +64,25 @@ _NEVER_IN_A_NAME = frozenset({
     "signature", "print", "card", "balance", "deposit", "withdrawal",
     "expense", "expenses", "reimbursement", "premium", "deductible",
     "statement", "invoice", "receipt", "subtotal", "total",
+    # Column headings from financial statements. On a statement the model
+    # routinely runs a real party's name together with the heading of the next
+    # column - "Douglas W. Vandenbrook Secured", "Karis Elaine Vandenbrook
+    # Beneficiary", "Theo Wray Vandenbrook Fund" - and ticking one of those
+    # registers an entity that matches nothing while costing the operator
+    # attention on a list that is already too long. These are document
+    # structure words, not institutions, so they carry no overfitting risk.
+    "beneficiary", "participant", "subscriber", "employee", "employer",
+    "borrower", "payee", "payer", "payor", "recipient", "plan", "fund",
+    "loan", "secured", "unsecured", "trustee", "custodian", "holder",
+    # the same thing on an explanation of benefits
+    "patient", "dob", "insured", "guarantor", "provider", "claimant",
 })
+
+# "XXXX" is a masked card number and "****" is a redaction bar; the model
+# offered both as organizations. "EMP-044821" and "XXX-XX-1147" are identifiers
+# the pattern layer already owns.
+_ALL_MASK = re.compile(r"^[Xx*•#\-\s]+$")
+_ID_FRAGMENT = re.compile(r"[A-Z]{2,}-\d|\d-\d")
 
 _NOT_A_NAME = frozenset({
     "order", "orders", "debt", "debts", "title", "titles", "asset", "assets",
@@ -282,6 +300,8 @@ def _plausible(value: str, category: str) -> bool:
         return False
     tokens = value.split()
     if len(tokens) > MAX_NAME_TOKENS:
+        return False
+    if _ALL_MASK.match(value) or _ID_FRAGMENT.search(value):
         return False
     # "Mother's Day" must reduce to {mother, day}: a possessive inside the
     # candidate hid the junk word behind it
