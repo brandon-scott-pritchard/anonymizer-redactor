@@ -12,6 +12,8 @@ outright rather than passed through looking processed.
 
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -205,6 +207,74 @@ def iter_text_units(path: Path):
             text, _spans = _words_to_text(words)
             if text.strip():
                 yield text
+
+
+# A line that ends in "UT 84606" or "IA 50306-0522" - a state and a ZIP, which
+# is how the last line of a mailing address always ends and how nothing else on
+# a statement ends. A merchant line says "ASIAN MARKET PROVO UT 13.99": a state,
+# then money, and no ZIP.
+_ZIP_LINE = re.compile(r"\b[A-Z]{2}\.?[ \t]+\d{5}(?:-\d{4})?[ \t]*$")
+_MONEY_ON_LINE = re.compile(r"\d[\d,]*\.\d{2}")
+# the lines above the ZIP: a street number, or a person's or company's name
+_ADDRESS_LINE = re.compile(r"^\s*(?:\d{1,6}[A-Za-z]?\s+\S|P\.?\s?O\.?\s+Box\b|[A-Za-z])")
+
+ADDRESS_BLOCK_LINES = 4          # a name, two street lines and the city line
+ADDRESS_LINE_CHARS = 48          # an address line is short; prose is not
+ADDRESS_BLOCK_PAD = 2.0
+
+
+def _visual_lines(words):
+    """[(text, rect, y0)] grouped by visual line, top to bottom."""
+    rows: dict[int, list] = {}
+    for x0, y0, x1, y1, word, *_ in words:
+        if word:
+            rows.setdefault(round(y0 / 2.0), []).append((x0, y0, x1, y1, word))
+    lines = []
+    for key in sorted(rows):
+        items = sorted(rows[key], key=lambda w: w[0])
+        rect = pymupdf.Rect(items[0][0], items[0][1], items[0][2], items[0][3])
+        for x0, y0, x1, y1, _w in items[1:]:
+            rect |= pymupdf.Rect(x0, y0, x1, y1)
+        lines.append((" ".join(i[4] for i in items), rect, rect.y0))
+    return lines
+
+
+def address_blocks(words) -> list[pymupdf.Rect]:
+    """Rectangles covering every mailing-address block on a page.
+
+    Matching the address as *text* keeps going wrong on a real statement,
+    because a coupon's address block is not laid out as text so much as
+    positioned: the name wraps, a word gets split across two runs, and a box
+    drawn from whichever span happened to match covers "BRANDON PR" and leaves
+    "ITCHARD" sitting on the page. Reading the geometry instead sidesteps all
+    of it - find the line that ends in a state and a ZIP, walk up while the
+    lines above are short and carry no money, and black the whole rectangle.
+
+    Deliberately blunt. A mailing address is the one thing on a statement where
+    covering a little too much costs nothing: there is no transaction data in
+    it, and the alternative is a name that ships in pieces.
+    """
+    lines = _visual_lines(words)
+    blocks: list[pymupdf.Rect] = []
+    for index, (text, rect, _y) in enumerate(lines):
+        if not _ZIP_LINE.search(text) or _MONEY_ON_LINE.search(text):
+            continue
+        block = pymupdf.Rect(rect)
+        height = max(rect.height, 1.0)
+        top = index
+        for above in range(index - 1, max(index - ADDRESS_BLOCK_LINES - 1, -1), -1):
+            line, line_rect, _ = lines[above]
+            if (len(line) > ADDRESS_LINE_CHARS
+                    or _MONEY_ON_LINE.search(line)
+                    or not _ADDRESS_LINE.match(line)
+                    # must be the line directly above, not across a gap
+                    or lines[top][1].y0 - line_rect.y0 > height * 2.2):
+                break
+            block |= line_rect
+            top = above
+        blocks.append(block + (-ADDRESS_BLOCK_PAD, -ADDRESS_BLOCK_PAD,
+                               ADDRESS_BLOCK_PAD, ADDRESS_BLOCK_PAD))
+    return blocks
 
 
 def iter_tables(path: Path):
@@ -420,6 +490,20 @@ def process(
                         text_color=(1, 1, 1),
                         align=pymupdf.TEXT_ALIGN_CENTER,
                     )
+                    report.boxes += 1
+
+            # The mailing address, covered as a block rather than word by word.
+            # A coupon positions its address rather than laying it out as text,
+            # so a box drawn from whichever span matched covered "BRANDON PR"
+            # and left "ITCHARD" on the page. Gated on street_address, so an
+            # operator who turns addresses off still gets what they asked for.
+            if settings.category_enabled("street_address"):
+                for rect in address_blocks(words):
+                    if derotate is not None:
+                        rect = pymupdf.Rect(rect) * derotate
+                    if rect.is_empty or rect.is_infinite:
+                        continue
+                    page.add_redact_annot(rect, fill=(0, 0, 0))
                     report.boxes += 1
 
             # Every embedded image on a text page is blacked out whole: a

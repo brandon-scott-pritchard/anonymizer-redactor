@@ -527,3 +527,94 @@ def test_the_coupon_scanline_is_caught():
     assert (line, "bank_account") in scanned(line)
     # a shorter run still needs its label
     assert scanned("0002333700") == []
+
+
+# ---------------------------------------------------------------------------
+# the mailing address block, covered by geometry rather than by text
+# ---------------------------------------------------------------------------
+
+
+def _pdf(tmp_path, name, lines, size=7):
+    pymupdf = pytest.importorskip("pymupdf")
+    path = tmp_path / name
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    y = 40
+    for line in lines:
+        page.insert_text((40, y), line, fontsize=size, fontname="cour")
+        y += size + 4
+    doc.save(path)
+    doc.close()
+    return path
+
+
+COUPON = [
+    "Account Summary",
+    "Previous Balance $360.89",
+    "Detach and mail with check payable to the bank.",
+    "00023337000623950000250044654004496347265",
+    "JORDAN MICHAELS",
+    "442 N 1600 E",
+    "OREM UT 84057-2051",
+    "Account Number",
+    "07/03 07/03 ASIAN MARKET PROVO UT 13.99",
+    "07/20 07/20 COSTCO WHSE #0484 OREM UT 234.20",
+]
+
+
+def test_the_mailing_address_block_goes_whole(tmp_path):
+    """Word-by-word boxes covered "BRANDON PR" and left "ITCHARD" on the page.
+
+    A coupon positions its address rather than laying it out as text, so the
+    span that matched and the glyphs on the page do not line up. The block is
+    found by geometry instead: the line ending in a state and a ZIP, plus the
+    short moneyless lines above it.
+    """
+    from redactor import pdf_processor
+    pymupdf = pytest.importorskip("pymupdf")
+    src = _pdf(tmp_path, "coupon.pdf", COUPON)
+
+    blocks = pdf_processor.address_blocks(pymupdf.open(src)[0].get_text("words"))
+    assert len(blocks) == 1, "expected exactly one address block"
+
+    settings = engine.Settings()
+    store, _ = review.build_store([])
+    pipeline.prescan([src], store, settings)
+    out = tmp_path / "out.pdf"
+    pdf_processor.process(src, out, store, settings)
+    after = "\n".join(pdf_processor.extract_text(out).values())
+
+    for gone in ("JORDAN MICHAELS", "MICHAELS", "442 N 1600 E", "OREM UT 84057", "84057"):
+        assert gone not in after, f"{gone} survived"
+
+
+def test_the_address_block_takes_no_transaction_with_it(tmp_path):
+    """A merchant line says "ASIAN MARKET PROVO UT 13.99" - a state, then money.
+
+    It is the closest thing on the page to an address line, and blacking one
+    would delete a transaction the whole exhibit exists to show.
+    """
+    from redactor import pdf_processor
+    src = _pdf(tmp_path, "coupon2.pdf", COUPON)
+    settings = engine.Settings()
+    store, _ = review.build_store([])
+    pipeline.prescan([src], store, settings)
+    out = tmp_path / "out2.pdf"
+    pdf_processor.process(src, out, store, settings)
+    after = "\n".join(pdf_processor.extract_text(out).values())
+
+    for kept in ("ASIAN MARKET", "COSTCO WHSE", "13.99", "234.20", "360.89"):
+        assert kept in after, f"{kept} was destroyed"
+
+
+def test_turning_addresses_off_turns_the_block_off_too(tmp_path):
+    from redactor import pdf_processor
+    src = _pdf(tmp_path, "coupon3.pdf", COUPON)
+    settings = engine.Settings()
+    settings.enabled_categories.discard("street_address")
+    store, _ = review.build_store([])
+    pipeline.prescan([src], store, settings)
+    out = tmp_path / "out3.pdf"
+    pdf_processor.process(src, out, store, settings)
+    after = "\n".join(pdf_processor.extract_text(out).values())
+    assert "442 N 1600 E" in after, "the category switch must still govern this"
