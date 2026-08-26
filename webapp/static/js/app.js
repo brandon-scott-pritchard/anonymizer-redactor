@@ -388,7 +388,14 @@ function App() {
   const [busy, setBusy] = useState({ active: false, message: "", fraction: 0 });
   const [fault, setFault] = useState("");
 
-  useEffect(() => { api.get("/api/state").then(setMeta).catch((e) => setFault(e.message)); }, []);
+  useEffect(() => {
+    // the launch token did its job at load; the session cookie carries auth
+    // from here, so drop it from the URL rather than leave it on screen
+    if (window.location.search.includes("token=")) {
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+    api.get("/api/state").then(setMeta).catch((e) => setFault(e.message));
+  }, []);
 
   const track = (message, fraction) => setBusy({ active: true, message, fraction });
   const settle = () => setBusy({ active: false, message: "", fraction: 0 });

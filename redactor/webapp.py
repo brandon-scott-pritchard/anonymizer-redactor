@@ -441,9 +441,11 @@ def main() -> int:
             port = probe.getsockname()[1]
 
     url = f"http://127.0.0.1:{port}/?token={TOKEN}"
-    print(f"Document Redactions & Anonymization {__version__}")
-    print(f"Opening {url}")
-    print("Everything stays on this computer. Quit the app to stop it.")
+    # flush: the frozen app is windowed, so stdout is block-buffered when
+    # redirected and the URL would otherwise never reach a log file
+    print(f"Document Redactions & Anonymization {__version__}", flush=True)
+    print(f"Opening {url}", flush=True)
+    print("Everything stays on this computer. Quit the app to stop it.", flush=True)
     if "--no-browser" not in argv:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")

@@ -10,3 +10,5 @@ Pillow>=10,<12            # image handling for the OCR path
 fastapi>=0.110,<1         # web front end's local API server
 uvicorn>=0.29,<1          # serves it, bound to 127.0.0.1 only
 python-multipart>=0.0.9,<1  # document uploads from the browser
+pywebview>=5,<7           # the standalone app window (WKWebView / WebView2)
+pyobjc-framework-WebKit>=10,<12; sys_platform == "darwin"   # its macOS back end

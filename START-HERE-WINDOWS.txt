@@ -28,14 +28,15 @@ STEP 1 - INSTALL PYTHON  (one time, about 3 minutes)
 OPTION A - JUST RUN THE TOOL
 --------------------------------------------------------------------
 
-Double-click:   run_web.bat     (opens in your browser - use this one)
-         or:    run.bat         (the desktop window version)
+Double-click:   run_app.bat     (opens in its own window - use this one)
+         or:    run_web.bat     (the same thing in your browser)
+         or:    run.bat         (the older desktop window)
 
-They're the same tool underneath; the browser version just looks the
-same on every machine, which is why I'd use it. And to be clear
-about what "browser" means here: it talks to a private server
-running on this computer, not to the internet. Nothing you load into
-it goes anywhere.
+They're the same tool underneath. The first one opens in its own
+application window, the way any normal program does - no browser, no
+tab, no address bar. And nothing here touches the internet: the app
+talks to a private server running on this computer, so whatever you
+load into it stays on this machine.
 
 The first time, a black window opens and installs what it needs.
 That takes 10-20 minutes and downloads roughly 500 MB; leave it

@@ -50,13 +50,17 @@ def selftest() -> int:
 def main() -> int:
     if "--selftest" in sys.argv:
         return selftest()
-    if "--desktop" in sys.argv:
+    if "--tk" in sys.argv:
         # the old Tkinter front end, kept for anyone that wants it
         from redactor.gui import main as gui_main
         gui_main()
         return 0
-    from redactor.webapp import main as web_main
-    return web_main()
+    if "--browser" in sys.argv:
+        from redactor.webapp import main as web_main
+        return web_main()
+    # default: the React interface in its own application window
+    from redactor.desktop import main as desktop_main
+    return desktop_main()
 
 
 if __name__ == "__main__":

@@ -117,3 +117,42 @@ def test_feedback_logs_and_builds_the_mailto(client, tmp_path, monkeypatch):
     }).json()
     assert logged and logged[0]["corrected_category"] == "person"
     assert response["mailto"].startswith("mailto:bots@pritchard.works")
+
+
+# ------------------------------------------------------ the app window --
+
+def test_the_window_shell_serves_the_app_before_it_opens():
+    """desktop.main starts the server and waits; the window never opens blank."""
+    from redactor import desktop
+
+    port = desktop._free_port()
+    desktop._serve(port)
+    assert desktop._wait_until_up(port), "the server never answered"
+
+    import urllib.request
+    request = urllib.request.Request(f"http://127.0.0.1:{port}/?token={desktop.TOKEN}")
+    with urllib.request.urlopen(request, timeout=5) as response:
+        body = response.read().decode()
+    assert response.status == 200
+    assert "Document Redactions & Anonymization" in body
+    assert "/assets/js/app.js" in body
+
+
+def test_the_window_falls_back_to_the_browser_without_a_web_view(monkeypatch):
+    """A machine with no web view still gets the app, just in a browser."""
+    import builtins
+
+    from redactor import desktop
+
+    real_import = builtins.__import__
+
+    def no_webview(name, *args, **kwargs):
+        if name == "webview":
+            raise ImportError("no web view here")
+        return real_import(name, *args, **kwargs)
+
+    called = []
+    monkeypatch.setattr(builtins, "__import__", no_webview)
+    monkeypatch.setattr("redactor.webapp.main", lambda: called.append(1) or 0)
+    assert desktop.main() == 0
+    assert called, "it must fall back to the browser rather than exiting"

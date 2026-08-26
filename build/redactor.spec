@@ -88,6 +88,18 @@ hiddenimports += [
     "anyio._backends._asyncio", "multipart", "python_multipart",
 ]
 
+# The native window: pywebview loads its platform back end dynamically, and on
+# macOS reaches AppKit/WebKit through pyobjc.
+for package in ("webview", "objc", "Foundation", "AppKit", "WebKit", "Quartz"):
+    try:
+        pkg_datas, pkg_binaries, pkg_hidden = collect_all(package)
+    except Exception:
+        continue
+    datas += pkg_datas
+    binaries += pkg_binaries
+    hiddenimports += pkg_hidden
+hiddenimports += ["webview.platforms.cocoa", "webview.platforms.winforms"]
+
 a = Analysis(
     ["launcher.py"],
     pathex=["."],

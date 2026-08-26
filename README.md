@@ -26,17 +26,24 @@ the dependencies, and downloads the offline language model.
 > colon-free directory for the same reason. Renaming the folder to
 > `Anonymizer-Redactor` would remove the need for both workarounds.
 
-## Two front ends
-
-Same engine, two ways to drive it:
+## Launching it
 
 | Launch | What you get |
 | --- | --- |
-| `./run_web.command` (Windows: `run_web.bat`) | The web app. One deliberate design that looks and behaves identically on every system. It starts a local server bound to 127.0.0.1 on a random port, guarded by a one-time token, and opens your browser; documents are uploaded into a per-session temp directory and results come back as downloads. Nothing leaves the machine. |
-| `./run.command` (Windows: `run.bat`) | The desktop app (Tkinter). No browser involved; renders with each OS's native quirks. |
+| `./run_app.command` (Windows: `run_app.bat`) | The app in its own window. This is the one to use. |
+| `./run_web.command` (Windows: `run_web.bat`) | The same interface in your browser instead, if you would rather have tabs. |
+| `./run.command` (Windows: `run.bat`) | The old Tkinter window, kept for anyone that wants it. |
 
-Both walk the same four steps and share the same review logic, so a decision
-made in one behaves the same in the other.
+The window and the browser are the same React interface, rendered by the
+operating system's own web view (WKWebView on macOS, WebView2 on Windows),
+which is why it looks and behaves identically on every machine. Under it, a
+server bound to 127.0.0.1 on a random port does the work, guarded by a
+one-time token; documents live in a per-session temp directory and results
+come back as downloads. Nothing leaves the computer, and there is no
+internet connection involved at any point.
+
+The frozen `.app` and `.exe` open the window version by default. Pass
+`--browser` for the browser, or `--tk` for the old desktop interface.
 
 ### OCR
 
