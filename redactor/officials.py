@@ -46,6 +46,11 @@ _TITLE_WORDS = ("Judge", "Justice", "Commissioner", "Magistrate", "Referee",
                 "Hearing Officer")
 _T = "|".join(f"{w}|{w.upper()}" for w in _TITLE_WORDS)
 
+# "Magistrate Judge Delia Farnsworth" doubles the title word. Matching only the
+# first half leaves "Judge Delia Farnsworth" as the candidate name, which
+# plausible_name then rejects as caption furniture - so the officer vanished.
+_T_LEADING = rf"(?:(?:Magistrate|MAGISTRATE)[^\S\n]+)?(?:{_T})"
+
 _HON = r"(?:Hon\.?|HON\.?|Honorable|HONORABLE|Hon\.?orable)"
 
 # Words allowed to sit in front of the title word: "Third District Court Judge",
@@ -62,7 +67,7 @@ _NAME = caption.NAME_RE.pattern
 # "Before the Honorable Amber M. Cordova". A separator is required, so
 # "Judgement" cannot masquerade as a title.
 TITLE_THEN_NAME = re.compile(
-    rf"\b(?:{_HON}|(?:Chief[^\S\n]+|Presiding[^\S\n]+|Assigned[^\S\n]+)?(?:{_T}))"
+    rf"\b(?:{_HON}|(?:Chief[^\S\n]+|Presiding[^\S\n]+|Assigned[^\S\n]+)?{_T_LEADING})"
     rf"(?:[^\S\n]*[:,][^\S\n]*|[^\S\n]+)(?:{_HON}[^\S\n]+)?{_NAME}"
 )
 
@@ -74,9 +79,17 @@ NAME_THEN_TITLE = re.compile(
 
 # The block a court signs off in. Whatever name appears in the next few lines is
 # the officer, even when the title never repeats.
+#
+# The commissioner headings matter as much as the judge ones: in domestic
+# practice most of what gets signed is a commissioner's recommendation, and
+# those blocks routinely carry the name with no title line under it.
 _BY_THE_COURT = re.compile(
     r"\b(?:BY\s+THE\s+COURT|By\s+the\s+Court|DATED\s+AND\s+SIGNED|"
-    r"SO\s+ORDERED|IT\s+IS\s+SO\s+ORDERED)\b[:.]?",
+    r"SO\s+ORDERED|IT\s+IS\s+SO\s+ORDERED|"
+    r"RECOMMENDED\s+BY(?:\s+THE)?(?:\s+COURT)?(?:\s+COMMISSIONER)?|"
+    r"(?:COURT\s+)?COMMISSIONER['’]S\s+RECOMMENDATION|"
+    r"RECOMMENDATION\s+OF\s+THE(?:\s+COURT)?\s+COMMISSIONER|"
+    r"SIGNED\s+BY(?:\s+THE)?(?:\s+COURT)?\s+COMMISSIONER)\b[:.]?",
     re.IGNORECASE,
 )
 _BY_THE_COURT_LINES = 6
@@ -113,6 +126,7 @@ class Official:
 # title cannot swallow the officer's own surname ("Cordova District Court Judge").
 _QUALIFIERS = (
     r"(?:Chief|Presiding|Senior|Associate|Assigned|Acting|Retired|Visiting|Pro\s+Tem|"
+    r"Magistrate|"
     r"District|Circuit|Superior|Juvenile|Family|Probate|Municipal|Appellate|Bankruptcy|"
     r"Federal|State|County|Trial|Supreme|Court|Judicial|"
     r"First|Second|Third|Fourth|Fifth|Sixth|Seventh|Eighth|Ninth|Tenth|Eleventh|"
@@ -130,11 +144,17 @@ def _title_of(match: re.Match, name: str) -> str:
     whole = " ".join(match.group(0).split())
     if name:
         whole = whole.replace(" ".join(name.split()), " ")
-    for word in sorted(_TITLE_WORDS, key=len, reverse=True):
+    # Longest phrase wins, not longest title word: "Magistrate Judge" reads as
+    # the federal title it is, rather than being cut back to "Magistrate"
+    # because that word happens to be longer than "Judge".
+    best = ""
+    for word in _TITLE_WORDS:
         found = re.search(rf"\b((?:{_QUALIFIERS}[^\S\n]+){{0,3}}{word})\b", whole,
                           re.IGNORECASE)
-        if found:
-            return " ".join(found.group(1).split()).title()
+        if found and len(found.group(1)) > len(best):
+            best = found.group(1)
+    if best:
+        return " ".join(best.split()).title()
     if re.search(_HON, whole):
         return "Judge"
     return "Judicial officer"

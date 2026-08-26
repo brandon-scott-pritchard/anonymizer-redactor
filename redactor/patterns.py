@@ -187,7 +187,8 @@ ALLOWLIST_PATTERNS: tuple[re.Pattern, ...] = (
     # left that name completely unshielded.
     re.compile(
         r"\b(?:(?:Chief|Presiding|Assigned|Acting)[^\S\n]+)?"
-        r"(?:Judge|Commissioner|Justice|Magistrate(?:[^\S\n]+Judge)?|Hon(?:orable)?\.?)"
+        r"(?:Judge|(?:Court[^\S\n]+)?Commissioner|Justice|Referee|"
+        r"Hearing[^\S\n]+Officer|Magistrate(?:[^\S\n]+Judge)?|Hon(?:orable)?\.?)"
         r"(?:[^\S\n]*[:,][^\S\n]*|[^\S\n]+)"
         r"[A-Z][\w'\-]+(?:[^\S\n]+[A-Z]\.)?(?:[^\S\n]+[A-Z][\w'\-]+){0,2}"
     ),
@@ -199,7 +200,7 @@ ALLOWLIST_PATTERNS: tuple[re.Pattern, ...] = (
         r"(?:[^\S\n]*,[^\S\n]*|[^\S\n]*\n[^\S\n]*)"
         r"(?:(?:[A-Z][A-Za-z.'\-]{0,14}|\d{1,2}(?:st|nd|rd|th))[^\S\n]+){0,4}"
         r"(?:Judge|JUDGE|Justice|JUSTICE|Commissioner|COMMISSIONER|"
-        r"Magistrate|MAGISTRATE|Referee|REFEREE)\b"
+        r"Magistrate|MAGISTRATE|Referee|REFEREE|Hearing Officer|HEARING OFFICER)\b"
     ),
     # court names
     re.compile(
@@ -223,8 +224,10 @@ _ALLOWLIST_GUARDS: tuple[tuple[bool, tuple[str, ...]], ...] = (
     (True, ()),                  # rules of procedure require a rule number
     (True, ()),                  # reporter citations require volume digits
     (True, ()),                  # party pair + reporter, likewise
-    (False, ("judge", "commissioner", "justice", "magistrate", "hon")),
-    (False, ("judge", "commissioner", "justice", "magistrate", "referee")),
+    (False, ("judge", "commissioner", "justice", "magistrate", "referee",
+             "hearing officer", "hon")),
+    (False, ("judge", "commissioner", "justice", "magistrate", "referee",
+             "hearing officer")),
     (False, ("court",)),
     (False, ("court",)),
     (False, ("judicial",)),

@@ -47,6 +47,75 @@ def test_every_layout_is_also_shielded_inline(layout):
     assert "cordova" in covered.casefold()
 
 
+# Commissioners carry most of the signing in domestic practice, and their
+# blocks are laid out differently from a judge's - the heading names the role
+# and the name below it often has no title line under it at all.
+COMMISSIONER_LAYOUTS = {
+    "title first": "Commissioner Delia Farnsworth",
+    "colon": "Commissioner: Delia Farnsworth",
+    "court commissioner": "Court Commissioner Delia Farnsworth",
+    "title after a comma": "DELIA FARNSWORTH, Court Commissioner",
+    "title on the next line": "Delia Farnsworth\nCourt Commissioner",
+    "all caps block": "DELIA FARNSWORTH\nDISTRICT COURT COMMISSIONER",
+    "district qualified": "Delia Farnsworth, Third District Court Commissioner",
+    "heard before": "Heard before Commissioner Delia Farnsworth on March 4.",
+    "recommendation, titled": ("RECOMMENDED BY THE COMMISSIONER:\n\n_______\n"
+                               "Delia Farnsworth\nCourt Commissioner"),
+    "recommendation, bare name": ("COMMISSIONER'S RECOMMENDATION:\n\n_______\n"
+                                  "Delia Farnsworth"),
+    "curly apostrophe": ("COURT COMMISSIONER’S RECOMMENDATION:\n\n_______\n"
+                         "Delia Farnsworth"),
+    "recommended by, signed": ("RECOMMENDED BY THE COURT COMMISSIONER:\n\n_______\n"
+                               "/s/ Delia Farnsworth"),
+}
+
+
+@pytest.mark.parametrize("layout", sorted(COMMISSIONER_LAYOUTS))
+def test_commissioners_are_harvested_in_every_layout(layout):
+    found = officials.harvest(COMMISSIONER_LAYOUTS[layout])
+    assert [o.name.casefold() for o in found] == ["delia farnsworth"]
+
+
+@pytest.mark.parametrize("title,text", [
+    ("Commissioner", "Commissioner Delia Farnsworth"),
+    ("Hearing Officer", "Hearing Officer Delia Farnsworth"),
+    ("Referee", "Referee Delia Farnsworth"),
+    ("Magistrate Judge", "Magistrate Judge Delia Farnsworth"),
+    ("Magistrate", "Magistrate Delia Farnsworth"),
+    ("Chief Justice", "Chief Justice Delia Farnsworth"),
+])
+def test_every_officer_title_is_recognised_and_named(title, text):
+    """"Magistrate Judge" doubles the title word; matching only the first half
+    left "Judge Delia Farnsworth" as the candidate name, which reads as caption
+    furniture and dropped the officer entirely."""
+    found = officials.harvest(text)
+    assert [o.name for o in found] == ["Delia Farnsworth"]
+    assert found[0].title == title
+
+
+@pytest.mark.parametrize("text", [
+    "Commissioner Delia Farnsworth",
+    "DELIA FARNSWORTH, Court Commissioner",
+    "Hearing Officer Delia Farnsworth",
+    "Referee Delia Farnsworth",
+    "Magistrate Judge Delia Farnsworth",
+])
+def test_the_inline_allowlist_covers_the_same_titles(text):
+    """The harvest is the belt; these patterns are the braces. Referee and
+    hearing officer were in one and not the other."""
+    covered = " ".join(text[s:e] for s, e in patterns.allowlist_spans(text))
+    assert "farnsworth" in covered.casefold()
+
+
+@pytest.mark.parametrize("text", [
+    "The commissioner's recommendation was objected to.",
+    "Commissioner of Insurance regulations apply here.",
+    "Petitioner asked the commissioner to reconsider the ruling.",
+])
+def test_commissioner_in_ordinary_prose_harvests_nothing(text):
+    assert officials.harvest(text) == []
+
+
 def test_prose_and_attorneys_are_not_mistaken_for_the_bench():
     assert officials.harvest("if the judge agrees we will proceed") == []
     assert officials.harvest("The petitioner, Jane Elizabeth Smith, filed today.") == []

@@ -213,6 +213,18 @@ Amber M. Cordova
 District Court Judge
 ```
 
+Not just judges. Commissioners, justices, magistrate judges, referees and
+hearing officers are all recognized, in the same set of layouts plus the ones
+particular to a commissioner—which matters, because in domestic practice most
+of what actually gets signed is a commissioner's recommendation, and those
+blocks routinely carry the name with no title line under it:
+
+```
+COMMISSIONER'S RECOMMENDATION:          RECOMMENDED BY THE COURT COMMISSIONER:
+_______________________                 _______________________
+Delia Farnsworth                        /s/ Delia Farnsworth
+```
+
 That list covers the name everywhere it appears afterward, not just where the
 title sits beside it—so a later "the Cordova ruling" survives too. A judge is
 not a party, and an order that comes back with the bench renamed reads as
@@ -308,7 +320,7 @@ the language model, and copy the result back into `dist/`.
 ~/.venvs/anonymizer-redactor/bin/python -m pytest tests/ -q
 ```
 
-195 tests covering detector accuracy, allowlist protection, judicial-officer
+222 tests covering detector accuracy, allowlist protection, judicial-officer
 harvesting in every layout a court prints, name-variant expansion and merging,
 overlapping-name folding, typo matching, surrogate determinism, image
 redaction, mapping-key encryption, the web API, and end-to-end leak checks that
