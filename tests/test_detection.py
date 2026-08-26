@@ -382,13 +382,31 @@ def test_short_words_are_not_typo_matched():
 
 # ------------------------- proposal quality, from a real fifty-row list --
 
-def test_a_place_is_never_promoted_to_a_person():
-    """The reverse leak: labelled PERSON, "Pleasant Grove" would have been
-    given an invented human name while the real city shipped. Two capitalised
-    words with no digits and no company marker passes every person test."""
+@pytest.mark.parametrize("place", [
+    "Pleasant Grove", "Cedar Valley", "Spring Creek", "Oak Ridge", "Elk Hollow",
+])
+def test_a_place_the_model_labelled_a_place_is_not_promoted_to_a_person(place):
+    """The reverse leak. A town passes every person test - two capitalised
+    words, no digits, no company marker - so it was promoted to a person and
+    would have been given an invented human name while the real place shipped.
+
+    Keyed on generic geographic words rather than on the cities that happened
+    to be in the sample, half of which are surnames: a party called Jordan,
+    Logan or Murray stopped being proposed at all when it was tried that way.
+    """
     from redactor import ner
-    assert ner.refine_category("Pleasant Grove", "person") == "location"
-    assert ner.refine_category("Pleasant Grove", "location") == "location"
+    assert ner.refine_category(place, "location") == "location"
+
+
+def test_a_bare_person_label_on_a_town_is_a_known_limit():
+    """When the model says PERSON and gives no corroborating signal, nothing
+    short of a gazetteer separates "Pleasant Grove" from "Sarah Park". It stays
+    a person - still redacted, just under the wrong heading - and the operator
+    retypes it on the review screen. Guessing here would cost every real
+    Park, Glen and Bay on a name list."""
+    from redactor import ner
+    assert ner.refine_category("Twin Falls", "person") == "person"
+    assert ner.refine_category("Sarah Park", "person") == "person"
 
 
 def test_an_explicit_marker_still_wins_over_the_place_check():
@@ -406,7 +424,7 @@ def test_a_medical_practice_is_an_organization_not_a_person(value):
 
 
 @pytest.mark.parametrize("junk", [
-    "Order", "Debts", "Titles", "Time", "Vaccines", "Childcare", "Spring",
+    "Order", "Debts", "Titles", "Time", "Vaccines", "Childcare", "Custody",
 ])
 def test_an_ordinary_word_is_not_a_person(junk):
     """One real decree offered "Order" eight times, as a PERSON. Fifty rows of

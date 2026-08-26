@@ -30,13 +30,20 @@ MINOR_ROLES = {"minor child", "minor children", "subject minor", "ward"}
 
 # A personal name: 2-5 capitalised tokens, tolerating middle initials, particles
 # and generational suffixes.  Works for Title Case and ALL CAPS captions alike.
-_TOKEN = r"(?:[A-Z][A-Za-z'’\-]{1,20}|[A-Z]{2,20}|[A-Z]\.)"
+# Accented Latin, spelled out because Python's re has no \p{Lu}. Without these
+# "José-María Peña-Ortiz" and "Aoife Ní Bhraonáin" were not names at all - the
+# token class was ASCII-only, so any client with a diacritic in their name was
+# silently never proposed.
+_UPPER = r"A-ZÀ-ÖØ-ÞĀ-Ž"
+_LETTER = r"A-Za-zÀ-ÖØ-öø-ÿĀ-ž"
+
+_TOKEN = rf"(?:[{_UPPER}][{_LETTER}'’\-]{{1,20}}|[{_UPPER}]{{2,20}}|[{_UPPER}]\.)"
 # Real captions are typed by hand and often not capitalised at all - a live
 # divorce petition names its respondent "marcus duane vaughn," and a parentage
 # petition its petitioner "Rylan MacLeod dalton,". Requiring an initial capital
 # meant neither was ever proposed. The lenient token is only ever used where a
 # role word or a "v." line already says the text is a party.
-_TOKEN_ANY = r"(?:[A-Za-z][A-Za-z'’\-]{1,20}|[A-Z]\.)"
+_TOKEN_ANY = rf"(?:[{_LETTER}][{_LETTER}'’\-]{{1,20}}|[{_UPPER}]\.)"
 _PARTICLE = r"(?:van|von|de|del|della|di|da|du|la|le|el|bin|ibn|al|st\.?|mc|mac|o')"
 _SUFFIX = r"(?:Jr\.?|Sr\.?|II|III|IV|V|Esq\.?)"
 _WS = r"[^\S\n]+"   # whitespace that is not a line break - names never wrap
@@ -69,15 +76,16 @@ BOILERPLATE = {
     "telephone", "facsimile", "fax", "email", "e-mail", "address", "phone",
     "page", "pages", "sheet", "caption", "title", "date", "dated", "signature", "signed",
     "salt", "lake", "utah", "america", "government", "people", "commonwealth",
-    # Utah cities that appear in courthouse and pro-se address blocks. Without
-    # these, "West Jordan—Third District Court, 8080 S. Redwood Road" proposed
-    # "West Jordan" as a high-confidence party, ticked by default, and
-    # "Pleasant Grove" reached the judicial do-not-change list - which would
-    # have shielded a party's home city from redaction.
-    "jordan", "provo", "orem", "roosevelt", "grove", "pleasant", "sandy",
-    "ogden", "logan", "layton", "murray", "sciences", "vernal", "duchesne",
-    "altonah", "springville", "lehi", "draper", "tooele", "heber", "moab",
 }
+
+# Deliberately NOT a list of city names. Courthouse and pro-se address blocks
+# were proposing "West Jordan" as a party and "Pleasant Grove" as a judge, and
+# the first thing tried was naming the cities that showed up in the sample.
+# That is the wrong shape of fix twice over: it only ever covers the state you
+# sampled, and half of those words are surnames - a party called Jordan, Logan,
+# Murray, Grove or Draper stopped being proposed at all. is_address() below
+# catches every one of those lines on the structure of an address instead,
+# which is what they actually have in common.
 
 # A line carrying a street address or a ZIP is furniture, whatever names the
 # name regex can find inside it.
@@ -234,7 +242,8 @@ def _bare_role(line: str) -> str | None:
     return m.group(1) if m else None
 
 
-_SURNAME_RE = re.compile(r"(?<![\w'’])([A-Z][A-Za-z'’\-]{2,20})(?![\w'’])")
+_SURNAME_RE = re.compile(
+    rf"(?<![\w'’])([{_UPPER}][{_LETTER}'’\-]{{2,20}})(?![\w'’])")
 
 
 def _first_surname_in(text: str) -> str | None:

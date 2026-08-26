@@ -51,6 +51,7 @@ _ORG_MARKERS = frozenset({
 _PLACE_WORDS = frozenset({
     "north", "south", "east", "west", "valley", "heights", "springs", "creek",
     "canyon", "ridge", "hills", "park", "point", "view", "haven", "field",
+    "grove", "glen", "hollow", "bluff", "mesa", "butte", "bay", "lake",
     "fork", "junction", "bench", "flat", "meadow", "meadows", "cove", "town",
     "village", "township", "borough", "island", "beach", "harbor", "harbour",
 })
@@ -76,11 +77,14 @@ _NOT_A_NAME = frozenset({
     "stipulation", "decree", "judgment", "judgement", "motion", "petition",
     "exhibit", "schedule", "attachment", "holiday", "holidays", "vacation",
     "birthday", "religion", "travel", "transportation", "education", "school",
-    "medical", "dental", "vision", "spring", "summer", "fall", "winter",
-    "brake", "break", "extra-curricular", "extracurricular", "tutoring",
-    "venue", "grounds", "jurisdiction", "residency", "marriage", "divorce",
-    "parent-time", "parenting", "visitation", "arrears", "arrearages",
+    "medical", "dental", "vision", "extra-curricular", "extracurricular",
+    "tutoring", "venue", "grounds", "jurisdiction", "residency", "marriage",
+    "divorce", "parent-time", "parenting", "visitation", "arrears", "arrearages",
 })
+# Seasons are deliberately absent. "Spring Brake" appeared in the sample - a
+# typo for Spring Break - and adding "brake" and the four seasons would have
+# been fitting the list to one document's spelling mistake at the cost of every
+# real Winter, Summers and Spring on a name list.
 
 _nlp = None
 _load_error: str | None = None
@@ -177,11 +181,16 @@ def refine_category(value: str, category: str) -> str:
     # place-shaped as it is organization-shaped, and the marker is the signal
     if any(t in _ORG_MARKERS for t in bare):
         return category
-    # A place name passes every person test below - two capitalised words, no
-    # digits, no company marker - so "Pleasant Grove" was promoted to a person
-    # and would have been given an invented human name while the city shipped.
-    if all(t in BOILERPLATE or t in _PLACE_WORDS for t in bare):
-        return "location"
+    # The model already said this is a place. A town passes every person test
+    # below - two capitalised words, no digits, no company marker - so
+    # "Pleasant Grove" was being promoted to a person and would have been given
+    # an invented human name while the real city shipped. Refusing to overrule
+    # the model when a geographic word is present is safe in a way that
+    # guessing at a bare PERSON label is not: here the label is corroborating
+    # evidence, and "Park" or "Glen" as somebody's actual surname never reaches
+    # this branch because the model would have labelled it PERSON.
+    if any(t in _PLACE_WORDS for t in bare):
+        return category
     for token in tokens:
         if not _PERSON_TOKEN.match(token.rstrip(",")):
             return category

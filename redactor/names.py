@@ -392,7 +392,6 @@ NICKNAMES: dict[str, tuple[str, ...]] = {
     "cynthia": ("cindy",),
     "victoria": ("vicky", "tori"),
     "veronica": ("ronnie", "vero"),
-    "cody": ("code",),
 }
 
 _BY_NICKNAME: dict[str, set[str]] = {}

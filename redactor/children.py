@@ -43,7 +43,10 @@ BORN = re.compile(
 )
 
 # A roster table: the header row names both halves of what it holds.
-_HEADER_NAME = re.compile(r"\bname\b", re.IGNORECASE)
+# "Name", but a roster is as likely to head the column "Child" or "Minor
+# Child" - keying on the one wording the sample happened to use would have
+# missed every roster laid out the other way.
+_HEADER_NAME = re.compile(r"\bname\b|\bchild(?:ren)?\b", re.IGNORECASE)
 _HEADER_BIRTH = re.compile(r"\bbirth\b|\bborn\b|\bd\.?o\.?b\b", re.IGNORECASE)
 
 # "JQA", "C.E.F." - initials standing in for a child, already the form the

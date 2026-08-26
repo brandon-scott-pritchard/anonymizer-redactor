@@ -217,9 +217,23 @@ def harvest(text: str, source: str = "") -> list[Official]:
         if existing is None or (existing.confidence == "medium" and confidence == "high"):
             found[key] = Official(name, title, source, confidence)
 
+    def on_an_address_line(match: re.Match) -> bool:
+        """Judge the whole line, not the captured words.
+
+        A courthouse address sits right under the court name and reads as a
+        title followed by a name: "Judge: 8080 S. Redwood Road, West Jordan"
+        hands back an officer called West Jordan, and the cleaned name is not
+        itself an address so checking the capture alone never catches it.
+        """
+        start = text.rfind("\n", 0, match.start()) + 1
+        end = text.find("\n", match.end())
+        return caption.is_address(text[start: end if end != -1 else len(text)])
+
     titled_at: set[int] = set()
     for pattern in (TITLE_THEN_NAME, NAME_THEN_TITLE):
         for match in pattern.finditer(text):
+            if on_an_address_line(match):
+                continue
             name = _acceptable(match.group(1))
             if name:
                 add(name, _title_of(match, name), "high")
@@ -228,14 +242,7 @@ def harvest(text: str, source: str = "") -> list[Official]:
 
     # bare surnames, but only where the full-name pattern came up empty
     for match in TITLE_THEN_SOLO.finditer(text):
-        if match.start() in titled_at:
-            continue
-        # judge the whole line, not the captured word: "Judge: 8080 S. Redwood
-        # Road, West Jordan" would otherwise hand back an officer called West
-        line_start = text.rfind("\n", 0, match.start()) + 1
-        line_end = text.find("\n", match.end())
-        line = text[line_start: line_end if line_end != -1 else len(text)]
-        if caption.is_address(line):
+        if match.start() in titled_at or on_an_address_line(match):
             continue
         name = _acceptable(match.group(1), solo=True)
         if name:
