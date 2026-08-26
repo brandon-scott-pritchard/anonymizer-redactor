@@ -66,12 +66,31 @@ _ACCOUNT_WORDS = frozenset({
 })
 
 
+# Where an employer is named outright.
+EMPLOYER_FIELD = re.compile(
+    r"(?i:\b(?:employer(?:'s|’s)?(?:\s+name)?|employed\s+by|paid\s+by"
+    r"|payer(?:'s|’s)?\s+name)\s*[:\-]\s*)"
+    r"([^\n]{2,60})"
+)
+
+# "DIRECT DEP CASCADIA FREIGHT LOGISTICS PAYROLL" - the employer is the part
+# between the deposit type and the word payroll.
+PAYROLL_DEPOSIT = re.compile(
+    r"(?i:\b(?:direct\s+dep(?:osit)?|dir\s+dep|ach\s+credit|ach|payroll)\s+)"
+    rf"({_NAME})"
+    r"(?i:\s+(?:payroll|pay|salary|wages|direct\s+dep|dir\s+dep))"
+)
+
+_EMPLOYER_JUNK = re.compile(r"^[\W\d_]+$")
+
+
 @dataclass(frozen=True)
 class Party:
-    """A counterparty named in a transaction line."""
+    """Somebody named in a financial document who is not a party to the case."""
 
     name: str
     source: str = ""
+    category: str = "person"
 
     @property
     def key(self) -> str:
@@ -165,6 +184,31 @@ def harvest(text: str, source: str = "") -> list[Party]:
     return list(found.values())
 
 
+def employers(text: str, source: str = "") -> list[Party]:
+    """The employer a financial document names.
+
+    Where the money comes from identifies the client; where it goes mostly does
+    not. A grocery store, a utility and an insurer appear on millions of
+    statements and say nothing about who this is - and if the delivered file is
+    going to be read by something that looks merchants up, renaming them is
+    worse than useless, because it sends the reader after a business that does
+    not exist. The employer is the exception, and it is the one every pay stub,
+    W-2 and declaration names outright.
+    """
+    found: dict[str, Party] = {}
+    for pattern in (EMPLOYER_FIELD, PAYROLL_DEPOSIT):
+        for match in pattern.finditer(text):
+            name = " ".join(match.group(1).split()).strip(" ,.;:-")
+            if not name or _EMPLOYER_JUNK.match(name):
+                continue
+            if name.casefold() in ner._NOT_A_NAME or caption.is_address(name):
+                continue
+            if any(t.strip(".,").casefold() in _ACCOUNT_WORDS for t in name.split()):
+                continue
+            found.setdefault(name.casefold(), Party(name, source, "employer"))
+    return list(found.values())
+
+
 def harvest_documents(regions: dict[str, str],
                       tables: dict[str, list] | None = None,
                       avoid: frozenset[str] = frozenset()) -> list[Party]:
@@ -173,7 +217,8 @@ def harvest_documents(regions: dict[str, str],
     merged: dict[str, Party] = {}
     for source, text in regions.items():
         for party in [*harvest(text, source),
-                      *from_tables(tables.get(source, ()), source)]:
+                      *from_tables(tables.get(source, ()), source),
+                      *employers(text, source)]:
             if party.key in avoid:
                 continue
             merged.setdefault(party.key, party)

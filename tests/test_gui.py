@@ -3,6 +3,7 @@
 These need a display. Where there is none they skip rather than fail.
 """
 
+import gc
 import time
 
 import pytest
@@ -26,6 +27,20 @@ def app():
         window.destroy()
     except tk.TclError:
         pass
+    # Drain Tk's finalizers here, on purpose, while we still control when they
+    # run. Every StringVar the window made has a __del__ that talks to the Tk
+    # interpreter, and the interpreter is now gone - so left to the garbage
+    # collector they fire at some arbitrary later moment. One of those moments
+    # was inside an `import numpy` on a background thread, which held the
+    # import lock while it blocked, and the webapp's own thread was waiting on
+    # that same lock to import pytesseract. The suite deadlocked for six and a
+    # half minutes at one percent CPU. Collecting here makes them fire now,
+    # where the error is caught and harmless.
+    for _ in range(3):
+        try:
+            gc.collect()
+        except Exception:                          # pragma: no cover - defensive
+            break
 
 
 def pump(window, seconds=1.0, until=None):

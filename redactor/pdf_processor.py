@@ -255,6 +255,13 @@ def iter_tables(path: Path):
             # row - which is what the caller treats row 0 as. A single-cell
             # line is prose and ends the run; pairing prose lines with each
             # other would invent labels that were never on the page.
+            # A single-cell line ends the run. Letting one stray line through -
+            # an address cell wraps onto its own line inside a 1099's grid, and
+            # merging across it would give that grid's account number a label -
+            # was measured and made things worse: it also merged the blocks
+            # either side of a heading on the asset schedule, so row 0 of the
+            # merged block was no longer the heading and three more account
+            # numbers shipped. One leak beats four.
             block: list[list[str]] = []
             for row in rows:
                 if len(row) >= 2:

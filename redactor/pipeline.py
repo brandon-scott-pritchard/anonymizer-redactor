@@ -220,7 +220,7 @@ def collect_suggestions(
         if path.name in texts:
             tables[path.name] = tables_in(path)
     rules_found += [
-        ner.Suggestion(party.name, "person", 1, {party.source})
+        ner.Suggestion(party.name, party.category, 1, {party.source})
         for party in transactions.harvest_documents(texts, tables, frozenset(known))
     ]
 

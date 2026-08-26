@@ -309,6 +309,55 @@ def test_an_account_or_an_institution_is_not_proposed_as_a_person(line):
     assert transactions.harvest(line) == []
 
 
+@pytest.mark.parametrize("line, expected", [
+    ("Employer: Brightwater Dental Partners", "Brightwater Dental Partners"),
+    ("Employer's name: Harrowgate Cabinet Supply", "Harrowgate Cabinet Supply"),
+    ("03/02  DIRECT DEP CASCADIA FREIGHT LOGISTICS PAYROLL  2,914.66",
+     "CASCADIA FREIGHT LOGISTICS"),
+])
+def test_the_employer_is_found_and_typed_as_an_employer(line, expected):
+    """Where the money comes from identifies the client. Where it goes does not."""
+    found = transactions.employers(line)
+    assert [(p.name, p.category) for p in found] == [(expected, "employer")]
+
+
+@pytest.mark.parametrize("line", [
+    "Employer address: 915 Cedarline Avenue, Brookhollow, UT 84092",
+    "DIRECT DEP CHECKING PAYROLL",
+    "Employer: ",
+])
+def test_an_address_or_an_account_is_not_an_employer(line):
+    assert transactions.employers(line) == []
+
+
+MERCHANT_LINES = [
+    "03/14  IRONWOOD MUNICIPAL WATER AUTOPAY        84.16",
+    "03/16  AMAZON MKTPL 4471902                    62.18",
+    "03/19  Silverline Casualty policy premium     412.55",
+    "03/21  Cascade Valley Power                   214.88",
+]
+
+
+def test_merchants_are_left_completely_alone(tmp_path):
+    """The delivered file gets read by something that looks merchants up.
+
+    A renamed merchant is worse than a blanked one: it sends the reader after
+    a business that does not exist. Nothing here proposes a merchant, so
+    nothing can accidentally tick one.
+    """
+    path = build(tmp_path, "statement.docx", MERCHANT_LINES)
+    found, _ = pipeline.collect_suggestions(
+        [path], mapping.MappingStore(), engine.Settings(use_ner=False))
+    assert [s.text for s in found] == []
+
+    text, _ = run(path, tmp_path / "out.docx")
+    for merchant in ("IRONWOOD MUNICIPAL WATER", "AMAZON", "Silverline Casualty",
+                     "Cascade Valley Power"):
+        assert merchant in text, f"{merchant} did not survive"
+    for money in ("84.16", "62.18", "412.55", "214.88"):
+        assert money in text
+
+
 def test_a_payee_column_yields_people_and_not_companies(tmp_path):
     """A cheque register puts the payee in a column, not in a descriptor."""
     register = [

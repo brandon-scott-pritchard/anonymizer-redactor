@@ -38,6 +38,12 @@ CATEGORIES: tuple[Category, ...] = (
     # a two-character cell would not.
     _c("minor_initials", "Minor child (initials)", "CHILD", "People"),
     _c("organization", "Organization / employer / school", "ORG", "People"),
+    # Kept apart from "organization" on purpose. Where the money comes from
+    # identifies the client; where it goes almost never does. A statement's
+    # merchants are meant to survive - a delivered file that will be analysed
+    # is worth nothing if the payees have been renamed - so the employer gets
+    # its own row rather than hiding among them.
+    _c("employer", "Employer / payroll source", "EMPLOYER", "People"),
     _c("location", "Location / city / facility", "LOCATION", "People"),
 
     # --------------------------------------------------------------- contact

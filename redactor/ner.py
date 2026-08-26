@@ -9,6 +9,7 @@ tool degrades to rules plus the operator's own name list and says so.
 from __future__ import annotations
 
 import re
+import threading
 from dataclasses import dataclass
 
 MODEL_NAME = "en_core_web_sm"
@@ -145,6 +146,12 @@ _NOT_A_NAME = frozenset({
 _nlp = None
 _load_error: str | None = None
 
+# Shared by every lazy heavy import in the package - see load() and
+# redactor.ocr. One lock, not one per module, because the point is that only
+# one background thread is ever inside an import of this size.
+IMPORT_LOCK = threading.RLock()
+_IMPORT_LOCK = IMPORT_LOCK
+
 
 def available() -> tuple[bool, str]:
     """(is the model usable, human-readable explanation)."""
@@ -155,10 +162,26 @@ def available() -> tuple[bool, str]:
 
 
 def load():
-    """Load the model once; remember the failure if it will not load."""
+    """Load the model once; remember the failure if it will not load.
+
+    Guarded, because this import is heavy and lazy and does not always happen
+    on the main thread. The web front end answers /state from its own thread
+    and that path imports pytesseract, while a run thread can be in here
+    importing spaCy - two background threads pulling large packages in at the
+    same time. Serialising them costs nothing after the first call and takes a
+    whole class of interleaving off the table.
+    """
     global _nlp, _load_error
     if _nlp is not None or _load_error is not None:
         return _nlp
+    with _IMPORT_LOCK:
+        if _nlp is not None or _load_error is not None:
+            return _nlp
+        return _load_locked()
+
+
+def _load_locked():
+    global _nlp, _load_error
     try:
         import spacy
     except Exception as exc:                      # pragma: no cover - env dependent

@@ -223,6 +223,15 @@ class TesseractEngine:
         self._description = ""
 
     def available(self) -> tuple[bool, str]:
+        # Same lock the model loader uses. The web front end answers /state
+        # from a request thread and lands here, while a run thread may be
+        # importing spaCy; two background threads importing packages this
+        # large at once is a shape worth not having.
+        from .ner import IMPORT_LOCK
+        with IMPORT_LOCK:
+            return self._available_locked()
+
+    def _available_locked(self) -> tuple[bool, str]:
         try:
             import pytesseract
         except Exception as exc:                    # pragma: no cover - env dependent

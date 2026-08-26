@@ -104,6 +104,11 @@ PDFs are always redacted, never anonymized. The glyphs are physically deleted
 from the content stream with PyMuPDF redaction annotations and an opaque box is
 drawn over the space. Copy, paste and text extraction find nothing.
 
+A PDF has no tables, only words with coordinates, so its columns are rebuilt
+from the gaps between those words before anything is scanned. That matters
+because bank statements arrive as PDFs and a statement is nothing but columns.
+See "Financial exhibits" below.
+
 ### 2. Names
 
 Opens pre-populated with the party names harvested from the document captions:
@@ -193,9 +198,9 @@ client before anyone opens it.
 
 ## What it looks for
 
-59 categories across eight groups:
+60 categories across eight groups:
 
-- People—person names, minor children, organizations, employers, schools, locations
+- People—person names, minor children, organizations, employers (their own category), schools, locations, counterparties in a transaction line
 - Contact—email, phone, fax, URLs, social handles, usernames, IP and MAC addresses, GPS coordinates
 - Government ID—SSN, EIN/Tax ID, driver's license, passport, USCIS A-number, military, inmate, student, voter, bar, notary, professional license, tribal enrollment
 - Health—medical record numbers, health plan/member/group numbers, ICD/CPT/DSM codes, prescription numbers
@@ -211,28 +216,53 @@ false positives out of ordinary legal prose.
 ### Financial exhibits
 
 A Financial Declaration is built out of bank statements, pay stubs, tax forms
-and account statements, and those break differently from pleadings. Against a
-generated corpus of 25 such documents the tool originally leaked **28% of the
-planted identifiers and destroyed 23 dollar figures**. Both numbers are now
-zero. Three things did most of that work.
+and account statements. Those break differently from pleadings. Against a
+generated corpus of 25 such documents the tool originally leaked 28% of the
+planted identifiers and destroyed 23 dollar figures. Both are now zero on DOCX,
+and one identifier out of 207 on PDF.
 
-**Money is never an identifier.** `V_ALNUM` allows a decimal point, so a figure
-written without a thousands separator is a perfectly valid identifier shape—and
-in a financial document the label in front of it is always a financial one.
+Here is the thing that shapes every decision below: a redacted statement
+usually gets read by something else. An LLM sorting line items into a
+declaration has to research the transactions it cannot derive from the
+statement itself. That constrains the job in a direction most redaction tools
+do not consider—OVER-REDACTING IS A FAILURE, not a safe default.
+
+So the policy is narrow on purpose:
+
+- The employer is redacted. Where the money comes from identifies the client,
+  and every pay stub, W-2 and declaration names it outright. It gets its own
+  category rather than hiding among the organizations, so you can see it on the
+  review screen and tick it without hunting.
+- Counterparty names on the payment rails are redacted: the person on the other
+  end of a Zelle, a Venmo, a PayPal, a check. That is the childcare provider,
+  the landlord, the paramour—the exact facts a declaration gets fought over.
+- Every other merchant is LEFT ALONE. A grocery store, a utility, an insurer
+  and a mortgage servicer appear on millions of statements and say nothing
+  about who this is. Renaming one is worse than blanking it, because it sends
+  the reader after a business that does not exist.
+
+Nothing proposes a merchant, so nothing can accidentally tick one. Amounts,
+dates, running balances and transaction types all survive untouched.
+
+Three things did most of the work.
+
+MONEY IS NEVER AN IDENTIFIER. `V_ALNUM` allows a decimal point, so a figure
+written without a thousands separator is a valid identifier shape. And in a
+financial document the label in front of it is always a financial one:
 `Savings account 842.16` was redacted as an account number. Worse, a registered
 value matches everywhere, so one bad registration of `412.55` from a mortgage
 statement destroyed the pay stub's federal withholding and three insurance rows
-in a P&L, in documents where no detector fired at all. A currency shape is now
+in a P&L—documents where no detector fired at all. A currency shape is now
 refused for every category except the two where decimals are the native
-notation (ICD-9 codes and GPS). This is the one place the tool refuses a match
-on the shape of the value alone, and the reason is simple: **a declaration with
-altered figures is not a redacted document, it is a false statement filed under
-penalty.**
+notation (ICD-9 codes and GPS). Stating it as an exception list is deliberate.
+Guessing which labels sit next to money is a game that keeps being lost:
+`Summit Ridge Visa   8,412.19   212.00` matched the alien-number detector,
+whose vocabulary carries "visa" for the immigration document.
 
-**A table cell is its own paragraph.** Word puts every cell in its own `w:p`, so
-the scanner was handed `Savings account` and `000488227145` as two separate
-strings, and every labelled detector needs them in one. On the declaration's own
-asset schedule this produced the exact inversion you would least want:
+A TABLE CELL IS ITS OWN PARAGRAPH. Word puts every cell in its own `w:p`,
+so the scanner was handed `Savings account` and `000488227145` as two separate
+strings. On the declaration's own asset schedule that produced the exact
+inversion you would least want:
 
 ```
 ['Certificate of deposit', '44-8821-0033', '[ACCOUNT-8]', 'Joint']
@@ -240,32 +270,42 @@ asset schedule this produced the exact inversion you would least want:
 
 The account number shipped and the dollar value was redacted. Tables are now
 read for their label/value pairs four ways—the column heading, the cell above,
-the cell to the left, and the first cell of the row—because a statement, a
-cheque register and an IRS form each put the label somewhere different. A 1099
+the cell to the left, and the first cell of the row. A statement, a check
+register and an IRS form each put the label somewhere different. A 1099
 alternates label rows and value rows, so the heading for its account number is
-not in row 0 at all. Those readings **register only**; the strings are
-reconstructions and exist nowhere on the page, so nothing is ever applied to
-them. The bare number sitting alone in its own cell is then caught as a known
-value, where it really is.
+not in row 0 at all. Those four readings REGISTER ONLY; the strings are
+reconstructions that exist nowhere on the page, so nothing is applied to them.
 
-**A statement names people no pleading mentions.** The other end of a Zelle
-transfer, the payee in a cheque register: a childcare provider, a landlord, the
-exact facts a declaration gets fought over. Those are proposed as **people**, so
-a ticked one gets an invented name—`ZELLE TO CARMEN LATTIMORE` still reads as a
-bank statement, where `ZELLE TO [NAME-4]` reads as a redaction. The guards
-matter more than the patterns: without them the same rules propose
-`TRANSFER TO SAVINGS`, `WIRE TO BANK OF THE WEST` and `PAYMENT TO CREDIT UNION`
-as human beings.
+STATEMENTS ARE PDFS, SO PDFS GET THE SAME TREATMENT. A PDF has no table
+elements at all. It has words with coordinates. But a statement, a pay stub and
+a tax form are all columns, and the column a value sits under is its label just
+as surely as a `<w:tc>` header would be. Columns are reconstructed from the
+gaps between words and handed to the same code that reads a DOCX table. That
+took the PDF path from 16 leaks and 7 destroyed figures down to 1 and 0.
+
+Two PDF-specific bugs came out of that work. Page text was built by joining
+every word on a line with one space, which destroys the column structure of a
+document that is nothing but columns; it put an account number one space from
+the money beside it, and the bare-digits card detector ran from one into the
+other. And `street_address` matched across a line break, so the box drawn over
+it physically deleted a dollar figure from the row above. Nothing in the report
+would have mentioned it, because no detector ever matched it.
 
 Also fixed along the way: space-grouped account numbers (`8102 4477 9301`) had
-only their first group taken, which ships two thirds of the number while reading
-as redacted; the bare `457` and `529` plan labels carried no word boundary and
-sliced digits out of the middle of amounts (`4,571.30` → `457[INVACCOUNT-1]`);
+only their first group taken, which ships two thirds of the number while
+reading as redacted; the bare `457` and `529` plan labels carried no word
+boundary and sliced digits out of amounts (`4,571.30` → `457[INVACCOUNT-1]`);
 masked tails (`****3907`, `...6613`, `XXXX-XXXX-XXXX-4417`) had no detector at
 all; the ABA checksum function had been written and never referenced, so bare
-routing numbers and cheque MICR lines shipped; and `Bend`, `Row` and `Crossing`
+routing numbers and check MICR lines shipped; and `Bend`, `Row` and `Crossing`
 were missing from the street-suffix list, so a home address on any of them
 survived.
+
+One limit, stated plainly: PDFs are REDACTED, NEVER ANONYMIZED, so every hit
+becomes the same black bar. You keep the line items and the numbers, but within
+a statement you cannot tell one redacted payee from another. For sorting
+transactions that is usually fine. For tracking a recurring payment to one
+person across six months, it is not.
 
 ### Town and city names
 
@@ -443,14 +483,14 @@ in review has a regression test that encodes the exact failing input.
 
 ```
 redactor/
-  categories.py       the 59 categories and how each is replaced
+  categories.py       the 60 categories and how each is replaced
   patterns.py         regex detectors, validators, and the allowlist
   names.py            full name -> every written form, and back again
   caption.py          party names harvested from legal captions and headers
   officials.py        the bench, and the do-not-change list built from it
   children.py         child rosters, cue lines and bare custody clauses
   places.py           town and city names: context proposes, gazetteer confirms
-  transactions.py     counterparties named in transaction and payee lines
+  transactions.py     counterparties and employers named in financial documents
   data/               the 101,160-name US place list (Census + USGS, 399 KB)
   surrogates.py       deterministic fake names (HMAC, fixed salt)
   mapping.py          entity registry and the encrypted mapping key
