@@ -40,6 +40,12 @@ _ORG_MARKERS = frozenset({
     "orthodontia", "medical", "medicine", "health", "healthcare", "therapy",
     "counseling", "psychiatry", "psychology", "surgery", "care", "center",
     "centre", "institute", "academy", "credit union",
+    # insurers, which a statement and a declaration are both full of.
+    # "Silverline Casualty" was proposed as a PERSON and would have been given
+    # an invented human name in the middle of a policy line.
+    "casualty", "mutual", "assurance", "indemnity", "underwriters", "surety",
+    "reinsurance", "annuity", "fidelity", "utilities", "utility", "energy",
+    "logistics", "freight", "servicing",
 })
 
 # Ordinary words the model keeps offering as people and organizations. One real
@@ -77,6 +83,38 @@ _NEVER_IN_A_NAME = frozenset({
     # the same thing on an explanation of benefits
     "patient", "dob", "insured", "guarantor", "provider", "claimant",
 })
+
+# Transaction-type abbreviations, rejected for *every* category rather than
+# only for people. A statement's description column is mostly these, and the
+# model reads them both ways: "DIRECT DEP CASCADIA FREIGHT PAYROLL" came back
+# as a PERSON, and accepting it renamed the deposit type to an invented human
+# being, so the line read as though somebody called Giselle Eastcott had paid
+# the wages. "SVC CHG - OVERDRAFT" came back as an ORG and became "[ORG-1]",
+# which deletes the reason for the fee.
+#
+# The point of redacting a statement is that it can still be analysed
+# afterwards. A description column that has been renamed or blanked out fails
+# at the only thing the exhibit is for.
+_TRANSACTION_WORDS = frozenset({
+    "dep", "chg", "svc", "trn", "trns", "xfer", "pos", "atm", "ach", "eft",
+    "nsf", "overdraft", "payroll", "autopay", "recur", "recurring", "memo",
+    "adj", "adjustment", "reversal", "direct", "pending", "misc", "debit",
+    "credit", "withdrawal", "deposit", "purchase", "refund", "fee", "charge",
+    "debits", "credits", "withdrawals", "deposits", "purchases", "refunds",
+    "fees", "charges", "payments", "transfers",
+})
+
+# The last word of a street. A candidate ending in one is a street, whatever
+# the model labelled it - "Cedarline Avenue" and "Foundry Row" both arrived as
+# people, and ticking one would have given a road an invented human name while
+# the real address shipped.
+_STREET_SUFFIX = frozenset("""
+    street st avenue ave road rd boulevard blvd lane ln drive dr court ct
+    circle cir way wy place pl terrace ter parkway pkwy highway hwy trail trl
+    loop square sq plaza alley route rte bend row run crossing xing landing
+    commons cove creek ridge hollow meadow meadows glen grove knoll bluff
+    trace path walk point pass bay hill hills vista mews canyon valley summit
+""".split())
 
 # "XXXX" is a masked card number and "****" is a redaction bar; the model
 # offered both as organizations. "EMP-044821" and "XXX-XX-1147" are identifiers
@@ -303,10 +341,27 @@ def _plausible(value: str, category: str) -> bool:
         return False
     if _ALL_MASK.match(value) or _ID_FRAGMENT.search(value):
         return False
+    # A spaced dash is a memo separator, never part of a name: a cheque
+    # register writes "Shawna Kirkendall - childcare", and the model offered
+    # the whole cell as a person. Accepted alongside the real name it made two
+    # overlapping entities, and the line came out as
+    # "Ansel Evander Saltonstall Saltonstall". A hyphenated surname carries no
+    # spaces, so nothing real is lost here.
+    if " - " in value or " – " in value or " — " in value:
+        return False
     # "Mother's Day" must reduce to {mother, day}: a possessive inside the
     # candidate hid the junk word behind it
-    bare = [re.sub(r"['’]s$", "", tok.strip(".,'’").casefold())
+    bare = [re.sub(r"['’]s$", "", tok.strip(".,'’-").casefold())
             for tok in tokens]
+    if any(tok in _TRANSACTION_WORDS for tok in bare):
+        return False
+    # a lone word that is only an organization marker is a fragment of a name,
+    # not a name: "Bank", "Credit", "Services"
+    if len(tokens) == 1 and bare[0] in _ORG_MARKERS:
+        return False
+    # a candidate that ends in a street suffix is a street
+    if category == "person" and len(bare) > 1 and bare[-1] in _STREET_SUFFIX:
+        return False
     # a single ordinary word is not a name, whatever the model labelled it
     if len(tokens) == 1 and bare[0] in _NOT_A_NAME:
         return False

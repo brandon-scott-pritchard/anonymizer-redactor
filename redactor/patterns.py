@@ -93,7 +93,10 @@ _SEP = (
     # A transaction line puts a verb between the rail and the reference:
     # "VENMO PAYMENT 3948217364" shipped its transaction id because nothing
     # could step over the word PAYMENT.
-    r"payment|pmt|transfer|transaction|ref|reference|posted|to|from|"
+    # Deliberately NOT "to" or "from". With those here, payment_handle read
+    # "ZELLE TO SHAWNA KIRKENDALL" as the handle "SHAWNA" - which redacted the
+    # first name, shipped the surname, and left a line no one could read.
+    r"payment|pmt|transfer|transaction|ref|reference|posted|"
     # a label qualifies itself before it gets to the value: "Student ID at
     # school of record:", "Loan number of record:"
     r"school|record|primary|current|assigned)"
