@@ -99,6 +99,11 @@ class Hit:
 # "224900871" three paragraphs later is not, and ships unredacted.
 VALUE_LITERAL_PRIORITY = 86
 MIN_LITERAL_LENGTH = 4
+# Categories whose whole point is a short string. A children roster names them
+# "JQA", "C.E.F." - three characters is the form the rules ask for, and the
+# general floor silently dropped every one of them from the scan.
+SHORT_VALUE_CATEGORIES = {"minor_initials"}
+MIN_SHORT_LITERAL_LENGTH = 2
 
 
 class EntityMatcher:
@@ -187,7 +192,10 @@ class EntityMatcher:
             if not self.settings.category_enabled(entity.category):
                 continue
             text = entity.canonical.strip()
-            if len(text) < MIN_LITERAL_LENGTH:
+            floor = (MIN_SHORT_LITERAL_LENGTH
+                     if entity.category in SHORT_VALUE_CATEGORIES
+                     else MIN_LITERAL_LENGTH)
+            if len(text) < floor:
                 continue
             body = r"\s+".join(_names.escape_token(tok) for tok in text.split())
             # same underscore reasoning as the person boundary, plus the

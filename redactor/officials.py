@@ -71,7 +71,7 @@ TITLE_THEN_NAME = re.compile(
     rf"(?:[^\S\n]*[:,][^\S\n]*|[^\S\n]+)(?:{_HON}[^\S\n]+)?{_NAME}"
 )
 
-# The bench written as a bare surname: "Judge: Kelly", "Commissioner Blomquist".
+# The bench written as a bare surname: "Judge: Thorne", "Commissioner Ashgrove".
 # Utah captions print it this way almost every time. Only ever consulted where
 # the full-name pattern found nothing at the same position, or it would reduce
 # "Judge Amber M. Cordova" to "Amber".
@@ -184,7 +184,7 @@ def _acceptable(raw: str, solo: bool = False) -> str | None:
     """A cleaned name, or None when the match swept up caption furniture.
 
     ``solo`` admits a one-word surname. Utah captions print the bench that way
-    almost universally - "Commissioner: Blomquist", "Judge: Kelly" - and
+    almost universally - "Commissioner: Ashgrove", "Judge: Thorne" - and
     demanding two tokens left eight of eleven real pleadings with no judicial
     protection at all. It is only ever set where an explicit title sits directly
     beside the name; the proximity rule under a signing heading still requires a
@@ -355,7 +355,7 @@ def protected_terms(officials: list[Official], avoid: list[str] | None = None) -
 
         # An officer known only by surname IS the bare surname, so it has to
         # clear the same party check the derived surname does below. Without
-        # this, a judge called Kelly shielded a party's child called Kelly.
+        # this, a judge called Thorne shielded a party's child called Thorne.
         if len(canonical.split()) == 1:
             solo = canonical.strip(".")
             if solo.casefold() in party_words or len(solo) < MIN_SURNAME_LENGTH:

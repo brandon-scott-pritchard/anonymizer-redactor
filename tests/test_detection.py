@@ -378,3 +378,88 @@ def test_short_words_are_not_typo_matched():
     store.add_person("Al Ray")        # both under the fuzzy length floor
     out, _ = _engine.scan_and_apply("All of the era.", store, _Settings(), "doc")
     assert "All" in out and "era" in out
+
+
+# ------------------------- proposal quality, from a real fifty-row list --
+
+def test_a_place_is_never_promoted_to_a_person():
+    """The reverse leak: labelled PERSON, "Pleasant Grove" would have been
+    given an invented human name while the real city shipped. Two capitalised
+    words with no digits and no company marker passes every person test."""
+    from redactor import ner
+    assert ner.refine_category("Pleasant Grove", "person") == "location"
+    assert ner.refine_category("Pleasant Grove", "location") == "location"
+
+
+def test_an_explicit_marker_still_wins_over_the_place_check():
+    from redactor import ner
+    assert ner.refine_category("Salt Lake County", "organization") == "organization"
+
+
+@pytest.mark.parametrize("value", [
+    "Cascade Pediatric Dentistry", "Wasatch Valley Pediatrics", "Cascade Orthodontics",
+])
+def test_a_medical_practice_is_an_organization_not_a_person(value):
+    """These came back as people, so each would have been given a human name."""
+    from redactor import ner
+    assert ner.refine_category(value, "person") == "organization"
+
+
+@pytest.mark.parametrize("junk", [
+    "Order", "Debts", "Titles", "Time", "Vaccines", "Childcare", "Spring",
+])
+def test_an_ordinary_word_is_not_a_person(junk):
+    """One real decree offered "Order" eight times, as a PERSON. Fifty rows of
+    this is an unreviewable list, and an unreviewable list gets skipped."""
+    from redactor import ner
+    assert not ner._plausible(junk, "person")
+
+
+@pytest.mark.parametrize("junk", [
+    "Venmo Account", "PayPal Account Mother", "Marcus Vaughn Address",
+    "Print Name", "Mother's Day",
+])
+def test_a_label_run_together_with_something_else_is_not_a_person(junk):
+    from redactor import ner
+    assert not ner._plausible(junk, "person")
+
+
+def test_a_run_of_names_on_separate_lines_is_not_one_person():
+    """A supervised-contact list arrived as a single candidate; ticking it
+    registered a three-person entity that matched none of them."""
+    from redactor import ner
+    assert not ner._plausible("Petra Vandermeer Rachel Bly Steven Cole", "person")
+
+
+@pytest.mark.parametrize("real", [
+    "Marlow Cole", "Paul Bly", "Marisol Quenby Ashdown", "Marcuse Vaughn",
+])
+def test_the_noise_filters_do_not_eat_real_names(real):
+    from redactor import ner
+    assert ner._plausible(real, "person")
+
+
+def test_a_nickname_is_linked_to_the_party_it_belongs_to():
+    """"Chrissy" was offered as an ORGANIZATION while Christine sat on the name
+    list, and the nickname shipped in both files."""
+    from redactor import names as _names
+    assert _names.nickname_for("Chrissy", ["Christine Annell Vaughn"]) == "Christine Annell Vaughn"
+    assert _names.nickname_for("Jake", ["Jacob Duane Vaughn"]) == "Jacob Duane Vaughn"
+
+
+def test_a_nickname_two_parties_could_claim_is_left_alone():
+    from redactor import names as _names
+    assert _names.nickname_for("Chrissy", ["Christine Vaughn", "Christine Adams"]) is None
+
+
+def test_the_same_party_reaching_the_check_twice_is_not_an_ambiguity():
+    """The store and the caption list both offer her, and counting them twice
+    read as two Christines."""
+    from redactor import names as _names
+    twice = ["Christine Annell Vaughn", "Christine Annell Vaughn"]
+    assert _names.nickname_for("Chrissy", twice) == "Christine Annell Vaughn"
+
+
+def test_an_ordinary_word_is_not_a_nickname():
+    from redactor import names as _names
+    assert _names.nickname_for("Marisol", ["Christine Vaughn"]) is None

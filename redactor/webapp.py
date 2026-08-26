@@ -314,7 +314,8 @@ async def suggestions(request: Request):
         SESSION.suggestions = found
         return {"suggestions": [
             {"text": s.text, "category": s.category, "count": s.count,
-             "documents": sorted(s.documents)} for s in found],
+             "documents": sorted(s.documents), "nickname_for": s.nickname_for}
+            for s in found],
             "notes": notes, **_guard_payload()}
 
     return {"job": _start_job(work)}

@@ -204,7 +204,9 @@ function NamesStep({ state, set, actions, meta }) {
     })),
     ...state.suggestions.map((s, i) => ({
       id: `ner-${i}`, name: s.text, category: state.suggCats[`ner-${i}`] || s.category,
-      role: "", extra: `x${s.count}`, where: (s.documents || []).join("; "),
+      // a diminutive of a party already on the list belongs to that party
+      role: s.nickname_for ? `Short for ${s.nickname_for}` : "",
+      extra: `x${s.count}`, where: (s.documents || []).join("; "),
     })),
   ], [state.captions, state.suggestions, state.suggCats]);
 

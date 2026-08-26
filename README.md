@@ -143,6 +143,26 @@ Two things happen behind the scenes that matter:
   the short form is genuinely ambiguous (`Smith` with two Smiths on the list)
   nothing is guessed: both stay, and the Names screen says why.
 
+**Children are proposed too**, and they are never in the caption. The screen
+reads three layouts: a roster table (`Name | Month & Year of Birth`), a cue
+line followed by `Name Born: date`, and a bare custody or tax clause—"primary
+custodial parent of Theo and Rory Ashdown", "Petitioner shall claim Rory"—which
+is how a decree can name every child and never print a single date of birth.
+Whatever it finds is typed **minor** automatically, and where the document says
+a child has aged out ("legally emancipated … when she turned 18") it says so
+rather than filing them as a minor anyway.
+
+Auto-typing them as minors is also what keeps a son from being folded into the
+father he is named after. `Marcus Ashdown` and `Marcus Shai Ashdown` look
+exactly like one person written two ways, and nothing in the strings can tell
+you otherwise—only the roster can.
+
+Two other things get proposed that a caption never mentions: a **former or
+maiden name** being restored ("shall return to her former name of Rowena
+Radcliffe"), and a **nickname** of somebody already on the list. `Chrissy` is
+pre-ticked and labelled *Short for Christine Annell Vaughn* rather than left
+for you to notice.
+
 Press Scan documents for more names and the offline spaCy model proposes
 people, organizations and places the rules cannot see. It only ever proposes;
 nothing is applied without a tick.
@@ -320,11 +340,12 @@ the language model, and copy the result back into `dist/`.
 ~/.venvs/anonymizer-redactor/bin/python -m pytest tests/ -q
 ```
 
-222 tests covering detector accuracy, allowlist protection, judicial-officer
-harvesting in every layout a court prints, name-variant expansion and merging,
-overlapping-name folding, typo matching, surrogate determinism, image
-redaction, mapping-key encryption, the web API, and end-to-end leak checks that
-assert no original value survives in the delivered DOCX XML or PDF text. Every leak found
+306 tests covering detector accuracy, allowlist protection, judicial-officer
+harvesting in every layout a court prints, child rosters and custody clauses,
+name-variant expansion and merging, overlapping-name folding, typo matching,
+Word's own run and tab structure, surrogate determinism, image redaction,
+mapping-key encryption, the web API, and end-to-end leak checks that assert no
+original value survives in the delivered DOCX XML or PDF text. Every leak found
 in review has a regression test that encodes the exact failing input.
 
 ---
@@ -338,6 +359,7 @@ redactor/
   names.py            full name -> every written form, and back again
   caption.py          party names harvested from legal captions and headers
   officials.py        the bench, and the do-not-change list built from it
+  children.py         child rosters, cue lines and bare custody clauses
   surrogates.py       deterministic fake names (HMAC, fixed salt)
   mapping.py          entity registry and the encrypted mapping key
   ner.py              optional spaCy suggestions (proposals only)

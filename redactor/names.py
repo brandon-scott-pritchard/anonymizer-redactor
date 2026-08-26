@@ -346,6 +346,84 @@ def overlapping_names(entries: Sequence[str]) -> list[Overlap]:
     return out
 
 
+# Diminutives that appear in pleadings alongside the formal name. A decree
+# calling the petitioner "Chrissy" twice shipped that name intact: the model
+# offered it, but as an ORGANIZATION, and nothing connected it to Christine.
+# A plain table, no model involved - it only ever pre-fills a proposal the
+# operator still has to tick.
+NICKNAMES: dict[str, tuple[str, ...]] = {
+    "christine": ("chris", "chrissy", "chrissie", "christy", "tina"),
+    "christopher": ("chris", "topher"),
+    "jacob": ("jake", "jakey"),
+    "james": ("jim", "jimmy", "jamie"),
+    "robert": ("rob", "bob", "bobby", "robbie"),
+    "william": ("will", "bill", "billy", "willie"),
+    "richard": ("rick", "dick", "richie", "ricky"),
+    "michael": ("mike", "mickey", "mick"),
+    "matthew": ("matt", "matty"),
+    "joseph": ("joe", "joey"),
+    "daniel": ("dan", "danny"),
+    "thomas": ("tom", "tommy"),
+    "charles": ("charlie", "chuck", "chas"),
+    "elizabeth": ("liz", "beth", "betsy", "eliza", "lizzie", "betty"),
+    "katherine": ("kate", "katie", "kathy", "kat"),
+    "catherine": ("cate", "cathy", "katie", "kate"),
+    "margaret": ("maggie", "meg", "peggy", "marge"),
+    "jennifer": ("jen", "jenny"),
+    "jessica": ("jess", "jessie"),
+    "rebecca": ("becca", "becky"),
+    "patricia": ("pat", "patty", "trish"),
+    "deborah": ("deb", "debbie"),
+    "barbara": ("barb", "babs"),
+    "susan": ("sue", "susie"),
+    "stephanie": ("steph", "stephy"),
+    "alexander": ("alex", "xander", "sasha"),
+    "alexandra": ("alex", "lexi", "sasha"),
+    "nicholas": ("nick", "nicky"),
+    "anthony": ("tony"),
+    "benjamin": ("ben", "benny"),
+    "samuel": ("sam", "sammy"),
+    "andrew": ("andy", "drew"),
+    "edward": ("ed", "eddie", "ted", "teddy"),
+    "theodore": ("ted", "teddy", "theo"),
+    "gregory": ("greg",),
+    "timothy": ("tim", "timmy"),
+    "kimberly": ("kim", "kimmy"),
+    "cynthia": ("cindy",),
+    "victoria": ("vicky", "tori"),
+    "veronica": ("ronnie", "vero"),
+    "cody": ("code",),
+}
+
+_BY_NICKNAME: dict[str, set[str]] = {}
+for _formal, _short in NICKNAMES.items():
+    for _nick in ((_short,) if isinstance(_short, str) else _short):
+        _BY_NICKNAME.setdefault(_nick, set()).add(_formal)
+
+
+def nickname_for(candidate: str, known: Sequence[str]) -> str | None:
+    """The full name on ``known`` that ``candidate`` is a diminutive of.
+
+    Returns None when the candidate is not a nickname, or when more than one
+    party could claim it - two Christines on a matter is not something to guess
+    about.
+    """
+    token = " ".join(str(candidate).split()).strip(".,'’").casefold()
+    formals = _BY_NICKNAME.get(token)
+    if not formals:
+        return None
+    # deduplicate first: the same party reaches this from the store and from
+    # the caption list, and counting them twice reads as an ambiguity
+    matches: dict[str, str] = {}
+    for name in known:
+        parsed = parse(name)
+        if parsed.first.strip(".").casefold() in formals:
+            matches.setdefault(parsed.canonical.casefold(), name)
+    if len(matches) != 1:
+        return None
+    return next(iter(matches.values()))
+
+
 def escape_token(token: str) -> str:
     """``re.escape`` that also accepts the typographic apostrophe.
 

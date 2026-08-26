@@ -31,12 +31,26 @@ MINOR_ROLES = {"minor child", "minor children", "subject minor", "ward"}
 # A personal name: 2-5 capitalised tokens, tolerating middle initials, particles
 # and generational suffixes.  Works for Title Case and ALL CAPS captions alike.
 _TOKEN = r"(?:[A-Z][A-Za-z'’\-]{1,20}|[A-Z]{2,20}|[A-Z]\.)"
+# Real captions are typed by hand and often not capitalised at all - a live
+# divorce petition names its respondent "marcus duane vaughn," and a parentage
+# petition its petitioner "Rylan MacLeod dalton,". Requiring an initial capital
+# meant neither was ever proposed. The lenient token is only ever used where a
+# role word or a "v." line already says the text is a party.
+_TOKEN_ANY = r"(?:[A-Za-z][A-Za-z'’\-]{1,20}|[A-Z]\.)"
 _PARTICLE = r"(?:van|von|de|del|della|di|da|du|la|le|el|bin|ibn|al|st\.?|mc|mac|o')"
 _SUFFIX = r"(?:Jr\.?|Sr\.?|II|III|IV|V|Esq\.?)"
 _WS = r"[^\S\n]+"   # whitespace that is not a line break - names never wrap
-NAME_RE = re.compile(
-    rf"(?<![\w'’])({_TOKEN}(?:{_WS}(?:{_PARTICLE}{_WS})?{_TOKEN}){{1,4}}(?:,?{_WS}{_SUFFIX})?)(?![\w'’])"
-)
+
+
+def _name_pattern(token: str) -> re.Pattern:
+    return re.compile(
+        rf"(?<![\w'’])({token}(?:{_WS}(?:{_PARTICLE}{_WS})?{token}){{1,4}}"
+        rf"(?:,?{_WS}{_SUFFIX})?)(?![\w'’])"
+    )
+
+
+NAME_RE = _name_pattern(_TOKEN)
+NAME_RE_ANY_CASE = _name_pattern(_TOKEN_ANY)
 
 # Words that mean "this line is caption furniture, not a person".
 BOILERPLATE = {
@@ -130,6 +144,29 @@ def caption_region(text: str, max_lines: int = 70) -> str:
 # --------------------------------------------------------------------------
 
 
+def _titlecase(name: str) -> str:
+    """Capitalise a hand-typed caption without disturbing anything else.
+
+    "marcus duane vaughn" is the same person as Marcus Duane Vaughn and belongs on
+    the name list looking like it. ALL CAPS captions and internal capitals are
+    left alone - MacLeod must not become Macleod - and so are surname particles.
+    """
+    out: list[str] = []
+    for token in name.split():
+        # only the leading letter, so "macLeod" becomes "MacLeod" rather than
+        # "Macleod" and an internal capital is never flattened
+        if token[:1].islower() and token.strip(".").casefold() not in _PARTICLE_WORDS:
+            token = token[:1].upper() + token[1:]
+        out.append(token)
+    return " ".join(out)
+
+
+_PARTICLE_WORDS = {"van", "von", "de", "del", "della", "di", "da", "du", "la",
+                   "le", "el", "bin", "ibn", "al", "st", "mc", "mac",
+                   # the second half of a compound particle: "van der Berg"
+                   "der", "den", "ter", "ten", "dos", "das", "do", "y"}
+
+
 def _clean(raw: str) -> str:
     name = " ".join(raw.replace("’", "'").split())
     name = name.strip(" ,.;:-")
@@ -145,7 +182,7 @@ def _clean(raw: str) -> str:
                           flags=re.IGNORECASE).strip(" ,.;:-")
         if len(stripped.split()) >= 2:
             name = stripped
-    return " ".join(name.strip(" ,.;:-").split())
+    return _titlecase(" ".join(name.strip(" ,.;:-").split()))
 
 
 def plausible_name(raw: str) -> bool:
@@ -212,10 +249,16 @@ def _first_surname_in(text: str) -> str | None:
     return None
 
 
-def _first_name_in(text: str) -> str | None:
+def _first_name_in(text: str, lenient: bool = False) -> str | None:
+    """The first plausible name in ``text``.
+
+    ``lenient`` admits an uncapitalised caption party, and is set only by the
+    harvesters that already know the line is one - a bare role word beneath it,
+    or a "v." line beside it. Left on everywhere it would sweep up prose.
+    """
     if is_address(text):
         return None
-    for m in NAME_RE.finditer(text):
+    for m in (NAME_RE_ANY_CASE if lenient else NAME_RE).finditer(text):
         if plausible_name(m.group(1)):
             return _clean(m.group(1))
     return None
@@ -280,7 +323,8 @@ def harvest(text: str, source: str = "") -> list[CaptionName]:
                 continue
             # caption columns: the party sits left of the document title
             left = _left_column(candidate)
-            name = _first_name_in(left) or _first_name_in(candidate)
+            name = (_first_name_in(left, lenient=True)
+                    or _first_name_in(candidate, lenient=True))
             if name:
                 add(name, role, "high")
                 break
@@ -299,12 +343,12 @@ def harvest(text: str, source: str = "") -> list[CaptionName]:
         if not _V_LINE.match(line):
             continue
         for j in range(max(0, i - 4), i):
-            name = _first_name_in(_left_column(lines[j]))
+            name = _first_name_in(_left_column(lines[j]), lenient=True)
             if name:
                 add(name, "Caption party", "high")
                 break
         for j in range(i + 1, min(len(lines), i + 5)):
-            name = _first_name_in(_left_column(lines[j]))
+            name = _first_name_in(_left_column(lines[j]), lenient=True)
             if name:
                 add(name, "Caption party", "high")
                 break
@@ -332,6 +376,45 @@ def harvest(text: str, source: str = "") -> list[CaptionName]:
             add(names[-1], f"Attorney for {m.group(1).title()}", "medium")
 
     return found
+
+
+# A decree that restores a maiden name prints both names, and they are one
+# person: "Rowena Ashdown shall return to her former name of Rowena Radcliffe."
+# Registered separately, she gets two pseudonyms and the old surname ships.
+# The connectors are case-insensitive; the NAME groups deliberately are not.
+# A blanket re.IGNORECASE makes the capitalised-token requirement meaningless
+# and the name group swallows the verb after it - "Rowena Ashdown Shall".
+FORMER_NAME = re.compile(
+    rf"{NAME_RE.pattern}"
+    r"(?i:\s+(?:shall\s+|will\s+|may\s+)?(?:be\s+)?"
+    r"(?:return(?:ed|s)?\s+to|restored?\s+to|resumes?|change[ds]?\s+to|"
+    r"revert(?:s|ed)?\s+to)\s+"
+    r"(?:her|his|their)?\s*(?:former|maiden|prior|previous|birth)?\s*"
+    r"(?:name\s+of\s+)?)"
+    rf"{NAME_RE.pattern}"
+)
+# "also known as", "formerly known as", "n/k/a", "f/k/a"
+ALSO_KNOWN_AS = re.compile(
+    rf"{NAME_RE.pattern}"
+    r"(?i:\s*,?\s*(?:also\s+known\s+as|formerly\s+known\s+as|"
+    r"a\.?k\.?a\.?|n/k/a|f/k/a|née|nee)\s*,?\s*)"
+    rf"{NAME_RE.pattern}"
+)
+
+
+def former_names(text: str) -> list[tuple[str, str]]:
+    """(current name, other name) pairs that are the same person."""
+    pairs: list[tuple[str, str]] = []
+    for pattern in (FORMER_NAME, ALSO_KNOWN_AS):
+        for match in pattern.finditer(text):
+            groups = [g for g in match.groups() if g and g.strip()]
+            if len(groups) < 2:
+                continue
+            first, second = _clean(groups[0]), _clean(groups[-1])
+            if (first and second and first.casefold() != second.casefold()
+                    and plausible_name(first) and plausible_name(second)):
+                pairs.append((first, second))
+    return pairs
 
 
 def harvest_documents(regions: dict[str, str]) -> list[CaptionName]:

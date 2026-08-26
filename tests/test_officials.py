@@ -315,11 +315,11 @@ def test_the_report_names_what_it_shielded(tmp_path):
 # Every caption in the sample set prints the bench as a bare surname. Demanding
 # two tokens left eight of eleven documents with no judicial protection at all.
 SOLO_LAYOUTS = {
-    "commissioner, colon": ("Commissioner: Blomquist", "Blomquist", "Commissioner"),
-    "judge, colon": ("Judge: Kelly", "Kelly", "Judge"),
-    "judge, space": ("Judge Brady", "Brady", "Judge"),
-    "commissioner, space": ("Commissioner Ito", "Ito", "Commissioner"),
-    "honorable": ("Hon. Blomquist", "Blomquist", "Judge"),
+    "commissioner, colon": ("Commissioner: Ashgrove", "Ashgrove", "Commissioner"),
+    "judge, colon": ("Judge: Thorne", "Thorne", "Judge"),
+    "judge, space": ("Judge Vance", "Vance", "Judge"),
+    "commissioner, space": ("Commissioner Poe", "Poe", "Commissioner"),
+    "honorable": ("Hon. Ashgrove", "Ashgrove", "Judge"),
 }
 
 
@@ -338,14 +338,14 @@ def test_a_full_name_is_never_cut_back_to_its_first_word():
 
 def test_an_empty_title_line_harvests_nothing():
     """A real parentage decree carries "Commissioner: " with nothing after it."""
-    assert officials.harvest("Commissioner: \nJudge: Samuel Chiara") == [
-        officials.Official("Samuel Chiara", "Judge", "", "high")]
+    assert officials.harvest("Commissioner: \nJudge: Verity Ashgrove") == [
+        officials.Official("Verity Ashgrove", "Judge", "", "high")]
 
 
 def test_a_solo_surname_still_answers_to_the_party_guard():
-    """A judge called Kelly must not shield a child called Kelly."""
-    bench = officials.harvest("Judge: Kelly")
-    protection = officials.protected_terms(bench, avoid=["Kelly Anne Marchetti"])
+    """A judge called Thorne must not shield a child called Thorne."""
+    bench = officials.harvest("Judge: Thorne")
+    protection = officials.protected_terms(bench, avoid=["Thorne Anne Marchetti"])
     assert "Kelly" not in protection.terms
 
 
@@ -367,7 +367,7 @@ def test_a_real_signing_heading_still_reads_as_one():
 
 
 def test_a_party_signature_block_is_not_a_judicial_officer():
-    """A notary block sits under prose mentioning the court; both Hull parties
+    """A notary block sits under prose mentioning the court; both Ashdown parties
     were harvested onto the bench because of it."""
     text = ("That the parties are hereby awarded a Divorce Decree, said Decree "
             "to be signed by the court.\n"

@@ -79,8 +79,8 @@ class DocxResult:
 
 # Word stores a tab stop and a line break as elements of their own rather than
 # as characters inside a run. Ignoring them glued the runs on either side
-# together - a real decree yields "Zepeda", <w:tab/>, <w:tab/>, "Born: ", which
-# read as "ZepedaBorn" - and the name boundary then refused to match the
+# together - a real decree yields "Ashdown", <w:tab/>, <w:tab/>, "Born: ", which
+# read as "AshdownBorn" - and the name boundary then refused to match the
 # surname, so it shipped intact. They are carried as one character each, which
 # also keeps every offset in _set_group_text aligned.
 _SEPARATORS = {"tab": " ", "br": "\n"}
@@ -153,6 +153,34 @@ def iter_text_units(path: Path):
                 text = _group_text(group)
                 if text.strip():
                     yield text
+
+
+def iter_tables(path: Path):
+    """Every table in the document, as lists of rows of cell text.
+
+    Used to find a children roster, which a pleading almost always lays out as
+    a two-column table rather than as prose.
+    """
+    with zipfile.ZipFile(path) as zf:
+        for name in sorted(zf.namelist()):
+            if not TEXT_PART_RE.match(name):
+                continue
+            try:
+                root = etree.fromstring(zf.read(name))
+            except etree.XMLSyntaxError:
+                continue
+            for table in root.iter(w("tbl")):
+                rows: list[list[str]] = []
+                for row in table.iter(w("tr")):
+                    cells = [
+                        " ".join("".join(_node_text(node) for node in cell.iter(
+                            w("t"), w("tab"), w("br"))).split())
+                        for cell in row.iter(w("tc"))
+                    ]
+                    if any(cells):
+                        rows.append(cells)
+                if rows:
+                    yield rows
 
 
 def caption_sources(path: Path) -> dict[str, str]:

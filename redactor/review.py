@@ -75,12 +75,28 @@ def build_store(
     roles = roles or {}
     store = MappingStore()
     for name, category in kept:
-        if category in {"organization", "location"}:
-            store.add_value(category, name, source="name-list")
+        # route on the category's own style rather than a hardcoded pair, so a
+        # new placeholder category (a child's initials, a birth date carried
+        # over from a roster) lands in the right half of the store
+        role = roles.get(name.casefold(), "")
+        if categories.style_for(category) == "person":
+            store.add_person(name, category=category, role=role,
+                             source="name-list", distinct=_is_child(role, category))
         else:
-            store.add_person(name, category=category,
-                             role=roles.get(name.casefold(), ""), source="name-list")
+            store.add_value(category, name, source="name-list")
     return store, overlaps
+
+
+_CHILD_CATEGORIES = {"minor", "minor_initials"}
+
+
+def _is_child(role: str, category: str) -> bool:
+    """Whether this entry came off a children roster.
+
+    A child keeps their own identity even when typed as an ordinary person: it
+    is the only signal that separates a son from the father he is named after.
+    """
+    return category in _CHILD_CATEGORIES or "child" in role.casefold()
 
 
 # --------------------------------------------------------------------------

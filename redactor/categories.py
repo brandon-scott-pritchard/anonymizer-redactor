@@ -32,6 +32,11 @@ CATEGORIES: tuple[Category, ...] = (
     # ---------------------------------------------------------------- people
     _c("person", "Person name", "NAME", "People", style="person"),
     _c("minor", "Minor child", "MINOR", "People", style="person"),
+    # A roster naming children by initials is already the form the rules ask
+    # for, but the initials still identify a child against the rest of the
+    # document. A placeholder keeps the table readable; a full invented name in
+    # a two-character cell would not.
+    _c("minor_initials", "Minor child (initials)", "CHILD", "People"),
     _c("organization", "Organization / employer / school", "ORG", "People"),
     _c("location", "Location / city / facility", "LOCATION", "People"),
 

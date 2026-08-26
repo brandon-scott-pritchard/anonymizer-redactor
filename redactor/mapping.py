@@ -71,6 +71,7 @@ class MappingStore:
         role: str = "",
         source: str = "name-list",
         include_single_tokens: bool = True,
+        distinct: bool = False,
     ) -> Entity | None:
         parsed = _names.parse(full_name)
         if not parsed.canonical:
@@ -88,8 +89,18 @@ class MappingStore:
             return existing
 
         # "John Smith" and "John Michael Smith" are one person and must share
-        # one pseudonym; keep whichever written form carries more of the name
+        # one pseudonym; keep whichever written form carries more of the name.
+        #
+        # Unless we have been told otherwise: a son named after his father is
+        # the one case where the strings alone cannot tell you. "Alejandro
+        # Ashdown" and "Marcus Shai Ashdown" look exactly like one person
+        # written two ways, and a paternity decree registered them as one
+        # identity - the father and his eight-year-old sharing a pseudonym.
+        # Only provenance separates them, so a name that came off a children
+        # roster is registered on its own.
         for entity in list(self.entities.values()):
+            if distinct:
+                break
             if (entity.category != category or not entity.is_person
                     or entity.person is None):
                 continue

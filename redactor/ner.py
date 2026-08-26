@@ -33,6 +33,53 @@ _ORG_MARKERS = frozenset({
     "department", "dept", "agency", "bureau", "associates", "group", "firm",
     "partners", "partnership", "trust", "foundation", "services", "insurance",
     "realty", "properties", "enterprises", "industries", "&",
+    # medical and dental practices, which the model reads as people: a real
+    # decree proposed "Cascade Pediatric Dentistry" and "Wasatch Valley Pediatrics"
+    # as persons, which would have given each an invented human name
+    "dentistry", "dental", "pediatrics", "pediatric", "orthodontics",
+    "orthodontia", "medical", "medicine", "health", "healthcare", "therapy",
+    "counseling", "psychiatry", "psychology", "surgery", "care", "center",
+    "centre", "institute", "academy", "credit union",
+})
+
+# Ordinary words the model keeps offering as people and organizations. One real
+# divorce decree produced fifty suggestions, of which "Order" (eight times, as a
+# PERSON), "Debts", "Titles", "Vaccines", "Time", "Mother" and "Spring Brake"
+# were representative. A list this long is unreviewable, and an unreviewable
+# list gets skipped - which is worse than a short one that missed something.
+# Words that make a candidate a place rather than a person.
+_PLACE_WORDS = frozenset({
+    "north", "south", "east", "west", "valley", "heights", "springs", "creek",
+    "canyon", "ridge", "hills", "park", "point", "view", "haven", "field",
+    "fork", "junction", "bench", "flat", "meadow", "meadows", "cove", "town",
+    "village", "township", "borough", "island", "beach", "harbor", "harbour",
+})
+
+# Kept deliberately narrow, because this rejects a whole candidate on one
+# token: a real surname Winter or Parent has to survive, so those live in
+# _NOT_A_NAME (single-word only) instead.
+_NEVER_IN_A_NAME = frozenset({
+    "account", "accounts", "address", "tutoring", "neither", "either",
+    "signature", "print", "card", "balance", "deposit", "withdrawal",
+    "expense", "expenses", "reimbursement", "premium", "deductible",
+    "statement", "invoice", "receipt", "subtotal", "total",
+})
+
+_NOT_A_NAME = frozenset({
+    "order", "orders", "debt", "debts", "title", "titles", "asset", "assets",
+    "time", "times", "date", "dates", "day", "days", "eve", "week", "weeks",
+    "month", "months", "year", "years", "vaccine", "vaccines", "mother", "father",
+    "parent", "parents", "child", "children", "spouse", "husband", "wife",
+    "childcare", "custody", "support", "alimony", "income", "expense",
+    "expenses", "insurance", "vehicle", "vehicles", "account", "accounts",
+    "balance", "payment", "payments", "interest", "clerk", "notary",
+    "stipulation", "decree", "judgment", "judgement", "motion", "petition",
+    "exhibit", "schedule", "attachment", "holiday", "holidays", "vacation",
+    "birthday", "religion", "travel", "transportation", "education", "school",
+    "medical", "dental", "vision", "spring", "summer", "fall", "winter",
+    "brake", "break", "extra-curricular", "extracurricular", "tutoring",
+    "venue", "grounds", "jurisdiction", "residency", "marriage", "divorce",
+    "parent-time", "parenting", "visitation", "arrears", "arrearages",
 })
 
 _nlp = None
@@ -74,6 +121,9 @@ class Suggestion:
     category: str
     count: int = 1
     documents: set[str] = None      # type: ignore[assignment]
+    # set when this is a diminutive of a party already on the name list, so the
+    # screen can say whose it is instead of leaving the operator to spot it
+    nickname_for: str = ""
 
     def __post_init__(self):
         if self.documents is None:
@@ -104,6 +154,16 @@ def refine_category(value: str, category: str) -> str:
     variant matching, which leaks.  A string of 2-4 name-shaped tokens with no
     digits and no organization marker is a person.
     """
+    if category == "person":
+        # the reverse leak: a place labelled PERSON gets an invented human name
+        # and the real city ships. "Pleasant Grove" arrived this way.
+        from .caption import BOILERPLATE
+        tokens = [t.strip(".,").casefold() for t in value.split()]
+        if tokens and all(t in BOILERPLATE or t in _PLACE_WORDS for t in tokens):
+            return "location"
+        if any(t in _ORG_MARKERS for t in tokens):
+            return "organization"
+        return category
     if category not in {"organization", "location"}:
         return category
     if any(ch.isdigit() for ch in value):
@@ -111,9 +171,18 @@ def refine_category(value: str, category: str) -> str:
     tokens = value.split()
     if not 2 <= len(tokens) <= 4:
         return category
+    from .caption import BOILERPLATE
+    bare = [t.strip(".,").casefold() for t in tokens]
+    # an explicit marker settles it first: "Salt Lake County" is every bit as
+    # place-shaped as it is organization-shaped, and the marker is the signal
+    if any(t in _ORG_MARKERS for t in bare):
+        return category
+    # A place name passes every person test below - two capitalised words, no
+    # digits, no company marker - so "Pleasant Grove" was promoted to a person
+    # and would have been given an invented human name while the city shipped.
+    if all(t in BOILERPLATE or t in _PLACE_WORDS for t in bare):
+        return "location"
     for token in tokens:
-        if token.strip(".,").casefold() in _ORG_MARKERS:
-            return category
         if not _PERSON_TOKEN.match(token.rstrip(",")):
             return category
     return "person"
@@ -185,14 +254,39 @@ _NOISE = {
 }
 
 
+# Nobody is named with more words than this. A run of names printed one per
+# line - a supervised-contact list - used to arrive as a single candidate
+# ("Petra Vandermeer Rachel Bly Steven Cole"), and ticking it registered a
+# three-person entity that matched none of them.
+MAX_NAME_TOKENS = 5
+
+
 def _plausible(value: str, category: str) -> bool:
     if len(value) < _MIN_LEN.get(category, 3):
         return False
-    if value.casefold() in _NOISE:
+    folded = value.casefold()
+    if folded in _NOISE:
         return False
     if not any(ch.isalpha() for ch in value):
         return False
     if sum(ch.isdigit() for ch in value) > len(value) / 3:
+        return False
+    tokens = value.split()
+    if len(tokens) > MAX_NAME_TOKENS:
+        return False
+    # "Mother's Day" must reduce to {mother, day}: a possessive inside the
+    # candidate hid the junk word behind it
+    bare = [re.sub(r"['’]s$", "", tok.strip(".,'’").casefold())
+            for tok in tokens]
+    # a single ordinary word is not a name, whatever the model labelled it
+    if len(tokens) == 1 and bare[0] in _NOT_A_NAME:
+        return False
+    if all(tok in _NOT_A_NAME for tok in bare):
+        return False
+    # one of these anywhere in a person candidate means it is a label the model
+    # ran together with something else - "Venmo Account", "Marcus Vaughn Address",
+    # "Mother Neither", "Print Name" were all offered as people
+    if category == "person" and any(tok in _NEVER_IN_A_NAME for tok in bare):
         return False
     if category == "person":
         # a person suggestion worth reviewing has at least one capitalised word

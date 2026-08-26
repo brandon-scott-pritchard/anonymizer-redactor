@@ -835,14 +835,18 @@ class App(Tk):
             )
         for item in self.suggestions:
             iid = f"ner::{item.key}"
-            if iid in previous:
+            # a diminutive of a party already on the list is that party; tick it
+            # by default and say whose it is, rather than leaving it to be spotted
+            if iid in previous or (item.nickname_for and iid not in self._suggest_seen):
                 self._suggest_checked.add(iid)
             seen.add(iid)
             self._suggest_meta[iid] = (item.text, item.category)
+            found_as = (f"Short for {item.nickname_for}" if item.nickname_for
+                        else categories.label_for(item.category))
             self.suggest_tree.insert(
                 "", "end", iid=iid, text="",
                 image=self._img_checked if iid in self._suggest_checked else self._img_unchecked,
-                values=(item.text, categories.label_for(item.category),
+                values=(item.text, found_as,
                         f"x{item.count}", "; ".join(sorted(item.documents))[:40]),
             )
         self._restripe(self.suggest_tree)

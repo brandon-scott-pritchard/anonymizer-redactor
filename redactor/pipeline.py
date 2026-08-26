@@ -10,8 +10,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
-from . import (caption, categories, docx_processor, engine, mapping, ner,
-               officials, pdf_processor)
+from dataclasses import replace as _replace
+
+from . import (caption, categories, children, docx_processor, engine, mapping,
+               names, ner, officials, pdf_processor)
 from .engine import PersonMatcher, Settings
 from .mapping import MappingStore
 
@@ -49,7 +51,44 @@ def collect_caption_names(files: Sequence[Path], progress: Progress = _noop) -> 
         except Exception:
             continue
     trimmed = {label: caption.caption_region(text) for label, text in regions.items()}
-    return caption.harvest_documents(trimmed)
+    found = caption.harvest_documents(trimmed)
+    # Children are never in the caption - they sit in a roster partway down -
+    # so they get their own pass and join the same list. Proposed, not applied.
+    return found + collect_children(files, progress)
+
+
+def collect_children(files: Sequence[Path],
+                     progress: Progress = _noop) -> list[caption.CaptionName]:
+    """Children and their birth dates, as proposals for the same name screen."""
+    seen: dict[str, caption.CaptionName] = {}
+    total = max(len(files), 1)
+    for index, raw_path in enumerate(files):
+        path = Path(raw_path)
+        progress(f"Reading {path.name} for children", index / total)
+        kind = classify(path)
+        try:
+            if kind == "docx":
+                text = "\n".join(docx_processor.extract_text(path).values())
+                tables = list(docx_processor.iter_tables(path))
+            elif kind == "pdf":
+                text = "\n".join(pdf_processor.extract_text(path).values())
+                tables = []
+            else:
+                continue
+        except Exception:
+            continue
+        for child in children.harvest(text, tables, path.name):
+            seen.setdefault(child.key, caption.CaptionName(
+                child.name, child.role, child.source, "high", child.category))
+            if child.born:
+                seen.setdefault(f"dob:{child.born.casefold()}", caption.CaptionName(
+                    child.born, "Child's date of birth", child.source, "high", "dob"))
+        # a decree that restores a maiden name prints both, and both identify
+        # the same woman - "shall return to her former name of Rowena Radcliffe"
+        for current, former in caption.former_names(text):
+            seen.setdefault(former.casefold(), caption.CaptionName(
+                former, f"Former name of {current}", path.name, "high", "person"))
+    return list(seen.values())
 
 
 def collect_officials(files: Sequence[Path],
@@ -154,6 +193,18 @@ def collect_suggestions(
         known.update(token.casefold() for token in term.split())
 
     filtered = [s for s in raw if s.text.casefold() not in known]
+
+    # A diminutive of a party's first name is that party, and the model has no
+    # idea - it offered "Chrissy" as an organization while Christine sat on the
+    # name list, and the nickname shipped. Retype it and say who it belongs to.
+    parties = [entity.canonical for entity in store.persons()]
+    parties += [item.name for item in caption_names or ()]
+    for index, suggestion in enumerate(filtered):
+        owner = names.nickname_for(suggestion.text, parties)
+        if owner:
+            filtered[index] = _replace(suggestion, category="person",
+                                      nickname_for=owner)
+
     notes.append(note)
     return filtered, notes
 
