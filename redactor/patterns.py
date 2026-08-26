@@ -249,7 +249,8 @@ def _extra_regex(terms: tuple[str, ...]) -> re.Pattern | None:
     word and its possessive ("Judge Cordova's order") without protecting a
     longer word that merely starts the same way ("Cordovan").
     """
-    from .names import escape_token          # local: names imports nothing here
+    # local import: names imports nothing from here, so there is no cycle
+    from .names import BOUNDARY_LEFT, BOUNDARY_RIGHT, escape_token
 
     bodies = [
         r"\s+".join(escape_token(token) for token in term.split())
@@ -258,7 +259,8 @@ def _extra_regex(terms: tuple[str, ...]) -> re.Pattern | None:
     ]
     if not bodies:
         return None
-    return re.compile(rf"(?<![\w'’])(?:{'|'.join(bodies)})(?!\w)", re.IGNORECASE)
+    return re.compile(rf"{BOUNDARY_LEFT}(?:{'|'.join(bodies)}){BOUNDARY_RIGHT}",
+                      re.IGNORECASE)
 
 
 def allowlist_spans(text: str, extra: Iterable[str] = ()) -> list[tuple[int, int]]:

@@ -71,6 +71,14 @@ TITLE_THEN_NAME = re.compile(
     rf"(?:[^\S\n]*[:,][^\S\n]*|[^\S\n]+)(?:{_HON}[^\S\n]+)?{_NAME}"
 )
 
+# The bench written as a bare surname: "Judge: Kelly", "Commissioner Blomquist".
+# Utah captions print it this way almost every time. Only ever consulted where
+# the full-name pattern found nothing at the same position, or it would reduce
+# "Judge Amber M. Cordova" to "Amber".
+_TITLE_LEAD = (rf"\b(?:{_HON}|(?:Chief[^\S\n]+|Presiding[^\S\n]+|Assigned[^\S\n]+)?"
+               rf"{_T_LEADING})(?:[^\S\n]*[:,][^\S\n]*|[^\S\n]+)")
+TITLE_THEN_SOLO = re.compile(rf"{_TITLE_LEAD}([A-Z][A-Za-z'’\-]{{2,20}})(?![\w'’])")
+
 # "Amber M. Cordova, District Court Judge" and the same thing with the title on
 # the next line, which is how every signature block in the state is laid out.
 NAME_THEN_TITLE = re.compile(
@@ -83,13 +91,21 @@ NAME_THEN_TITLE = re.compile(
 # The commissioner headings matter as much as the judge ones: in domestic
 # practice most of what gets signed is a commissioner's recommendation, and
 # those blocks routinely carry the name with no title line under it.
+#
+# Anchored to a line that IS the heading, and nothing else. Unanchored and
+# case-insensitive, "BY THE COURT" matched inside ordinary prose - "said Decree
+# to be signed by the court and entered" - and whatever name came next was
+# registered as a judicial officer. In a real divorce file that put both
+# parties on the bench, and the do-not-change list would have shielded the
+# clients from redaction had the party-collision guard not caught it.
 _BY_THE_COURT = re.compile(
-    r"\b(?:BY\s+THE\s+COURT|By\s+the\s+Court|DATED\s+AND\s+SIGNED|"
-    r"SO\s+ORDERED|IT\s+IS\s+SO\s+ORDERED|"
+    r"^[\s_]*(?:BY\s+THE\s+COURT|DATED\s+AND\s+SIGNED|"
+    r"(?:IT\s+IS\s+)?SO\s+ORDERED|"
     r"RECOMMENDED\s+BY(?:\s+THE)?(?:\s+COURT)?(?:\s+COMMISSIONER)?|"
     r"(?:COURT\s+)?COMMISSIONER['’]S\s+RECOMMENDATION|"
     r"RECOMMENDATION\s+OF\s+THE(?:\s+COURT)?\s+COMMISSIONER|"
-    r"SIGNED\s+BY(?:\s+THE)?(?:\s+COURT)?\s+COMMISSIONER)\b[:.]?",
+    r"SIGNED\s+BY(?:\s+THE)?(?:\s+COURT)?\s+COMMISSIONER)"
+    r"[\s_]*[:.]?[\s_]*$",
     re.IGNORECASE,
 )
 _BY_THE_COURT_LINES = 6
@@ -160,14 +176,35 @@ def _title_of(match: re.Match, name: str) -> str:
     return "Judicial officer"
 
 
-def _acceptable(raw: str) -> str | None:
-    """A cleaned name, or None when the match swept up caption furniture."""
+# A single capitalised word this short is a word as often as a surname.
+MIN_SOLO_SURNAME = 3
+
+
+def _acceptable(raw: str, solo: bool = False) -> str | None:
+    """A cleaned name, or None when the match swept up caption furniture.
+
+    ``solo`` admits a one-word surname. Utah captions print the bench that way
+    almost universally - "Commissioner: Blomquist", "Judge: Kelly" - and
+    demanding two tokens left eight of eleven real pleadings with no judicial
+    protection at all. It is only ever set where an explicit title sits directly
+    beside the name; the proximity rule under a signing heading still requires a
+    full name, because there the title is not there to vouch for it.
+    """
     if not raw:
         return None
     name = _TRAILING.sub("", raw).strip(" ,.;:-\n\t")
-    if not caption.plausible_name(name):
+    if caption.is_address(name):
         return None
-    return caption._clean(name)
+    if caption.plausible_name(name):
+        return caption._clean(name)
+    if not solo:
+        return None
+    token = name.strip(" ,.;:-")
+    if (len(token.split()) == 1 and len(token.strip(".")) >= MIN_SOLO_SURNAME
+            and token[:1].isupper() and token.isalpha()
+            and token.casefold() not in caption.BOILERPLATE):
+        return token
+    return None
 
 
 def harvest(text: str, source: str = "") -> list[Official]:
@@ -180,11 +217,29 @@ def harvest(text: str, source: str = "") -> list[Official]:
         if existing is None or (existing.confidence == "medium" and confidence == "high"):
             found[key] = Official(name, title, source, confidence)
 
+    titled_at: set[int] = set()
     for pattern in (TITLE_THEN_NAME, NAME_THEN_TITLE):
         for match in pattern.finditer(text):
             name = _acceptable(match.group(1))
             if name:
                 add(name, _title_of(match, name), "high")
+                if pattern is TITLE_THEN_NAME:
+                    titled_at.add(match.start())
+
+    # bare surnames, but only where the full-name pattern came up empty
+    for match in TITLE_THEN_SOLO.finditer(text):
+        if match.start() in titled_at:
+            continue
+        # judge the whole line, not the captured word: "Judge: 8080 S. Redwood
+        # Road, West Jordan" would otherwise hand back an officer called West
+        line_start = text.rfind("\n", 0, match.start()) + 1
+        line_end = text.find("\n", match.end())
+        line = text[line_start: line_end if line_end != -1 else len(text)]
+        if caption.is_address(line):
+            continue
+        name = _acceptable(match.group(1), solo=True)
+        if name:
+            add(name, _title_of(match, name), "high")
 
     # the signing block: the first plausible name under "BY THE COURT:"
     lines = text.splitlines()
@@ -297,6 +352,15 @@ def protected_terms(officials: list[Official], avoid: list[str] | None = None) -
         if any(_names.same_person(parsed, party) for party in parsed_parties):
             dropped.append(official.name)
             continue
+
+        # An officer known only by surname IS the bare surname, so it has to
+        # clear the same party check the derived surname does below. Without
+        # this, a judge called Kelly shielded a party's child called Kelly.
+        if len(canonical.split()) == 1:
+            solo = canonical.strip(".")
+            if solo.casefold() in party_words or len(solo) < MIN_SURNAME_LENGTH:
+                partial.append(official.name)
+                continue
 
         put(official.name)
         if canonical and canonical.casefold() != official.name.casefold():

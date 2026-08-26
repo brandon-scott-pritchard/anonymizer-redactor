@@ -77,25 +77,44 @@ class DocxResult:
 # --------------------------------------------------------------------------
 
 
+# Word stores a tab stop and a line break as elements of their own rather than
+# as characters inside a run. Ignoring them glued the runs on either side
+# together - a real decree yields "Zepeda", <w:tab/>, <w:tab/>, "Born: ", which
+# read as "ZepedaBorn" - and the name boundary then refused to match the
+# surname, so it shipped intact. They are carried as one character each, which
+# also keeps every offset in _set_group_text aligned.
+_SEPARATORS = {"tab": " ", "br": "\n"}
+
+
+def _node_text(node: etree._Element) -> str:
+    """What one node contributes to its paragraph's readable text."""
+    separator = _SEPARATORS.get(etree.QName(node).localname)
+    return separator if separator is not None else (node.text or "")
+
+
+def _is_separator(node: etree._Element) -> bool:
+    return etree.QName(node).localname in _SEPARATORS
+
+
 def _paragraph_texts(root: etree._Element) -> list[list[etree._Element]]:
     """Text elements grouped by their own paragraph, nesting handled correctly."""
     groups: list[list[etree._Element]] = []
     for para in root.iter(w("p")):
         own: list[etree._Element] = []
-        for node in para.iter(w("t")):
+        for node in para.iter(w("t"), w("tab"), w("br")):
             # a text box nests whole paragraphs inside a run; those get their own group
             ancestor = node.getparent()
             while ancestor is not None and ancestor.tag != w("p"):
                 ancestor = ancestor.getparent()
             if ancestor is para:
                 own.append(node)
-        if own:
+        if any(not _is_separator(node) for node in own):
             groups.append(own)
     return groups
 
 
 def _group_text(group: list[etree._Element]) -> str:
-    return "".join(node.text or "" for node in group)
+    return "".join(_node_text(node) for node in group)
 
 
 def extract_text(path: Path) -> dict[str, str]:
@@ -109,8 +128,9 @@ def extract_text(path: Path) -> dict[str, str]:
                 root = etree.fromstring(zf.read(name))
             except etree.XMLSyntaxError:
                 continue
-            paragraphs = ["".join(node.text or "" for node in group)
-                          for group in _paragraph_texts(root)]
+            # the same joiner the scan uses, so caption harvesting and matching
+            # never see two different versions of the document
+            paragraphs = [_group_text(group) for group in _paragraph_texts(root)]
             out[name] = "\n".join(paragraphs)
     return out
 
@@ -160,7 +180,7 @@ def _set_group_text(group: list[etree._Element], hits: list[Hit]) -> set:
     values: dict[etree._Element, str] = {}
     cursor = 0
     for node in group:
-        text = node.text or ""
+        text = _node_text(node)
         spans.append((node, cursor, cursor + len(text)))
         values[node] = text
         cursor += len(text)
@@ -171,6 +191,10 @@ def _set_group_text(group: list[etree._Element], hits: list[Hit]) -> set:
         for node, start, end in spans:
             if end <= hit.start or start >= hit.end:
                 continue
+            if _is_separator(node):
+                # a name may legitimately straddle a tab stop; the replacement
+                # goes into the runs on either side and the tab stays put
+                continue
             local_start = max(hit.start, start) - start
             local_end = min(hit.end, end) - start
             current = values[node]
@@ -179,6 +203,8 @@ def _set_group_text(group: list[etree._Element], hits: list[Hit]) -> set:
             touched.add(node)
 
     for node in group:
+        if _is_separator(node):
+            continue
         new = values[node]
         if new != (node.text or ""):
             node.text = new

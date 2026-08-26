@@ -24,7 +24,10 @@ FUZZY_PRIORITY = 66
 # ordinary words
 MIN_FUZZY_LENGTH = 4
 
-_FUZZY_WORD_RE = re.compile(r"(?<![\w'’])[A-Za-z][A-Za-z'’\-]{3,}(?!\w)")
+# Same underscore reasoning as the person boundary: a misspelled name flush
+# against a signature rule has to be reachable too.
+_FUZZY_WORD_RE = re.compile(
+    r"(?<![^\W_])(?<!['’])[A-Za-z][A-Za-z'’\-]{3,}(?![^\W_])")
 
 
 def _is_adjacent_swap(a: str, b: str) -> bool:
@@ -140,7 +143,8 @@ class EntityMatcher:
                 lookup.setdefault(" ".join(variant.text.split()).casefold(),
                                   (variant, priority))
             regex = re.compile(
-                rf"(?<![\w'’])(?:{'|'.join(bodies)})(?!\w)", re.IGNORECASE)
+                rf"{_names.BOUNDARY_LEFT}(?:{'|'.join(bodies)})"
+                rf"{_names.BOUNDARY_RIGHT}", re.IGNORECASE)
             self.rules.append((regex, entity, lookup))
 
         # Typo index: "Johhn" or "Smiith" (an inserted letter) and "Jonh"
@@ -186,8 +190,11 @@ class EntityMatcher:
             if len(text) < MIN_LITERAL_LENGTH:
                 continue
             body = r"\s+".join(_names.escape_token(tok) for tok in text.split())
+            # same underscore reasoning as the person boundary, plus the
+            # address characters that must not abut a matched value
             rules.append((
-                re.compile(rf"(?<![\w@.\-]){body}(?![\w@\-])", re.IGNORECASE),
+                re.compile(rf"(?<![^\W_])(?<![@.\-]){body}(?![^\W_])(?![@\-])",
+                           re.IGNORECASE),
                 entity,
             ))
         rules.sort(key=lambda rule: -len(rule[1].canonical))

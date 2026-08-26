@@ -77,7 +77,10 @@ def collect_officials(files: Sequence[Path],
             continue
         for part, text in parts.items():
             if text.strip():
-                found[f"{path.name} [{Path(part).name}]"] = text
+                # the full part path, not its basename: word/document.xml and
+                # word/glossary/document.xml share a basename, and keying on it
+                # let a 67-byte glossary stub overwrite the entire document body
+                found[f"{path.name} [{part}]"] = text
     return officials.harvest_documents(found)
 
 

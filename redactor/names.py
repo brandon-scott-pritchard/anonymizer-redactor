@@ -356,10 +356,22 @@ def escape_token(token: str) -> str:
     return re.escape(token).replace("'", "['’]")
 
 
+# Where a name is allowed to start and stop.
+#
+# ``\w`` counts an underscore as a letter, and a pleading's signature block is
+# a run of them with the name flush against it - "________Jane Smith________"
+# arrives as a single run out of Word. Treating "_" as a letter meant the
+# surname on every signature line failed to match and shipped intact, so the
+# boundary is written against alphanumerics instead.
+#
+# The apostrophe is excluded on the left only: "Brien" must not match inside
+# "O'Brien", while "Smith" must still match inside the possessive "Smith's".
+BOUNDARY_LEFT = r"(?<![^\W_])(?<!['’])"
+BOUNDARY_RIGHT = r"(?![^\W_])"
+
+
 def variant_regex(text: str) -> re.Pattern:
     """A word-boundary regex for one variant, tolerant of runs of whitespace."""
     parts = [escape_token(tok) for tok in text.split()]
     body = r"\s+".join(parts)
-    # A trailing apostrophe is let through so possessives ("Smith's") match,
-    # while a genuine continuation ("Smithers") still does not.
-    return re.compile(rf"(?<![\w'’]){body}(?!\w)", re.IGNORECASE)
+    return re.compile(rf"{BOUNDARY_LEFT}{body}{BOUNDARY_RIGHT}", re.IGNORECASE)

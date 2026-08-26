@@ -55,7 +55,35 @@ BOILERPLATE = {
     "telephone", "facsimile", "fax", "email", "e-mail", "address", "phone",
     "page", "pages", "sheet", "caption", "title", "date", "dated", "signature", "signed",
     "salt", "lake", "utah", "america", "government", "people", "commonwealth",
+    # Utah cities that appear in courthouse and pro-se address blocks. Without
+    # these, "West Jordan—Third District Court, 8080 S. Redwood Road" proposed
+    # "West Jordan" as a high-confidence party, ticked by default, and
+    # "Pleasant Grove" reached the judicial do-not-change list - which would
+    # have shielded a party's home city from redaction.
+    "jordan", "provo", "orem", "roosevelt", "grove", "pleasant", "sandy",
+    "ogden", "logan", "layton", "murray", "sciences", "vernal", "duchesne",
+    "altonah", "springville", "lehi", "draper", "tooele", "heber", "moab",
 }
+
+# A line carrying a street address or a ZIP is furniture, whatever names the
+# name regex can find inside it.
+_DIRECTION = r"(?:North|South|East|West|N|S|E|W)"
+_ADDRESS_RE = re.compile(
+    # a grid address, spelled out or abbreviated: 721 West 1800 North, 8080 S. Redwood
+    rf"\b\d{{1,6}}\s+{_DIRECTION}\.?\s"
+    # a named street with a suffix
+    rf"|\b\d{{1,6}}\s+(?:{_DIRECTION}\.?\s+)?[\w'\-]+\s+"
+    r"(?:Road|Rd|Street|St|Avenue|Ave|Drive|Dr|Lane|Ln|Way|Boulevard|Blvd|"
+    r"Circle|Cir|Court|Ct|Place|Pl|Parkway|Pkwy)\b"
+    r"|\bSuite\s+\d|\bSte\.?\s+\d|\bP\.?\s*O\.?\s+Box\b|\b[A-Z]{2}\s+\d{5}\b"
+    r"|\b\d{5}(?:-\d{4})?\s*$",
+    re.IGNORECASE,
+)
+
+
+def is_address(text: str) -> bool:
+    """True when this text is a street address rather than a person."""
+    return bool(_ADDRESS_RE.search(text))
 
 
 @dataclass(frozen=True)
@@ -185,6 +213,8 @@ def _first_surname_in(text: str) -> str | None:
 
 
 def _first_name_in(text: str) -> str | None:
+    if is_address(text):
+        return None
     for m in NAME_RE.finditer(text):
         if plausible_name(m.group(1)):
             return _clean(m.group(1))
@@ -193,6 +223,8 @@ def _first_name_in(text: str) -> str | None:
 
 def _all_names_in(text: str) -> list[str]:
     out: list[str] = []
+    if is_address(text):
+        return out
     for m in NAME_RE.finditer(text):
         if plausible_name(m.group(1)):
             cleaned = _clean(m.group(1))

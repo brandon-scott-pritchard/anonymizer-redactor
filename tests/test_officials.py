@@ -308,3 +308,92 @@ def test_the_report_names_what_it_shielded(tmp_path):
     assert "LEFT UNTOUCHED ON PURPOSE" in text
     assert "Amber M. Cordova" in text
     assert "Wasatch Front" in text
+
+
+# ------------------------------------- shapes found in real Utah pleadings --
+
+# Every caption in the sample set prints the bench as a bare surname. Demanding
+# two tokens left eight of eleven documents with no judicial protection at all.
+SOLO_LAYOUTS = {
+    "commissioner, colon": ("Commissioner: Blomquist", "Blomquist", "Commissioner"),
+    "judge, colon": ("Judge: Kelly", "Kelly", "Judge"),
+    "judge, space": ("Judge Brady", "Brady", "Judge"),
+    "commissioner, space": ("Commissioner Ito", "Ito", "Commissioner"),
+    "honorable": ("Hon. Blomquist", "Blomquist", "Judge"),
+}
+
+
+@pytest.mark.parametrize("layout", sorted(SOLO_LAYOUTS))
+def test_a_bare_judicial_surname_is_harvested(layout):
+    text, expected, title = SOLO_LAYOUTS[layout]
+    found = officials.harvest(text)
+    assert [(o.name, o.title) for o in found] == [(expected, title)]
+
+
+def test_a_full_name_is_never_cut_back_to_its_first_word():
+    """The solo pattern must not reduce "Judge Amber M. Cordova" to "Amber"."""
+    found = officials.harvest("Judge Amber M. Cordova")
+    assert [o.name for o in found] == ["Amber M. Cordova"]
+
+
+def test_an_empty_title_line_harvests_nothing():
+    """A real parentage decree carries "Commissioner: " with nothing after it."""
+    assert officials.harvest("Commissioner: \nJudge: Samuel Chiara") == [
+        officials.Official("Samuel Chiara", "Judge", "", "high")]
+
+
+def test_a_solo_surname_still_answers_to_the_party_guard():
+    """A judge called Kelly must not shield a child called Kelly."""
+    bench = officials.harvest("Judge: Kelly")
+    protection = officials.protected_terms(bench, avoid=["Kelly Anne Marchetti"])
+    assert "Kelly" not in protection.terms
+
+
+@pytest.mark.parametrize("prose", [
+    "said Decree to be signed by the court and entered",
+    "as ordered by the Court on March 4",
+    "END OF DOCUMENT SIGNED BY THE COURT AS INDICATED BY THE ELECTRONIC SIGNATURE",
+    "The parties are hereby awarded a Divorce Decree, said Decree to be signed by the court",
+])
+def test_by_the_court_inside_a_sentence_is_not_a_signing_block(prose):
+    """Unanchored, this put both parties of a real divorce onto the bench."""
+    assert not officials._BY_THE_COURT.search(prose)
+
+
+def test_a_real_signing_heading_still_reads_as_one():
+    for heading in ["BY THE COURT:", "  By the Court", "SO ORDERED.",
+                    "COMMISSIONER'S RECOMMENDATION:", "___BY THE COURT:___"]:
+        assert officials._BY_THE_COURT.search(heading), heading
+
+
+def test_a_party_signature_block_is_not_a_judicial_officer():
+    """A notary block sits under prose mentioning the court; both Hull parties
+    were harvested onto the bench because of it."""
+    text = ("That the parties are hereby awarded a Divorce Decree, said Decree "
+            "to be signed by the court.\n"
+            "Date _______Sign here ►____________________\n"
+            "Marisol Ashdown\n"
+            "I certify that Marisol Ashdown, who is known to me…\n")
+    assert officials.harvest(text) == []
+
+
+@pytest.mark.parametrize("line", [
+    "West Jordan—Third District Court, 8080 S. Redwood Road, Suite 1701, West Jordan, UT 84088",
+    "   Pleasant Grove, UT 84062",
+    "225 South State, P.O. Box 1286, Roosevelt, Utah 84066",
+    "721 West 1800 North",
+])
+def test_an_address_is_never_a_person_or_an_officer(line):
+    """"West Jordan" was proposed as a party, ticked by default; "Pleasant
+    Grove" reached the do-not-change list and would have shielded a real city
+    from redaction."""
+    from redactor import caption
+    assert caption.is_address(line)
+    assert caption._first_name_in(line) is None
+    assert officials.harvest(f"Judge: {line}") == []
+
+
+def test_a_genuine_name_is_not_mistaken_for_an_address():
+    from redactor import caption
+    assert not caption.is_address("Marisol Quenby Ashdown")
+    assert caption._first_name_in("Marisol Quenby Ashdown") == "Marisol Quenby Ashdown"
