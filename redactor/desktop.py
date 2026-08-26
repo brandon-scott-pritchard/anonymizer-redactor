@@ -56,6 +56,22 @@ def _wait_until_up(port: int, timeout: float = 25.0) -> bool:
     return False
 
 
+
+def enable_downloads(webview) -> bool:
+    """Let the web view save a file. Returns whether the flag is now on.
+
+    pywebview defaults ALLOW_DOWNLOADS to False, and the default moved when the
+    pin allowed a major-version jump. Without it every download button on the
+    results screen is inert in the app window and fine in a browser, which is a
+    miserable thing to debug from a bug report.
+    """
+    try:
+        webview.settings["ALLOW_DOWNLOADS"] = True
+        return bool(webview.settings.get("ALLOW_DOWNLOADS"))
+    except Exception:                       # pragma: no cover - very old pywebview
+        return False
+
+
 def main() -> int:
     port = _free_port()
     _serve(port)
@@ -71,6 +87,14 @@ def main() -> int:
         print("pywebview is not installed; opening in the browser instead.")
         from .webapp import main as web_main
         return web_main()
+
+    # The whole point of the run is the archive at the end of it, and the web
+    # view will not save a file unless it is told it may. pywebview ships this
+    # off by default, so the three download buttons on the results screen did
+    # nothing at all in the app window while working fine in a browser - a
+    # plain <a href> to /api/download/archive is a navigation the view drops on
+    # the floor. Must be set before the window is created.
+    enable_downloads(webview)
 
     # The token rides in on the query string once; the server then sets its
     # same-site cookie, exactly as it does for a browser.

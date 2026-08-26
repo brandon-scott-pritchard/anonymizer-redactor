@@ -156,3 +156,18 @@ def test_the_window_falls_back_to_the_browser_without_a_web_view(monkeypatch):
     monkeypatch.setattr("redactor.webapp.main", lambda: called.append(1) or 0)
     assert desktop.main() == 0
     assert called, "it must fall back to the browser rather than exiting"
+
+
+def test_the_app_window_is_allowed_to_save_files():
+    """Every download button is a plain <a href>, which a web view may refuse.
+
+    pywebview defaults ALLOW_DOWNLOADS to False. With it off the results screen
+    looks completely normal and its three buttons do nothing - in the app
+    window only, so it survives every browser-based test in this file.
+    """
+    webview = pytest.importorskip("webview")
+    from redactor import desktop
+
+    webview.settings["ALLOW_DOWNLOADS"] = False       # whatever the default is
+    assert desktop.enable_downloads(webview) is True
+    assert webview.settings["ALLOW_DOWNLOADS"] is True
