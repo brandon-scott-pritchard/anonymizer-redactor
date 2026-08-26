@@ -13,7 +13,7 @@ from typing import Callable, Iterable, Sequence
 from dataclasses import replace as _replace
 
 from . import (caption, categories, children, docx_processor, engine, mapping,
-               names, ner, officials, pdf_processor)
+               names, ner, officials, pdf_processor, places)
 from .engine import PersonMatcher, Settings
 from .mapping import MappingStore
 
@@ -157,15 +157,9 @@ def collect_suggestions(
     progress: Progress = _noop,
     caption_names: Sequence[caption.CaptionName] | None = None,
 ) -> tuple[list[ner.Suggestion], list[str]]:
-    """Model proposals for people, organisations and places, minus what we have."""
+    """Proposals for people, organisations and places, minus what we have."""
     notes: list[str] = []
     texts = document_texts(files, progress)
-    if not settings.use_ner:
-        return [], ["Model suggestions were turned off for this run."]
-
-    ok, note = ner.available()
-    if not ok:
-        return [], [note]
 
     from . import patterns
 
@@ -173,8 +167,6 @@ def collect_suggestions(
         label: patterns.allowlist_spans(text, settings.do_not_change)
         for label, text in texts.items()
     }
-    progress("Reviewing documents for additional names", 0.6)
-    raw = ner.suggest(texts, protected)
 
     known: set[str] = set()
     for entity in store.entities.values():
@@ -192,7 +184,29 @@ def collect_suggestions(
         known.add(term.casefold())
         known.update(token.casefold() for token in term.split())
 
-    filtered = [s for s in raw if s.text.casefold() not in known]
+    # Towns and cities come from rules and a gazetteer, not from the model, so
+    # they are gathered before the model is consulted and survive a run where
+    # it is switched off or missing. Everything above is a veto: a town that
+    # shares its name with somebody in this document is that person here.
+    progress("Looking for town and city names", 0.55)
+    found = places.harvest_documents(texts, protected, frozenset(known))
+    place_items = [ner.Suggestion(place.name, "location", 1, {place.source})
+                   for place in found]
+
+    if not settings.use_ner:
+        return place_items, ["Model suggestions were turned off for this run."]
+
+    ok, note = ner.available()
+    if not ok:
+        return place_items, [note]
+
+    progress("Reviewing documents for additional names", 0.6)
+    raw = ner.suggest(texts, protected)
+
+    seen = {item.key for item in place_items}
+    filtered = place_items + [s for s in raw
+                              if s.text.casefold() not in known
+                              and s.key not in seen]
 
     # A diminutive of a party's first name is that party, and the model has no
     # idea - it offered "Chrissy" as an organization while Christine sat on the
@@ -200,6 +214,10 @@ def collect_suggestions(
     parties = [entity.canonical for entity in store.persons()]
     parties += [item.name for item in caption_names or ()]
     for index, suggestion in enumerate(filtered):
+        # a confirmed town is not somebody's diminutive, whatever the table
+        # says: Bill, Jack and Vernal are all real places
+        if suggestion.category == "location":
+            continue
         owner = names.nickname_for(suggestion.text, parties)
         if owner:
             filtered[index] = _replace(suggestion, category="person",

@@ -75,6 +75,14 @@ hiddenimports += [
 
 # The web front end: static assets plus the pieces uvicorn and fastapi load
 # dynamically, which static analysis cannot see.
+# The US place gazetteer. Package data is not pure Python, so it does not go
+# into the PYZ archive with the rest of redactor/ and has to be named here;
+# without it places.py loads an empty table and silently stops finding towns.
+_placedata = Path(SPECPATH) / "redactor" / "data"
+if _placedata.is_dir():
+    datas.append((str(_placedata), "redactor/data"))
+    print("spec: bundling the place gazetteer")
+
 _webstatic = Path(SPECPATH) / "webapp" / "static"
 if _webstatic.is_dir():
     datas.append((str(_webstatic), "webapp/static"))

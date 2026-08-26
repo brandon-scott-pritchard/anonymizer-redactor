@@ -208,6 +208,36 @@ Structured values are found by pattern; anything whose shape is generic must
 carry a label ("Account No. 44821") before it is touched, which is what keeps
 false positives out of ordinary legal prose.
 
+### Town and city names
+
+A client's home town identifies them nearly as well as their name does, so the
+tool ships a gazetteer of all 101,160 populated places in the United States—the
+Census Bureau's national place file plus the USGS unincorporated communities,
+both public domain, 399 KB.
+
+The list never triggers anything. It only confirms. A context pattern proposes
+first—`South Jordan, UT 84095`, `resides in Provo`, `MCKINNEY TX 75070`—and the
+gazetteer is asked whether that is a real place; the do-not-change list and your
+name list get the last word after that.
+
+That ordering is not fussiness, and here is why both halves are needed. Across
+eleven real pleadings, the context patterns alone produced 14 proposals and **6
+of them were wrong**—"Uniform Parentage Act", "Interstate Family Support Act",
+"Enforcement Act", "Salt Lake County", "West Provo", and a petitioner's actual
+name. Run it the other way, just looking every capitalized word up in the
+gazetteer, and it flags `Rule` in every statute citation (a town in Texas),
+plus `Telephone`, `Holiday`, `Golden`, and three of the tool's own invented
+replacement names. Together they were right 8 times out of 8, and the 8 include
+one unincorporated Utah town of 40 people that had shipped in three files.
+
+The reason a bare list cannot work: **5,478 US place names are also US
+surnames, carried by about 101.8 million people.** Hull, Fowler and Falcon are
+all real towns and all three were a real client's surname. If your client
+shares a name with a town, the client wins—their name is on the do-not-change
+list, and the town is not proposed at that spelling.
+
+Rebuild the list from the two sources with `python build/build_places.py`.
+
 ### What it will not touch
 
 Protected automatically, because a pleading stops making sense without them:
@@ -360,6 +390,8 @@ redactor/
   caption.py          party names harvested from legal captions and headers
   officials.py        the bench, and the do-not-change list built from it
   children.py         child rosters, cue lines and bare custody clauses
+  places.py           town and city names: context proposes, gazetteer confirms
+  data/               the 101,160-name US place list (Census + USGS, 399 KB)
   surrogates.py       deterministic fake names (HMAC, fixed salt)
   mapping.py          entity registry and the encrypted mapping key
   ner.py              optional spaCy suggestions (proposals only)
@@ -373,7 +405,7 @@ redactor/
   gui.py              the four-step Tkinter front end
   webapp.py           the local FastAPI server behind the web front end
 webapp/static/        the React front end (vendored runtime, no build step)
-build/                PyInstaller spec and frozen-app entry point
+build/                PyInstaller spec, frozen-app entry point, gazetteer builder
 vendor/               vendored Tesseract (gitignored; rebuild with the scripts)
 tests/                the suite described above
 samples/              example pleading in DOCX and PDF
