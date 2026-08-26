@@ -208,18 +208,22 @@ def test_a_space_grouped_account_number_is_taken_whole(tmp_path):
     assert "4477" not in text and "9301" not in text
 
 
-@pytest.mark.parametrize("line, tail", [
-    ("Acct #: ...3907", "3907"),
-    ("The statement prints ****3907 for the same account.", "3907"),
-    ("Charged to XXXX-XXXX-XXXX-4417 last month.", "4417"),
-    ("CARD PURCHASE XXXX9302 HOME SUPPLY", "9302"),
-    ("Card ending in 4417", "4417"),
-    ("card ending in 9302", "9302"),
-])
-def test_every_masked_form_of_an_account_is_caught(tmp_path, line, tail):
-    path = build(tmp_path, f"masked-{tail}-{abs(hash(line)) % 999}.docx", [line])
-    text, _ = run(path, tmp_path / f"out-{tail}-{abs(hash(line)) % 999}.docx")
-    assert tail not in text, f"{line!r} shipped its tail"
+MASKED_FORMS = [
+    "Acct #: ...3907",
+    "The statement prints ****3907 for the same account.",
+    "Charged to XXXX-XXXX-XXXX-4417 last month.",
+    "CARD PURCHASE XXXX9302 HOME SUPPLY",
+    "Card ending in 4417",
+    "card ending in 9302",
+]
+
+
+def test_every_masked_form_of_an_account_is_caught(tmp_path):
+    """One document, every masking style a statement uses for the same tail."""
+    path = build(tmp_path, "masked.docx", MASKED_FORMS)
+    text, _ = run(path, tmp_path / "masked-out.docx")
+    for tail in ("3907", "4417", "9302"):
+        assert tail not in text, f"{tail} shipped"
 
 
 @pytest.mark.parametrize("line", ["card 1 of 2", "card holder name", "State ID card 12345678"])
@@ -394,7 +398,32 @@ def test_the_bench_and_the_figures_both_survive(tmp_path):
 
 
 @pytest.mark.parametrize("line", ["812 KESTREL BEND", "2200 Foundry Row",
-                                  "44 Copper Creek Crossing", "9 Marsh Point"])
+                                  "44 Copper Creek Crossing", "17 Tanner Mews"])
 def test_a_subdivision_street_suffix_is_still_a_street(line):
-    """Bend, Row, Crossing and Point name streets as readily as Street does."""
+    """Bend, Row and Crossing name streets as readily as Street does."""
     assert any(c == "street_address" for _, c in scanned(line))
+
+
+@pytest.mark.parametrize("line", ["Summit Ridge Bank", "Cascade Valley Power",
+                                  "Pleasant Point Dental", "Cornerstone Summit Advisors"])
+def test_a_company_name_is_not_a_street(line):
+    """The suffix list stops short of words that are ordinary in a company name.
+
+    Ridge, Summit, Valley and Point were all on it briefly, and "Summit Ridge
+    Bank" then read as a street - which, combined with the newline bug below,
+    ate the dollar figure off the end of the previous row.
+    """
+    assert not any(c == "street_address" for _, c in scanned(line))
+
+
+@pytest.mark.parametrize("line", [
+    "34,116.00   985.00\nSummit Ridge Bank HELOC",
+    "1,612.44  11,287.08\nDeposited to Canyon State Credit Union",
+])
+def test_a_street_address_never_spans_a_line_break(line):
+    """The figure at the end of a statement row is not part of the next row.
+
+    \\s+ crosses the newline, so the detector matched "66\\nSummit Ridge" and
+    the redaction box then deleted a dollar amount nobody had matched.
+    """
+    assert scanned(line) == []

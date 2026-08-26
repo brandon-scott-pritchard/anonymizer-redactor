@@ -551,24 +551,31 @@ DETECTORS: tuple[Detector, ...] = (
     _d("masked_account", rf"(?<![\w\-]){V_MASKED}(?![\w\-])", priority=72, digit=True),
 
     # ----------------------------------------------------------- property ----
+    # Horizontal whitespace only, every time. A plain \s+ crosses the line
+    # break, and on a statement the line above ends in a dollar figure: the
+    # detector matched "66\nSummit Ridge" as a street address and took
+    # "2,184.66" off the end of the previous row with it. A street address is
+    # on one line.
     _d("street_address",
-       r"\b\d{1,6}[A-Z]?\s+(?:(?:North|South|East|West|N\.?|S\.?|E\.?|W\.?|NE|NW|SE|SW)\s+)?"
-       r"(?:[A-Z0-9][\w'\-]*\.?\s+){0,4}"
+       r"\b\d{1,6}[A-Z]?[^\S\n]+(?:(?:North|South|East|West|N\.?|S\.?|E\.?|W\.?|NE|NW|SE|SW)[^\S\n]+)?"
+       r"(?:[A-Z0-9][\w'\-]*\.?[^\S\n]+){0,4}"
        r"(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Circle|Cir|Way|Wy|"
        r"Place|Pl|Terrace|Ter|Parkway|Pkwy|Highway|Hwy|Trail|Trl|Loop|Square|Sq|Plaza|Alley|Route|Rte|"
        # A subdivision names its streets Bend, Row, Run and Crossing as readily
        # as Street and Avenue, and a home address that the suffix list has no
-       # word for is a home address that ships. These are USPS-standard suffixes.
-       r"Bend|Row|Run|Crossing|Xing|Landing|Lndg|Commons|Cove|Cv|Creek|Crk|Ridge|Rdg|"
-       r"Hollow|Holw|Meadow|Meadows|Mdw|Glen|Gln|Grove|Grv|Knoll|Knl|Bluff|Blf|"
-       r"Trace|Trce|Path|Walk|Way|Point|Pt|Pass|Park|Bay|Hill|Hills|Vista|Mews|"
-       r"Canyon|Cyn|Valley|Vly|Summit|Spur|Bend|Chase|Reach|Bridge|Ferry|Ford)\b\.?"
+       # word for is a home address that ships. Kept to suffixes that are not
+       # also ordinary words in a company name: an earlier, longer list
+       # included Ridge, Summit, Valley and Point, and "Summit Ridge Bank"
+       # then read as a street.
+       r"Bend|Row|Run|Crossing|Xing|Landing|Lndg|Mews|Trace|Trce|Esplanade)\b\.?"
        r"(?:\s*,?\s*(?:Apt\.?|Apartment|Unit|Suite|Ste\.?|Bldg\.?|Building|Floor|Fl\.?|Rm\.?|Room|#)\s*[\w\-]+)?"
        r"(?:\s*,?\s*[A-Z][\w'\-]*(?:\s+[A-Z][\w'\-]*){0,2}\s*,?\s*(?:A[LKZR]|C[AOT]|D[EC]|FL|GA|HI|I[DLNA]|"
        r"K[SY]|LA|M[EDAINSOT]|N[EVHJMYCD]|O[HKR]|PA|RI|S[CD]|T[NX]|UT|V[TA]|W[AVIY])\.?\s*\d{5}(?:-\d{4})?)?",
        priority=75, digit=True),
     _d("street_address",
-       r"(?<![\w\-])\d{2,5}\s+(?:North|South|East|West|N|S|E|W)\.?\s+\d{2,5}\s+"
+       # same one-line rule as above; only the trailing city/state/ZIP is
+       # allowed to wrap, because a real address block wraps exactly there
+       r"(?<![\w\-])\d{2,5}[^\S\n]+(?:North|South|East|West|N|S|E|W)\.?[^\S\n]+\d{2,5}[^\S\n]+"
        r"(?:North|South|East|West|N|S|E|W)\b\.?"
        r"(?:\s*,?\s*(?:Apt\.?|Apartment|Unit|Suite|Ste\.?|Bldg\.?|#)\s*[\w\-]+)?"
        r"(?:\s*,?\s*[A-Z][\w'\-]*(?:\s+[A-Z][\w'\-]*){0,2}\s*,?\s*"

@@ -31,6 +31,24 @@ def _noop(_message: str, _fraction: float) -> None:
     pass
 
 
+def tables_in(path: Path) -> list:
+    """Rows of cells, from a DOCX's own tables or a PDF's column geometry.
+
+    Both readers return the same shape, so everything that consumes a table -
+    the children roster, the counterparty payee column, the label/value
+    registration pass - reads either kind of document without caring which.
+    """
+    kind = classify(path)
+    try:
+        if kind == "docx":
+            return list(docx_processor.iter_tables(path))
+        if kind == "pdf":
+            return list(pdf_processor.iter_tables(path))
+    except Exception:
+        return []
+    return []
+
+
 # --------------------------------------------------------------------------
 # phase 1 - what the caption already tells us
 # --------------------------------------------------------------------------
@@ -70,12 +88,11 @@ def collect_children(files: Sequence[Path],
         try:
             if kind == "docx":
                 text = "\n".join(docx_processor.extract_text(path).values())
-                tables = list(docx_processor.iter_tables(path))
             elif kind == "pdf":
                 text = "\n".join(pdf_processor.extract_text(path).values())
-                tables = []
             else:
                 continue
+            tables = tables_in(path)
         except Exception:
             continue
         for child in children.harvest(text, tables, path.name):
@@ -200,11 +217,8 @@ def collect_suggestions(
     tables: dict[str, list] = {}
     for raw_path in files:
         path = Path(raw_path)
-        if path.name in texts and classify(path) == "docx":
-            try:
-                tables[path.name] = list(docx_processor.iter_tables(path))
-            except Exception:
-                continue
+        if path.name in texts:
+            tables[path.name] = tables_in(path)
     rules_found += [
         ner.Suggestion(party.name, "person", 1, {party.source})
         for party in transactions.harvest_documents(texts, tables, frozenset(known))
@@ -282,13 +296,15 @@ def register_table_context(files: Sequence[Path], store: MappingStore,
     total = max(len(files), 1)
     for index, raw_path in enumerate(files):
         path = Path(raw_path)
-        if classify(path) != "docx":
+        kind = classify(path)
+        if kind not in ("docx", "pdf"):
             continue
         progress(f"Reading tables in {path.name}", index / total)
-        try:
-            tables = list(docx_processor.iter_tables(path))
-        except Exception:
-            continue
+        # A PDF has no table elements, only words with coordinates, so its
+        # columns are reconstructed from the gaps between them. Statements
+        # arrive as PDFs far more often than as DOCX, and without this the
+        # commonest input gets none of this pass.
+        tables = tables_in(path)
         for rows in tables:
             if not rows:
                 continue

@@ -68,25 +68,58 @@ def ocr_available() -> tuple[bool, str]:
 # --------------------------------------------------------------------------
 
 
+# The widest run of spaces a column gap is rendered as. Enough to break any
+# digit-run detector, capped so a mostly-empty line cannot produce a huge
+# string.
+MAX_GAP_SPACES = 12
+
+
 def _words_to_text(words) -> tuple[str, list[tuple[int, int, pymupdf.Rect]]]:
     """Join extracted words into text, remembering each word's span and box.
 
     Line breaks are preserved so the detectors and the allowlist see the same
     shape of text they would see in a DOCX.
+
+    Column gaps are preserved too, and that is not cosmetic. Joining every
+    same-line word with a single space destroys the column structure of a bank
+    statement, and a statement is nothing but columns. On a declaration's asset
+    schedule it put the account number one space from the money beside it:
+
+        Certificate of deposit 44-8821-0033 950.00 Joint
+
+    and the bare-digits card detector ran straight from one into the other,
+    matching "44-8821-0033 950" - which redacted most of a dollar figure.
+    Rendering a wide gap as a wide gap stops any digit-run detector crossing a
+    column, and has the side benefit that extracted text keeps the shape of the
+    table it came from.
     """
     pieces: list[str] = []
     spans: list[tuple[int, int, pymupdf.Rect]] = []
     cursor = 0
     previous_line = None
+    previous_x1 = 0.0
+    previous_width = 0.0
+    previous_len = 1
     for x0, y0, x1, y1, word, block, line, _no in words:
         if not word:
             continue
         key = (block, line)
         if previous_line is not None:
-            separator = " " if key == previous_line else "\n"
+            if key != previous_line:
+                separator = "\n"
+            else:
+                # one character's width on the previous word, as the yardstick
+                char = max(previous_width / max(previous_len, 1), 1.0)
+                gap = x0 - previous_x1
+                if gap < char * 1.4:
+                    separator = " "
+                else:
+                    separator = " " * min(MAX_GAP_SPACES,
+                                          max(2, int(round(gap / char))))
             pieces.append(separator)
             cursor += len(separator)
         previous_line = key
+        previous_x1, previous_width, previous_len = x1, x1 - x0, len(word)
         start = cursor
         pieces.append(word)
         cursor += len(word)
@@ -172,6 +205,66 @@ def iter_text_units(path: Path):
             text, _spans = _words_to_text(words)
             if text.strip():
                 yield text
+
+
+def iter_tables(path: Path):
+    """Rows of cells reconstructed from word geometry, one list per page.
+
+    A PDF has no table elements at all; it has words with coordinates. But a
+    statement, a pay stub and a tax form are all columns, and the column a
+    value sits under is its label just as surely as a ``<w:tc>`` header would
+    be. Without this the PDF path has no way to pair "Account / identifying
+    number" with the bare number three inches to its right, and every account
+    number on a declaration's asset schedule ships.
+
+    Cells are split where the horizontal gap between two words is wide enough
+    to be a column break rather than a word space - the same measurement
+    :func:`_words_to_text` uses. The shape it returns matches
+    ``docx_processor.iter_tables`` so the same pairing code reads both.
+    """
+    with pymupdf.open(path) as doc:
+        for page in doc:
+            words = page.get_text("words")
+            if len(page.get_text("text").strip()) < MIN_TEXT_CHARS:
+                continue                     # image-only; nothing to lay out
+            lines: dict[tuple[int, int], list] = {}
+            for x0, y0, x1, y1, word, block, line, no in words:
+                if word:
+                    lines.setdefault((block, line), []).append((x0, x1, word, no))
+            rows: list[list[str]] = []
+            for key in sorted(lines, key=lambda k: (k[0], k[1])):
+                items = sorted(lines[key], key=lambda w: w[0])
+                cells: list[list[str]] = []
+                previous_x1 = None
+                previous_char = 1.0
+                for x0, x1, word, _no in items:
+                    if previous_x1 is None or (x0 - previous_x1) < previous_char * 1.4:
+                        if not cells:
+                            cells.append([word])
+                        else:
+                            cells[-1].append(word)
+                    else:
+                        cells.append([word])
+                    previous_x1 = x1
+                    previous_char = max((x1 - x0) / max(len(word), 1), 1.0)
+                joined = [" ".join(cell) for cell in cells]
+                if any(joined):
+                    rows.append(joined)
+            # A page is not one table. Yield each run of consecutive lines that
+            # actually have columns, so the first line of a run is its heading
+            # row - which is what the caller treats row 0 as. A single-cell
+            # line is prose and ends the run; pairing prose lines with each
+            # other would invent labels that were never on the page.
+            block: list[list[str]] = []
+            for row in rows:
+                if len(row) >= 2:
+                    block.append(row)
+                    continue
+                if len(block) >= 2:
+                    yield block
+                block = []
+            if len(block) >= 2:
+                yield block
 
 
 def caption_sources(path: Path) -> dict[str, str]:
