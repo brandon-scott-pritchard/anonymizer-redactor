@@ -171,3 +171,34 @@ def test_the_app_window_is_allowed_to_save_files():
     webview.settings["ALLOW_DOWNLOADS"] = False       # whatever the default is
     assert desktop.enable_downloads(webview) is True
     assert webview.settings["ALLOW_DOWNLOADS"] is True
+
+
+def test_a_download_works_without_the_cookie(client, sample_docx):
+    """The app window's download task does not reliably carry the cookie.
+
+    It saved the 401 body under the archive's own filename, so the file looked
+    like it downloaded and then opened as "unsupported format". Every other
+    test here holds the cookie, which is exactly why none of them caught it.
+    """
+    with open(sample_docx, "rb") as handle:
+        client.post("/api/files", files=[
+            ("files", (sample_docx.name, handle,
+                       "application/vnd.openxmlformats-officedocument.wordprocessingml.document")),
+        ])
+    options = {"docx_mode": "anonymize", "ner": False, "ocr": False}
+    names = [{"name": "Jane Elizabeth Smith", "category": "person"}]
+    wait_for(client, client.post(
+        "/api/review", json={"options": options, "names": names}).json()["job"])
+    wait_for(client, client.post(
+        "/api/run", json={"options": options, "password": "correct horse"}).json()["job"])
+
+    token = client.get("/api/state").json()["download_token"]
+    client.cookies.clear()
+
+    assert client.get("/api/download/archive").status_code == 401
+    naked = client.get(f"/api/download/archive?token={token}")
+    assert naked.status_code == 200
+    assert naked.content[:4] == b"PK\x03\x04", "not a zip - this is the bug"
+
+    # the query token opens nothing else
+    assert client.get(f"/api/state?token={token}").status_code == 401

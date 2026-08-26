@@ -355,9 +355,15 @@ function ReviewStep({ state, actions, meta }) {
         onSave=${(changes) => actions.saveEditor(state.editing, changes)} />` : null}`;
 }
 
-function RunStep({ state, actions }) {
+function RunStep({ state, actions, meta }) {
   const active = state.entities.filter((e) => e.enabled).length;
   const result = state.runInfo;
+  // The token goes on the URL because a download is a plain navigation, and a
+  // web view runs it as a separate task that does not reliably carry the
+  // same-site cookie. Without this the app window saved the API's 401 body
+  // under the archive's name, which opens as "unsupported format".
+  const dl = (kind) => `/api/download/${kind}` +
+    (meta && meta.download_token ? `?token=${encodeURIComponent(meta.download_token)}` : "");
   return html`
     <div class="card">
       <h2>Run</h2>
@@ -381,9 +387,9 @@ function RunStep({ state, actions }) {
             ? `${result.failed} file(s) were refused or failed and are NOT in the archive.`
             : "Finished."}</p>
         <div class="downloads">
-          ${result.archive ? html`<a href="/api/download/archive"><button class="primary">Download archive</button></a>` : null}
-          ${result.key ? html`<a href="/api/download/key"><button>Download mapping key</button></a>` : null}
-          ${result.report ? html`<a href="/api/download/report"><button>Download report</button></a>` : null}
+          ${result.archive ? html`<a href=${dl("archive")} download><button class="primary">Download archive</button></a>` : null}
+          ${result.key ? html`<a href=${dl("key")} download><button>Download mapping key</button></a>` : null}
+          ${result.report ? html`<a href=${dl("report")} download><button>Download report</button></a>` : null}
         </div>
         ${result.key ? html`<p class="warn">Keep the mapping key and the report
           away from anything you deliver.</p>` : null}` : null}
@@ -611,7 +617,7 @@ function App() {
       ${step === 0 ? html`<${FilesStep} state=${state} set=${set} actions=${actions} />` : null}
       ${step === 1 ? html`<${NamesStep} state=${state} set=${set} actions=${actions} meta=${meta} />` : null}
       ${step === 2 ? html`<${ReviewStep} state=${state} actions=${actions} meta=${meta} />` : null}
-      ${step === 3 ? html`<${RunStep} state=${state} actions=${actions} />` : null}
+      ${step === 3 ? html`<${RunStep} state=${state} actions=${actions} meta=${meta} />` : null}
       <${Progress} busy=${busy} />
     </div>
   </div>`;

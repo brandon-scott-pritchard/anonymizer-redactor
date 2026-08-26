@@ -210,6 +210,20 @@ async def _require_token(request: Request, call_next):
     if request.url.path == "/" or request.url.path.startswith("/assets/"):
         return await call_next(request)
     supplied = request.cookies.get(COOKIE) or request.headers.get("x-auth-token")
+    # A download is a plain navigation, so it carries neither our header nor,
+    # in a web view, reliably even the cookie: WKWebView hands the transfer to
+    # a separate download task and the same-site cookie does not always come
+    # with it. What got saved was this function's 401 body under the name
+    # "anonymized-….zip", which opens as "unsupported format" - the download
+    # appeared to work and the file was four hundred bytes of JSON.
+    #
+    # So the download routes accept the token on the query string, exactly as
+    # "/" already does. The server is bound to 127.0.0.1, the token is random
+    # per process, and the alternative is a button that silently saves an
+    # error page.
+    if not secrets.compare_digest(supplied or "", TOKEN) \
+            and request.url.path.startswith("/api/download/"):
+        supplied = request.query_params.get("token", "")
     if not secrets.compare_digest(supplied or "", TOKEN):
         return JSONResponse({"detail": "unauthorized"}, status_code=401)
     return await call_next(request)
@@ -243,6 +257,9 @@ def state():
         "name_categories": ["person", "minor", "organization", "location"],
         "error_types": list(feedback.ERROR_TYPES),
         "ocr": {"ok": ocr_ok, "note": ocr_note},
+        # so the results screen can put it on the download links; see the
+        # middleware above for why a cookie is not enough
+        "download_token": TOKEN,
     }
 
 
