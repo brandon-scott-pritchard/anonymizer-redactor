@@ -184,6 +184,51 @@ def harvest(text: str, source: str = "") -> list[Party]:
     return list(found.values())
 
 
+# The addressee block: a name on its own line with a street address under it.
+# This is how every statement, bill and remittance coupon prints the account
+# holder, and it is the only place a statement names them at all.
+ADDRESSEE = re.compile(
+    rf"(?m)^[^\S\n]*({_NAME})[^\S\n]*$\n"
+    r"(?=[^\S\n]*\d{1,6}[A-Za-z]?[^\S\n]+[A-Za-z0-9])"
+)
+
+# "BRANDON PRITCHARD For account ending in 1234" - the running header on every
+# page after the first.
+FOR_ACCOUNT = re.compile(
+    rf"^[^\S\n]*({_NAME})[^\S\n]+(?i:for\s+account\s+(?:ending|number|no))",
+    re.MULTILINE)
+
+# A PO box under a name is the payee's lockbox, not where anybody lives.
+_PO_BOX = re.compile(r"(?i)^\s*(?:P\.?\s?O\.?\s+box|post\s+office\s+box)\b")
+
+
+def account_holders(text: str, source: str = "") -> list[Party]:
+    """Whoever the document is addressed to.
+
+    A pleading names its parties in the caption, so the name screen opens
+    pre-populated. A bank statement has no caption: it prints the account
+    holder once, in the address block on the remittance coupon, and again in
+    the running header of every later page. Nothing harvested either, so the
+    operator had to know to type their own name in - and if they did not, the
+    name shipped on every page while the card number beside it was redacted.
+    """
+    found: dict[str, Party] = {}
+    lines = text.splitlines()
+    for match in ADDRESSEE.finditer(text):
+        # the address line underneath decides whether this is a residence
+        tail = text[match.end():].splitlines()
+        if tail and _PO_BOX.match(tail[0]):
+            continue
+        name = " ".join(match.group(1).split()).strip(" ,.")
+        if _acceptable(name) and len(name.split()) >= 2:
+            found.setdefault(name.casefold(), Party(name, source, "person"))
+    for match in FOR_ACCOUNT.finditer(text):
+        name = " ".join(match.group(1).split()).strip(" ,.")
+        if _acceptable(name) and len(name.split()) >= 2:
+            found.setdefault(name.casefold(), Party(name, source, "person"))
+    return list(found.values())
+
+
 def employers(text: str, source: str = "") -> list[Party]:
     """The employer a financial document names.
 
@@ -218,7 +263,8 @@ def harvest_documents(regions: dict[str, str],
     for source, text in regions.items():
         for party in [*harvest(text, source),
                       *from_tables(tables.get(source, ()), source),
-                      *employers(text, source)]:
+                      *employers(text, source),
+                      *account_holders(text, source)]:
             if party.key in avoid:
                 continue
             merged.setdefault(party.key, party)

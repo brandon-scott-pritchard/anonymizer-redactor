@@ -549,16 +549,21 @@ DETECTORS: tuple[Detector, ...] = (
     # (right for emails, wrong for a masked account). Priority 72 sits below
     # every labelled financial detector, so a labelled hit still wins.
     _d("masked_account", rf"(?<![\w\-]){V_MASKED}(?![\w\-])", priority=72, digit=True),
+    # The OCR scanline across the foot of a remittance coupon. It encodes the
+    # account number and the amount due, and nothing else in a document is
+    # twenty unbroken digits, so it needs no label.
+    _d("bank_account", r"(?<![\d\-])\d{20,60}(?![\d\-])", priority=74, digit=True),
 
     # ----------------------------------------------------------- property ----
-    # Horizontal whitespace only, every time. A plain \s+ crosses the line
-    # break, and on a statement the line above ends in a dollar figure: the
-    # detector matched "66\nSummit Ridge" as a street address and took
-    # "2,184.66" off the end of the previous row with it. A street address is
-    # on one line.
+    # A street address wraps - "771 N" and "1200 E" land on separate lines in a
+    # payment coupon all the time - so this has to cross the newline. What it
+    # must not do is start on the tail of a dollar figure: it matched
+    # "66\nSummit Ridge" and deleted "2,184.66" from the row above. Blocking a
+    # digit, comma or period before the street number is what separates the two,
+    # and it is exact: "2,184.66" cannot open an address, "771 N 1200 E" can.
     _d("street_address",
-       r"\b\d{1,6}[A-Z]?[^\S\n]+(?:(?:North|South|East|West|N\.?|S\.?|E\.?|W\.?|NE|NW|SE|SW)[^\S\n]+)?"
-       r"(?:[A-Z0-9][\w'\-]*\.?[^\S\n]+){0,4}"
+       r"(?<![\d.,])\b\d{1,6}[A-Z]?\s+(?:(?:North|South|East|West|N\.?|S\.?|E\.?|W\.?|NE|NW|SE|SW)\s+)?"
+       r"(?:[A-Z0-9][\w'\-]*\.?\s+){0,4}"
        r"(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Circle|Cir|Way|Wy|"
        r"Place|Pl|Terrace|Ter|Parkway|Pkwy|Highway|Hwy|Trail|Trl|Loop|Square|Sq|Plaza|Alley|Route|Rte|"
        # A subdivision names its streets Bend, Row, Run and Crossing as readily
@@ -575,7 +580,7 @@ DETECTORS: tuple[Detector, ...] = (
     _d("street_address",
        # same one-line rule as above; only the trailing city/state/ZIP is
        # allowed to wrap, because a real address block wraps exactly there
-       r"(?<![\w\-])\d{2,5}[^\S\n]+(?:North|South|East|West|N|S|E|W)\.?[^\S\n]+\d{2,5}[^\S\n]+"
+       r"(?<![\w\-.,])\d{2,5}\s+(?:North|South|East|West|N|S|E|W)\.?\s+\d{2,5}\s+"
        r"(?:North|South|East|West|N|S|E|W)\b\.?"
        r"(?:\s*,?\s*(?:Apt\.?|Apartment|Unit|Suite|Ste\.?|Bldg\.?|#)\s*[\w\-]+)?"
        r"(?:\s*,?\s*[A-Z][\w'\-]*(?:\s+[A-Z][\w'\-]*){0,2}\s*,?\s*"

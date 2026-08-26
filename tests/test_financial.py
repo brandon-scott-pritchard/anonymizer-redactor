@@ -476,3 +476,54 @@ def test_a_street_address_never_spans_a_line_break(line):
     the redaction box then deleted a dollar amount nobody had matched.
     """
     assert scanned(line) == []
+
+
+# ---------------------------------------------------------------------------
+# the account holder, who a statement never puts in a caption
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("JORDAN MICHAELS\n442 N 1600 E\nOREM UT 84057-2051", ["JORDAN MICHAELS"]),
+    ("JORDAN MICHAELS For account ending in\nPage", ["JORDAN MICHAELS"]),
+    ("Amount\nEnclosed\n514\nJordan Michaels\n442 N 1600 E", ["Jordan Michaels"]),
+])
+def test_the_addressee_on_a_statement_is_proposed(text, expected):
+    """A pleading names its parties in the caption; a statement has no caption.
+
+    It prints the account holder once on the remittance coupon and again in
+    every later page's running header, and nothing harvested either - so the
+    operator had to know to type their own name, and the name shipped on every
+    page while the card number beside it was redacted.
+    """
+    assert sorted(p.name for p in transactions.account_holders(text)) == sorted(expected)
+
+
+@pytest.mark.parametrize("text", [
+    # a lockbox under a name is the payee, not a residence
+    "Wells Fargo Bank, N.A.\nP.O. Box 51193\nDes Moines, IA 50306-0522",
+    "Account Summary\nPrevious Balance $360.89",
+])
+def test_a_payee_lockbox_is_not_the_account_holder(text):
+    assert transactions.account_holders(text) == []
+
+
+def test_a_street_address_may_wrap_but_may_not_start_on_a_dollar_figure():
+    """Both halves of this matter and they pull against each other.
+
+    A coupon wraps "771 N" and "1200 E" onto separate lines, so the detector
+    has to cross the newline. But it must not start on the tail of an amount:
+    matching "66\nSummit Ridge" is what deleted "2,184.66" from the row above.
+    """
+    assert any(c == "street_address" for _, c in scanned("442 N\n1600 E"))
+    assert any(c == "street_address" for _, c in scanned("442 N 1600 E"))
+    assert scanned("34,116.00   985.00\nSummit Ridge Bank HELOC") == []
+    assert scanned("Balance 2,184.66\nSummit Ridge Bank") == []
+
+
+def test_the_coupon_scanline_is_caught():
+    """Twenty unbroken digits is a machine code, and this one holds the account."""
+    line = "00023337000623950000250044654004496347265"
+    assert (line, "bank_account") in scanned(line)
+    # a shorter run still needs its label
+    assert scanned("0002333700") == []

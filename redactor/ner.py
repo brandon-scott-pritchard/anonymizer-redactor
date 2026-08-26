@@ -32,7 +32,8 @@ _ORG_MARKERS = frozenset({
     "bank", "credit", "union", "church", "school", "district", "university",
     "college", "hospital", "clinic", "court", "county", "city", "state",
     "department", "dept", "agency", "bureau", "associates", "group", "firm",
-    "partners", "partnership", "trust", "foundation", "services", "insurance",
+    "partners", "partnership", "trust", "foundation", "services", "service",
+    "customer", "insurance",
     "realty", "properties", "enterprises", "industries", "&",
     # medical and dental practices, which the model reads as people: a real
     # decree proposed "Cascade Pediatric Dentistry" and "Wasatch Valley Pediatrics"
