@@ -4,7 +4,7 @@ import gzip
 
 import pytest
 
-from redactor import caption, engine, mapping, pipeline, places
+from redactor import caption, engine, mapping, pipeline, places, review
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +183,23 @@ def test_the_gazetteer_never_gates_name_harvesting():
 # ---------------------------------------------------------------------------
 # through the pipeline
 # ---------------------------------------------------------------------------
+
+
+def test_a_ticked_place_is_replaced_in_every_casing():
+    """A statement header shouts the city; the body writes it normally."""
+    store, _ = review.build_store([("South Jordan", "location"), ("Provo", "location")])
+    matcher = engine.EntityMatcher(store, engine.Settings())
+    text = ("BIG SKY CREDIT UNION\n900 MAIN ST\nSOUTH JORDAN UT 84095\n"
+            "Petitioner resides in South Jordan and works in Provo.\n"
+            "Return to south jordan by Friday.\n")
+    hits = matcher.find_values(text, [], False)
+    replaced = {text[h.start:h.end]: h.replacement for h in hits}
+    assert replaced == {
+        "SOUTH JORDAN": "[LOCATION-1]",
+        "South Jordan": "[LOCATION-1]",
+        "south jordan": "[LOCATION-1]",
+        "Provo": "[LOCATION-2]",
+    }
 
 
 def test_places_are_proposed_even_with_the_model_switched_off(sample_docx):
