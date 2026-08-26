@@ -166,7 +166,7 @@ def test_officers_are_harvested_from_a_real_document(sample_docx):
     bench = pipeline.collect_officials([sample_docx])
     names = {o.name.casefold() for o in bench}
     assert "amber m. cordova" in names
-    assert "russell minas" in names
+    assert "delia farnsworth" in names
 
 
 def test_a_whole_docx_run_leaves_the_signing_judge_alone(sample_docx, tmp_path):
@@ -185,7 +185,7 @@ def test_a_whole_docx_run_leaves_the_signing_judge_alone(sample_docx, tmp_path):
 
     assert "Amber M. Cordova" in body
     assert "District Court Judge" in body
-    assert "Russell Minas" in body
+    assert "Delia Farnsworth" in body
     assert "Jane Elizabeth Smith" not in body, "the client must still be replaced"
 
 

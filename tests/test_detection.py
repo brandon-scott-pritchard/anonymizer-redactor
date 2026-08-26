@@ -44,7 +44,7 @@ def test_judicial_officers_are_never_touched(sample_text):
     protected = patterns.allowlist_spans(sample_text)
     covered = " ".join(sample_text[s:e] for s, e in protected)
     assert "Judge Amber M. Cordova" in covered
-    assert "Commissioner Russell Minas" in covered
+    assert "Commissioner Delia Farnsworth" in covered
 
 
 def test_a_bare_number_that_fails_luhn_is_not_a_card():

@@ -15,7 +15,7 @@ JOHN MICHAEL SMITH,
 
 Case No. 224900871
 Judge Amber M. Cordova
-Commissioner Russell Minas
+Commissioner Delia Farnsworth
 """
 
 BODY_LINES = [
@@ -50,7 +50,7 @@ SECRETS = [
     "224900871", "04/17/1985", "Smith",
 ]
 
-PRESERVED = ["Judge Amber M. Cordova", "Commissioner Russell Minas", "Rule 26",
+PRESERVED = ["Judge Amber M. Cordova", "Commissioner Delia Farnsworth", "Rule 26",
              "Utah Code Ann. Section 30-3-5",
              # the signing block, where the title follows the name
              "Amber M. Cordova\nDistrict Court Judge"]
