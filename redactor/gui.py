@@ -28,8 +28,8 @@ from tkinter import ttk
 
 import webbrowser
 
-from . import (__version__, caption, categories, feedback, ner, pdf_processor,
-               pipeline, review)
+from . import (__version__, caption, categories, feedback, names as _names, ner,
+               officials, pdf_processor, pipeline, review)
 from .engine import Settings
 from .mapping import MappingStore
 
@@ -256,6 +256,11 @@ class App(Tk):
         self.files: list[Path] = []
         self.store = MappingStore()
         self.caption_names: list[caption.CaptionName] = []
+        # the bench: harvested from the documents, never redacted
+        self.judicial_officers: list[officials.Official] = []
+        self.protection = officials.Protection([], [], [])
+        # ticked names one longer ticked name already covers
+        self.overlaps: list[_names.Overlap] = []
         self.suggestions: list[ner.Suggestion] = []
         self.disabled_categories: set[str] = set()
         self.run_result: pipeline.RunResult | None = None
@@ -558,8 +563,12 @@ class App(Tk):
             self.suggest_tree.bind(button, lambda e: self._tree_menu(
                 self.suggest_tree, self._edit_suggestion_row, e))
 
+        self.guard_label = ttk.Label(frame, justify="left", anchor="w",
+                                     wraplength=1040, style="Hint.TLabel", text="")
+        self.guard_label.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+
         buttons = ttk.Frame(frame)
-        buttons.grid(row=3, column=0, columnspan=2, sticky="ew")
+        buttons.grid(row=4, column=0, columnspan=2, sticky="ew")
         self._button(buttons, text="Add ticked to the name list →",
                    command=self.add_checked_suggestions).pack(side="left")
         self._button(buttons, text="Tick all", command=lambda: self._set_all_suggestions(True)).pack(side="left", padx=6)
@@ -568,7 +577,7 @@ class App(Tk):
         self._button(buttons, text="Scan documents for more names",
                    command=self.scan_for_suggestions).pack(side="left", padx=6)
 
-        self._nav_bar(frame, row=4, columnspan=2, back=self.tab_files,
+        self._nav_bar(frame, row=5, columnspan=2, back=self.tab_files,
                       next_text="Continue to review →", next_command=self.go_to_review)
 
     # ---------------------------------------------------------- tab three --
@@ -700,6 +709,7 @@ class App(Tk):
             enabled_categories=enabled,
             use_ner=self.opt_ner.get(),
             extra_allowlist=extra,
+            protected_names=list(self.protection.terms),
             scrub_metadata=self.opt_metadata.get(),
             scrub_comments=self.opt_comments.get(),
             scrub_embedded=self.opt_embedded.get(),
@@ -725,24 +735,41 @@ class App(Tk):
 
     def refresh_captions(self):
         files = list(self.files)
-        self._work(
-            "Reading captions",
-            lambda report: pipeline.collect_caption_names(files, report),
-            self._captions_ready,
-        )
 
-    def _captions_ready(self, names):
+        def work(report):
+            found = pipeline.collect_caption_names(files, report)
+            # the bench comes off the same read: judicial officers are shielded
+            # for the whole run rather than proposed as parties
+            bench = pipeline.collect_officials(files, report)
+            return found, bench
+
+        self._work("Reading captions", work, self._captions_ready)
+
+    def _captions_ready(self, payload):
+        names, bench = payload
         self.caption_names = names
+        self.judicial_officers = bench
+        self._refresh_protection()
         self._render_suggestions()
         if names:
             self.status.set(f"{len(names)} name(s) proposed from the document captions.")
         else:
             self.status.set("No caption names recognised - add them by hand.")
 
+    def _prepare(self) -> tuple[Settings, MappingStore]:
+        """Settings and a store for one step, do-not-change list brought current.
+
+        Order matters: the store pass is what finds overlapping names, and the
+        protection pass needs the finished name list to know which surnames a
+        party has a claim on. Both must land before settings() is read.
+        """
+        store = self._store_with_names()
+        self._refresh_protection()
+        return self.settings(), store
+
     def scan_for_suggestions(self):
         files = list(self.files)
-        settings = self.settings()
-        store = self._store_with_names()
+        settings, store = self._prepare()
         captions = list(self.caption_names)
         self._work(
             "Scanning for additional names",
@@ -908,15 +935,34 @@ class App(Tk):
         return out
 
     def _store_with_names(self) -> MappingStore:
-        store = MappingStore()
         roles = {item.name.casefold(): item.role for item in self.caption_names}
-        for name, category in self.name_lines():
-            if category in {"organization", "location"}:
-                store.add_value(category, name, source="name-list")
-            else:
-                store.add_person(name, category=category,
-                                 role=roles.get(name.casefold(), ""), source="name-list")
+        store, overlaps = review.build_store(self.name_lines(), roles)
+        self.overlaps = overlaps
         return store
+
+    def _refresh_protection(self) -> None:
+        """Rebuild the do-not-change list against the current name list.
+
+        A judge who shares a surname with a party keeps only their full name
+        shielded, so this has to follow the name list rather than the files.
+        """
+        parties = [name for name, _category in self.name_lines()]
+        self.protection = officials.protected_terms(self.judicial_officers,
+                                                    avoid=parties)
+        self._render_guard()
+
+    def _render_guard(self) -> None:
+        if not hasattr(self, "guard_label"):
+            return
+        lines: list[str] = []
+        if self.judicial_officers:
+            named = ", ".join(f"{o.title} {o.name}" for o in self.judicial_officers)
+            lines.append(f"Left alone on the bench: {named}. "
+                         f"Every written form of those names survives the run.")
+        for note in self.protection.notes():
+            lines.append(note)
+        lines.extend(review.overlap_notes(self.overlaps))
+        self.guard_label.configure(text="\n".join(lines))
 
     # ------------------------------------------------------------ review --
     def go_to_review(self):
@@ -929,11 +975,19 @@ class App(Tk):
         # each row's tick, type override and edited replacement, matched by
         # the found text
         carryover = review.snapshot_decisions(self.store)
-        store = self._store_with_names()
-        settings = self.settings()
+        settings, store = self._prepare()
         files = list(self.files)
+        bench_known = bool(self.judicial_officers)
+        # read off the widget here, on the UI thread - the worker must not touch Tk
+        parties = [name for name, _category in self.name_lines()]
 
         def work(report):
+            # reaching review without ever opening the name screen would
+            # otherwise run with nothing on the bench shielded at all
+            if not bench_known:
+                found = pipeline.collect_officials(files, report)
+                settings.protected_names = list(
+                    officials.protected_terms(found, avoid=parties).terms)
             pipeline.prescan(files, store, settings, report)
             review.carry_decisions(store, carryover)
             return store

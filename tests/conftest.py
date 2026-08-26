@@ -31,6 +31,17 @@ BODY_LINES = [
     "10. Passport number 561998223; medical record number MRN-88213; policy number POL-773322.",
 ]
 
+# How a court actually signs an order: the title lands on the line *after* the
+# name. Kept in the fixtures because the caption's "Judge Amber M. Cordova" is
+# the one layout that was always shielded, so it hid the gap on its own.
+SIGNATURE = """
+BY THE COURT:
+
+_______________________________
+Amber M. Cordova
+District Court Judge
+"""
+
 SECRETS = [
     "528-41-9963", "jane.smith1985@gmail.com", "(801) 555-0184", "801-555-0199",
     "1482 South Elmwood", "000148829371", "124000054", "RT-99183772",
@@ -40,12 +51,14 @@ SECRETS = [
 ]
 
 PRESERVED = ["Judge Amber M. Cordova", "Commissioner Russell Minas", "Rule 26",
-             "Utah Code Ann. Section 30-3-5"]
+             "Utah Code Ann. Section 30-3-5",
+             # the signing block, where the title follows the name
+             "Amber M. Cordova\nDistrict Court Judge"]
 
 
 @pytest.fixture(scope="session")
 def sample_text():
-    return CAPTION + "\n" + "\n".join(BODY_LINES)
+    return CAPTION + "\n" + "\n".join(BODY_LINES) + "\n" + SIGNATURE
 
 
 @pytest.fixture(scope="session")
@@ -71,6 +84,8 @@ def sample_docx(tmp_path_factory):
         para.add_run(chunk)
     for line in BODY_LINES[1:]:
         document.add_paragraph(line)
+    for line in SIGNATURE.strip("\n").splitlines():
+        document.add_paragraph(line)
 
     table = document.add_table(rows=1, cols=2)
     table.cell(0, 0).text = "VIN"
@@ -91,7 +106,8 @@ def sample_pdf(tmp_path_factory):
     page2 = doc.new_page()
     page2.insert_text((50, 40), "Smith v. Smith, Case No. 224900871 - Page 2",
                       fontsize=8, fontname="helv")
-    page2.insert_text((50, 80), "\n".join(BODY_LINES[6:]), fontsize=9, fontname="helv")
+    page2.insert_text((50, 80), "\n".join(BODY_LINES[6:]) + "\n" + SIGNATURE,
+                      fontsize=9, fontname="helv")
     doc.set_metadata({"author": "Marcus T. Whitfield", "title": "Smith Divorce",
                       "subject": "SSN 528-41-9963"})
     doc.save(path)

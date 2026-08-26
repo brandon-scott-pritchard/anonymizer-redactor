@@ -13,6 +13,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from itertools import combinations
+from typing import Sequence
 
 TITLES = ("Mr", "Mrs", "Ms", "Miss", "Dr", "Prof", "Rev", "Hon", "Sir", "Madam", "Mx")
 SUFFIXES = ("Jr", "Sr", "II", "III", "IV", "V", "Esq", "MD", "PhD", "JD", "CPA", "RN")
@@ -281,6 +282,68 @@ def richness(person: PersonName) -> tuple[int, int, int]:
     return (len(person.middles),
             sum(len(m.strip(".")) for m in person.middles),
             len(person.first.strip(".")))
+
+
+@dataclass(frozen=True)
+class Overlap:
+    """A ticked name that is already a written form of another ticked name."""
+
+    inner: str          # the shorter form, e.g. "Smith"
+    outer: str          # the name it is a written form of, e.g. "Jane E. Smith"
+    merge: bool         # True when exactly one longer name claims it
+
+    @property
+    def note(self) -> str:
+        if self.merge:
+            return (f"“{self.inner}” is already how “{self.outer}” gets "
+                    f"written. Kept as one person so both spellings get the same "
+                    f"pseudonym.")
+        return (f"“{self.inner}” could be {self.outer} or someone else on the "
+                f"list. Left on its own, so it gets its own pseudonym - spell it out "
+                f"if that is wrong.")
+
+
+def overlapping_names(entries: Sequence[str]) -> list[Overlap]:
+    """Ticked names that are contained in other ticked names.
+
+    ``Smith`` on its own alongside ``Jane Elizabeth Smith`` is not a second
+    person: it is one of the forms the matcher already generates for the first.
+    Registered separately it becomes a second entity with a second surrogate, so
+    the same surname comes back as ``Doe`` in one sentence and ``[PERSON-2]`` in
+    the next.
+
+    Pairs :func:`same_person` already merges are left out - the store handles
+    those itself, and reporting them would be noise.  What comes back is the
+    residue: partial forms nothing else resolves.
+    """
+    cleaned: list[str] = []
+    for raw in entries:
+        text = " ".join(str(raw).split())
+        if text and not any(text.casefold() == seen.casefold() for seen in cleaned):
+            cleaned.append(text)
+
+    parsed = {text: parse(text) for text in cleaned}
+    forms = {text: {v.text.casefold() for v in variants(parsed[text])}
+             for text in cleaned}
+
+    claims: dict[str, list[str]] = {}
+    for inner in cleaned:
+        key = inner.casefold()
+        for outer in cleaned:
+            if outer.casefold() == key:
+                continue
+            if key not in forms[outer]:
+                continue
+            if same_person(parsed[inner], parsed[outer]):
+                continue          # the store merges these on its own
+            claims.setdefault(inner, []).append(outer)
+
+    out: list[Overlap] = []
+    for inner, outers in claims.items():
+        merge = len(outers) == 1
+        for outer in outers:
+            out.append(Overlap(inner=inner, outer=outer, merge=merge))
+    return out
 
 
 def escape_token(token: str) -> str:

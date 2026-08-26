@@ -45,6 +45,10 @@ class Settings:
     include_single_token_names: bool = True
     use_ner: bool = True
     extra_allowlist: list[str] = field(default_factory=list)
+    # Judicial officers harvested off the documents themselves - see
+    # redactor.officials. Kept apart from the operator's own allowlist so the
+    # report can say which names the bench put there and why.
+    protected_names: list[str] = field(default_factory=list)
     scrub_metadata: bool = True
     scrub_comments: bool = True
     scrub_embedded: bool = True
@@ -58,6 +62,11 @@ class Settings:
 
     def category_enabled(self, key: str) -> bool:
         return key in self.enabled_categories
+
+    @property
+    def do_not_change(self) -> list[str]:
+        """Every literal string this run must leave alone."""
+        return [*self.extra_allowlist, *self.protected_names]
 
 
 @dataclass(frozen=True)
@@ -279,7 +288,7 @@ def scan_text(
         return []
 
     redact = settings.docx_mode == "redact"
-    protected = patterns.allowlist_spans(text, settings.extra_allowlist)
+    protected = patterns.allowlist_spans(text, settings.do_not_change)
     matcher = matcher or EntityMatcher(store, settings)
 
     hits: list[Hit] = list(matcher.find(text, protected, redact))

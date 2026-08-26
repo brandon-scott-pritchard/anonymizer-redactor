@@ -26,7 +26,8 @@ from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, caption, categories, feedback, ner, pipeline, review
+from . import (__version__, caption, categories, feedback, names as _names, ner,
+               officials, pipeline, review)
 from .engine import Settings
 from .mapping import MappingStore
 
@@ -70,7 +71,10 @@ class Session:
         self.files: list[Path] = []
         self.store = MappingStore()
         self.caption_names: list[caption.CaptionName] = []
+        self.officials: list[officials.Official] = []
+        self.protection = officials.Protection([], [], [])
         self.suggestions: list[ner.Suggestion] = []
+        self.overlaps: list[_names.Overlap] = []
         self.run_result: pipeline.RunResult | None = None
         self.jobs: dict[str, Job] = {}
         self.busy = threading.Lock()
@@ -110,6 +114,7 @@ def _settings(options: dict) -> Settings:
         docx_mode=options.get("docx_mode", "anonymize"),
         use_ner=bool(options.get("ner", True)),
         extra_allowlist=extra,
+        protected_names=list(SESSION.protection.terms),
         scrub_metadata=bool(options.get("metadata", True)),
         scrub_comments=bool(options.get("comments", True)),
         scrub_embedded=bool(options.get("embedded", True)),
@@ -120,20 +125,51 @@ def _settings(options: dict) -> Settings:
     )
 
 
-def _store_from_names(lines: list[dict]) -> MappingStore:
-    store = MappingStore()
-    roles = {c.name.casefold(): c.role for c in SESSION.caption_names}
+def _name_entries(lines: list[dict]) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
     for line in lines:
         name = (line.get("name") or "").strip()
-        category = line.get("category", "person")
-        if not name:
-            continue
-        if category in {"organization", "location"}:
-            store.add_value(category, name, source="name-list")
-        else:
-            store.add_person(name, category=category,
-                             role=roles.get(name.casefold(), ""), source="name-list")
-    return store
+        if name:
+            out.append((name, line.get("category", "person")))
+    return out
+
+
+def _reprotect(entries: list[tuple[str, str]]) -> list[str]:
+    """Rebuild the do-not-change list against the current party names."""
+    SESSION.protection = officials.protected_terms(
+        SESSION.officials, avoid=[name for name, _category in entries])
+    return list(SESSION.protection.terms)
+
+
+def _prepare(body: dict) -> tuple[Settings, MappingStore, list[tuple[str, str]]]:
+    """Settings and a store for one request, do-not-change list refreshed.
+
+    The judicial protection list depends on the party names - a judge sharing a
+    surname with a client gets the full name shielded and nothing more - so it
+    is rebuilt whenever the name list changes, not once when the files landed.
+    """
+    entries = _name_entries(body.get("names", []))
+    _reprotect(entries)
+    settings = _settings(body.get("options", {}))
+    roles = {c.name.casefold(): c.role for c in SESSION.caption_names}
+    store, overlaps = review.build_store(entries, roles)
+    SESSION.overlaps = overlaps
+    return settings, store, entries
+
+
+def _guard_payload() -> dict:
+    """What the run will leave alone, and which names were folded together."""
+    protection = SESSION.protection
+    return {
+        "officials": [{"name": o.name, "title": o.title,
+                       "confidence": o.confidence, "source": o.source}
+                      for o in SESSION.officials],
+        "protected": list(protection.terms),
+        "guard_notes": protection.notes(),
+        "overlaps": [{"inner": o.inner, "outer": o.outer,
+                      "merge": o.merge, "note": o.note}
+                     for o in SESSION.overlaps],
+    }
 
 
 def _entity_row(entity) -> dict:
@@ -253,9 +289,14 @@ def captions():
     def work(progress):
         found = pipeline.collect_caption_names(files, progress)
         SESSION.caption_names = found
+        # the bench, harvested at the same time: their names are shielded for
+        # the whole run rather than proposed as parties
+        SESSION.officials = pipeline.collect_officials(files, progress)
+        SESSION.protection = officials.protected_terms(SESSION.officials)
         return {"captions": [
             {"name": c.name, "role": c.role, "confidence": c.confidence,
-             "source": c.source, "category": c.category} for c in found]}
+             "source": c.source, "category": c.category} for c in found],
+            **_guard_payload()}
 
     return {"job": _start_job(work)}
 
@@ -264,8 +305,7 @@ def captions():
 async def suggestions(request: Request):
     body = await request.json()
     files = list(SESSION.files)
-    settings = _settings(body.get("options", {}))
-    store = _store_from_names(body.get("names", []))
+    settings, store, _entries = _prepare(body)
     captions_now = list(SESSION.caption_names)
 
     def work(progress):
@@ -275,7 +315,7 @@ async def suggestions(request: Request):
         return {"suggestions": [
             {"text": s.text, "category": s.category, "count": s.count,
              "documents": sorted(s.documents)} for s in found],
-            "notes": notes}
+            "notes": notes, **_guard_payload()}
 
     return {"job": _start_job(work)}
 
@@ -289,15 +329,19 @@ async def suggestions(request: Request):
 async def build_review(request: Request):
     body = await request.json()
     files = list(SESSION.files)
-    settings = _settings(body.get("options", {}))
     carryover = review.snapshot_decisions(SESSION.store)
-    store = _store_from_names(body.get("names", []))
+    settings, store, entries = _prepare(body)
 
     def work(progress):
+        # reaching review without ever opening the name screen would otherwise
+        # run with nothing shielded at all
+        if not SESSION.officials:
+            SESSION.officials = pipeline.collect_officials(files, progress)
+            settings.protected_names = _reprotect(entries)
         pipeline.prescan(files, store, settings, progress)
         review.carry_decisions(store, carryover)
         SESSION.store = store
-        return _entities_payload()
+        return {**_entities_payload(), **_guard_payload()}
 
     return {"job": _start_job(work)}
 

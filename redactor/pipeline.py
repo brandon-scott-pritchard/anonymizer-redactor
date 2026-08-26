@@ -10,7 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
-from . import caption, categories, docx_processor, engine, mapping, ner, pdf_processor
+from . import (caption, categories, docx_processor, engine, mapping, ner,
+               officials, pdf_processor)
 from .engine import PersonMatcher, Settings
 from .mapping import MappingStore
 
@@ -49,6 +50,35 @@ def collect_caption_names(files: Sequence[Path], progress: Progress = _noop) -> 
             continue
     trimmed = {label: caption.caption_region(text) for label, text in regions.items()}
     return caption.harvest_documents(trimmed)
+
+
+def collect_officials(files: Sequence[Path],
+                      progress: Progress = _noop) -> list[officials.Official]:
+    """Judicial officers named anywhere in the batch.
+
+    Reads whole documents rather than the caption region: the caption carries
+    the assigned judge, but the officer who actually signed an order is in the
+    block at the very bottom, and both have to survive the run untouched.
+    """
+    found: dict[str, str] = {}
+    total = max(len(files), 1)
+    for index, raw_path in enumerate(files):
+        path = Path(raw_path)
+        progress(f"Reading {path.name} for judicial officers", index / total)
+        kind = classify(path)
+        try:
+            if kind == "docx":
+                parts = docx_processor.extract_text(path)
+            elif kind == "pdf":
+                parts = pdf_processor.extract_text(path)
+            else:
+                continue
+        except Exception:
+            continue
+        for part, text in parts.items():
+            if text.strip():
+                found[f"{path.name} [{Path(part).name}]"] = text
+    return officials.harvest_documents(found)
 
 
 # --------------------------------------------------------------------------
@@ -98,7 +128,7 @@ def collect_suggestions(
     from . import patterns
 
     protected = {
-        label: patterns.allowlist_spans(text, settings.extra_allowlist)
+        label: patterns.allowlist_spans(text, settings.do_not_change)
         for label, text in texts.items()
     }
     progress("Reviewing documents for additional names", 0.6)
@@ -114,6 +144,11 @@ def collect_suggestions(
     for item in caption_names or ():
         known.add(item.name.casefold())
         known.update(token.casefold() for token in item.name.split())
+    # a judge proposed as a person is the one suggestion nobody should be able
+    # to tick by accident
+    for term in settings.protected_names:
+        known.add(term.casefold())
+        known.update(token.casefold() for token in term.split())
 
     filtered = [s for s in raw if s.text.casefold() not in known]
     notes.append(note)
@@ -445,6 +480,22 @@ def write_report(result: RunResult, store: MappingStore, settings: Settings,
             add(f"  {categories.label_for(key):38s} {entities:4d} distinct   {hits:5d} replaced")
     else:
         add("  (nothing matched)")
+    add("")
+
+    add("LEFT UNTOUCHED ON PURPOSE")
+    add("-" * 62)
+    if settings.protected_names:
+        add("  Judicial officers found in these documents. A judge is not a party,")
+        add("  and an order that comes back with the bench renamed reads as tampered")
+        add("  with. Every form of these names was shielded:")
+        for term in settings.protected_names:
+            add(f"      {term}")
+    else:
+        add("  No judicial officer was found in these documents.")
+    if settings.extra_allowlist:
+        add("  Terms you added to the allowlist yourself:")
+        for term in settings.extra_allowlist:
+            add(f"      {term}")
     add("")
 
     add("NOT COVERED BY THIS RUN")

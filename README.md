@@ -136,6 +136,12 @@ Two things happen behind the scenes that matter:
   one adjacent transposition (`Jonh`) away from a registered name resolves to
   that person. Tokens under 4 characters stay exact-only, so ordinary words
   are never typo-matched.
+- A second pass catches names that swallow each other. Tick `Smith` alongside
+  `Jane Elizabeth Smith` and the two fold into one person, because `Smith` is
+  already one of the forms the first name generates—left apart they would get
+  two different pseudonyms and the surname would come out inconsistent. When
+  the short form is genuinely ambiguous (`Smith` with two Smiths on the list)
+  nothing is guessed: both stay, and the Names screen says why.
 
 Press Scan documents for more names and the offline spaCy model proposes
 people, organizations and places the rules cannot see. It only ever proposes;
@@ -189,9 +195,36 @@ Protected automatically, because a pleading stops making sense without them:
 - Statutes and codes in every written form—`§ 30-3-5`, `Section 30-3-5`, `Sec. 1983`, `Sec 78B-12-202`
 - Rules of procedure and evidence (`Rule 26`, `Fed. R. Civ. P. 12(b)`, `Utah R. Civ. P. 26`)
 - Reported citations, including the party names in cited authority (`Jones v. Jones, 2019 UT App 12`)
-- Judges, commissioners, justices, magistrates
 - Court names, judicial districts, clerks of court
 
+**Judicial officers get their own pass.** Before anything is scanned, the tool
+reads every document looking for the bench—captions, running headers and the
+signing block at the bottom—and puts what it finds on a do-not-change list that
+holds for the whole batch. It reads all the layouts a court actually prints:
+
+```
+Judge Amber M. Cordova              Judge: Amber M. Cordova
+Assigned Judge: Amber M. Cordova    Before the Honorable Amber M. Cordova
+AMBER M. CORDOVA, District Court Judge
+
+BY THE COURT:
+_______________________
+Amber M. Cordova
+District Court Judge
+```
+
+That list covers the name everywhere it appears afterward, not just where the
+title sits beside it—so a later "the Cordova ruling" survives too. A judge is
+not a party, and an order that comes back with the bench renamed reads as
+tampered with.
+
+One exception, and it goes the other way: if a judge shares a surname with
+somebody on your name list, the client wins. Only the judge's full name is
+shielded, the bare surname follows the client's pseudonym, and the Names screen
+tells you that is what happened. Shielding a shared surname would ship the
+client's name in every sentence it appears in, which is the worse failure.
+
+Whoever it found is listed on the Names screen and named in the run report.
 Add your own never-touch terms in the box on the first screen.
 
 ### Beyond the body text
@@ -275,10 +308,11 @@ the language model, and copy the result back into `dist/`.
 ~/.venvs/anonymizer-redactor/bin/python -m pytest tests/ -q
 ```
 
-161 tests covering detector accuracy, allowlist protection, name-variant
-expansion and merging, typo matching, surrogate determinism, image redaction,
-mapping-key encryption, the web API, and end-to-end leak checks that assert no
-original value survives in the delivered DOCX XML or PDF text. Every leak found
+195 tests covering detector accuracy, allowlist protection, judicial-officer
+harvesting in every layout a court prints, name-variant expansion and merging,
+overlapping-name folding, typo matching, surrogate determinism, image
+redaction, mapping-key encryption, the web API, and end-to-end leak checks that
+assert no original value survives in the delivered DOCX XML or PDF text. Every leak found
 in review has a regression test that encodes the exact failing input.
 
 ---
@@ -291,11 +325,12 @@ redactor/
   patterns.py         regex detectors, validators, and the allowlist
   names.py            full name -> every written form, and back again
   caption.py          party names harvested from legal captions and headers
+  officials.py        the bench, and the do-not-change list built from it
   surrogates.py       deterministic fake names (HMAC, fixed salt)
   mapping.py          entity registry and the encrypted mapping key
   ner.py              optional spaCy suggestions (proposals only)
   engine.py           scan, resolve overlaps, apply; typo matching
-  review.py           review decisions (ticks, retypes), shared by both UIs
+  review.py           name-list and review decisions, shared by both UIs
   feedback.py         classification error reports and the mailto draft
   docx_processor.py   OOXML-level DOCX reading and rewriting
   pdf_processor.py    PyMuPDF redaction, image blackout, and the OCR path

@@ -1,4 +1,4 @@
-"""Review-screen decisions, independent of any front end.
+"""Name-list and review-screen decisions, independent of any front end.
 
 Both the Tk GUI and the web app let the operator untick rows, change a
 row's type, and edit replacements - and both must survive a rescan without
@@ -7,8 +7,85 @@ losing those decisions. The store-level logic lives here once.
 
 from __future__ import annotations
 
+from typing import Iterable, Sequence
+
 from . import categories, names as _names
 from .mapping import Entity, MappingStore
+
+# --------------------------------------------------------------------------
+# the name list (step 2)
+# --------------------------------------------------------------------------
+
+_PERSONAL = {"person", "minor"}
+
+
+def resolve_overlaps(
+    entries: Sequence[tuple[str, str]],
+) -> tuple[list[tuple[str, str]], list[_names.Overlap]]:
+    """Fold ticked names that a longer ticked name already covers.
+
+    Second pass over what step 2 hands back: ``Smith`` sitting beside
+    ``Jane Elizabeth Smith`` is not a second person, it is one of the written
+    forms the matcher generates for the first.  Left in, it becomes a second
+    entity with its own surrogate and the surname comes out inconsistent.
+
+    Only unambiguous folds are applied - one longer name claiming the short
+    form, both of them people.  ``Smith`` with two Smiths on the list stays put
+    and is reported instead, because guessing which one it belongs to would be
+    the wrong kind of clever.
+
+    Returns the entries to actually register, plus every overlap found, folded
+    or not, so the operator can be told what happened.
+    """
+    overlaps = _names.overlapping_names([name for name, _category in entries])
+    if not overlaps:
+        return list(entries), []
+
+    category_of = {name.casefold(): category for name, category in entries}
+    folded = {
+        overlap.inner.casefold()
+        for overlap in overlaps
+        if overlap.merge
+        and category_of.get(overlap.inner.casefold()) in _PERSONAL
+        and category_of.get(overlap.outer.casefold()) in _PERSONAL
+    }
+    kept = [(name, category) for name, category in entries
+            if name.casefold() not in folded]
+    return kept, overlaps
+
+
+def overlap_notes(overlaps: Iterable[_names.Overlap]) -> list[str]:
+    """One line per overlap, ready for a status bar or a warning strip."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for overlap in overlaps:
+        note = overlap.note
+        if note not in seen:
+            seen.add(note)
+            out.append(note)
+    return out
+
+
+def build_store(
+    entries: Sequence[tuple[str, str]],
+    roles: dict[str, str] | None = None,
+) -> tuple[MappingStore, list[_names.Overlap]]:
+    """A store built from the step 2 name list, overlaps resolved first."""
+    kept, overlaps = resolve_overlaps(entries)
+    roles = roles or {}
+    store = MappingStore()
+    for name, category in kept:
+        if category in {"organization", "location"}:
+            store.add_value(category, name, source="name-list")
+        else:
+            store.add_person(name, category=category,
+                             role=roles.get(name.casefold(), ""), source="name-list")
+    return store, overlaps
+
+
+# --------------------------------------------------------------------------
+# the review screen (step 3)
+# --------------------------------------------------------------------------
 
 
 def retype_entity(store: MappingStore, entity: Entity, new_category: str) -> Entity | None:

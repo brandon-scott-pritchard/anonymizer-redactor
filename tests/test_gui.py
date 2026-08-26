@@ -379,3 +379,36 @@ def test_running_with_an_emptied_password_is_refused(app, monkeypatch):
     monkeypatch.setattr(app, "_work", lambda *a, **k: started.append(1))
     app.execute()
     assert warned and not started
+
+
+def test_the_bench_and_folded_names_reach_the_settings_and_the_screen(app):
+    """Step 2 has to show what it decided, and the run has to receive it."""
+    from redactor import officials
+
+    app._unlock(app.tab_names)
+    app.judicial_officers = officials.harvest("Judge Amber M. Cordova")
+    app.names_text.insert("1.0", "Jane Elizabeth Smith\nSmith")
+
+    store = app._store_with_names()
+    assert len(store.persons()) == 1, "the bare surname must fold into the full name"
+
+    app._refresh_protection()
+    assert "Amber M. Cordova" in app.protection.terms
+    assert app.settings().protected_names, "the run must be told what to leave alone"
+
+    shown = app.guard_label.cget("text")
+    assert "Cordova" in shown
+    assert "Smith" in shown, "the fold has to be said out loud, not done quietly"
+
+
+def test_a_judge_sharing_a_party_surname_is_only_partly_shielded(app):
+    from redactor import officials
+
+    app._unlock(app.tab_names)
+    app.judicial_officers = officials.harvest("Judge Amber M. Smith")
+    app.names_text.insert("1.0", "Jane Elizabeth Smith")
+    app._refresh_protection()
+
+    assert "Amber M. Smith" in app.protection.terms
+    assert "Smith" not in app.protection.terms
+    assert "shares a surname" in app.guard_label.cget("text")

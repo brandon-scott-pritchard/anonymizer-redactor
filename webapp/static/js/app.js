@@ -171,6 +171,31 @@ function FilesStep({ state, set, actions }) {
     </div>`;
 }
 
+// What the run will deliberately leave alone, and which ticked names were
+// folded into a longer one. Both are decisions made for the operator, so both
+// get said out loud rather than happening quietly.
+function GuardPanel({ state }) {
+  const bench = state.officials || [];
+  const notes = [...(state.guardNotes || []),
+                 ...(state.overlaps || []).map((o) => o.note)];
+  if (!bench.length && !notes.length) return null;
+  return html`
+    <div class="card guard">
+      <h2>Left alone</h2>
+      ${bench.length ? html`
+        <p>Judicial officers found in these documents. A judge is not a party, and
+          an order that comes back with the bench renamed reads as tampered with -
+          so every written form of these names survives the run.</p>
+        <ul class="bench">
+          ${bench.map((o, i) => html`<li key=${i}><strong>${o.name}</strong>
+            <span class="hint">${o.title}${o.confidence === "medium" ? " · from the signature block" : ""}</span></li>`)}
+        </ul>` : null}
+      ${notes.length ? html`<ul class="guard-notes">
+        ${notes.map((note, i) => html`<li key=${i}>${note}</li>`)}
+      </ul>` : null}
+    </div>`;
+}
+
 function NamesStep({ state, set, actions, meta }) {
   const rows = useMemo(() => [
     ...state.captions.map((c, i) => ({
@@ -230,6 +255,7 @@ function NamesStep({ state, set, actions, meta }) {
           <code>Zions Bank | organization</code>, <code>Sandy | location</code>.</p>
       </div>
     </div>
+    <${GuardPanel} state=${state} />
     <div class="bar">
       <button onClick=${() => actions.go(0)}>← Back</button>
       <span class="spacer"></span>
@@ -377,6 +403,9 @@ function App() {
   const [showPassword, setShowPassword] = useState(false);
   const [namesText, setNamesText] = useState("");
   const [captions, setCaptions] = useState([]);
+  const [officials, setOfficials] = useState([]);
+  const [guardNotes, setGuardNotes] = useState([]);
+  const [overlaps, setOverlaps] = useState([]);
   const [suggestions, setSuggestions] = useState([]);
   const [suggChecked, setSuggChecked] = useState(new Set());
   const [suggCats, setSuggCats] = useState({});
@@ -399,6 +428,15 @@ function App() {
 
   const track = (message, fraction) => setBusy({ active: true, message, fraction });
   const settle = () => setBusy({ active: false, message: "", fraction: 0 });
+
+  // Every step that touches the name list gets a fresh read of what the run
+  // will shield and what it folded together; the server recomputes both, since
+  // a judge sharing a party's surname changes the answer.
+  const absorbGuard = (result) => {
+    if (result.officials) setOfficials(result.officials);
+    if (result.guard_notes) setGuardNotes(result.guard_notes);
+    if (result.overlaps) setOverlaps(result.overlaps);
+  };
 
   async function guarded(work) {
     setFault("");
@@ -437,6 +475,7 @@ function App() {
     readCaptions: () => guarded(async () => {
       const result = await api.job(api.post("/api/captions"), track);
       setCaptions(result.captions);
+      absorbGuard(result);
       setSuggChecked((prev) => {
         const next = new Set(prev);
         result.captions.forEach((c, i) => {
@@ -451,6 +490,7 @@ function App() {
       const body = { options, names: parseNameLines(namesText) };
       const result = await api.job(api.post("/api/suggestions", body), track);
       setSuggestions(result.suggestions);
+      absorbGuard(result);
       if (!result.suggestions.length && result.notes.length) setFault(result.notes[0]);
     }),
 
@@ -483,7 +523,9 @@ function App() {
     toReview: () => guarded(async () => {
       setUnlocked((u) => Math.max(u, 2)); setStep(2);
       const body = { options, names: parseNameLines(namesText) };
-      applyReview(await api.job(api.post("/api/review", body), track));
+      const result = await api.job(api.post("/api/review", body), track);
+      absorbGuard(result);
+      applyReview(result);
     }),
 
     setEnabled: (row, enabled) => guarded(async () => {
@@ -552,6 +594,7 @@ function App() {
   }
 
   const state = { files, options, password, showPassword, namesText, captions,
+                  officials, guardNotes, overlaps,
                   suggestions, suggChecked, suggCats, entities, risky, unused,
                   editing, runInfo, busy };
 

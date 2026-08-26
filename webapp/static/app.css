@@ -101,6 +101,16 @@ h2 { color: var(--ink); }
   border: 1px solid #f5c6c3; border-radius: 8px; padding: 10px 14px;
   font-family: var(--sans); font-size: 14px; margin: 0;
 }
+/* what the run deliberately will not touch */
+.card.guard { background: var(--paper); border-left: 3px solid var(--accent); }
+.card.guard p { margin: 0 0 12px; color: var(--muted); font-size: 15.5px; }
+.card.guard ul { margin: 0; padding-left: 20px; }
+.card.guard ul + ul { margin-top: 12px; }
+.bench li { margin-bottom: 4px; }
+.bench strong { font-family: var(--sans); font-size: 15px; }
+.bench .hint { margin-left: 8px; font-size: 14px; }
+.guard-notes li { color: var(--muted); font-size: 15px; margin-bottom: 6px; }
+
 .columns { display: grid; grid-template-columns: 3fr 2fr; gap: 18px; }
 @media (max-width: 900px) { .columns { grid-template-columns: 1fr; } }
 

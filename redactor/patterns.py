@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Callable, Iterable, Sequence
 
 # --------------------------------------------------------------------------
@@ -180,11 +181,25 @@ ALLOWLIST_PATTERNS: tuple[re.Pattern, ...] = (
         rf"\b[A-Z][\w'.\-]+(?:\s+[\w'.\-]+){{0,4}}\s+v\.?s?\.\s+[A-Z][\w'.\-]+"
         rf"(?:\s+[\w'.\-]+){{0,4}},?\s+\d{{1,4}}\s+(?:{_REPORTERS})"
     ),
-    # judicial officers by title - the name after the title is protected
+    # Judicial officers by title - the name beside the title is protected.
+    # A separator of ":" or "," as well as whitespace: "Judge: Amber M. Cordova"
+    # is how a Utah caption prints the assigned judge, and requiring whitespace
+    # left that name completely unshielded.
     re.compile(
-        r"\b(?:Judge|Chief[^\S\n]+Judge|Commissioner|Justice|Chief[^\S\n]+Justice|"
-        r"Magistrate(?:[^\S\n]+Judge)?|Hon(?:orable)?\.?)"
-        r"[^\S\n]+[A-Z][\w'\-]+(?:[^\S\n]+[A-Z]\.)?(?:[^\S\n]+[A-Z][\w'\-]+){0,2}"
+        r"\b(?:(?:Chief|Presiding|Assigned|Acting)[^\S\n]+)?"
+        r"(?:Judge|Commissioner|Justice|Magistrate(?:[^\S\n]+Judge)?|Hon(?:orable)?\.?)"
+        r"(?:[^\S\n]*[:,][^\S\n]*|[^\S\n]+)"
+        r"[A-Z][\w'\-]+(?:[^\S\n]+[A-Z]\.)?(?:[^\S\n]+[A-Z][\w'\-]+){0,2}"
+    ),
+    # The same thing written the other way round, which is how every signature
+    # block prints it: "AMBER M. CORDOVA, District Court Judge". The title may
+    # sit on the following line, so a single newline is allowed in the gap.
+    re.compile(
+        r"(?<![\w'’])[A-Z][\w'\-]+(?:[^\S\n]+[A-Z]\.)?(?:[^\S\n]+[A-Z][\w'\-]+){0,2}"
+        r"(?:[^\S\n]*,[^\S\n]*|[^\S\n]*\n[^\S\n]*)"
+        r"(?:(?:[A-Z][A-Za-z.'\-]{0,14}|\d{1,2}(?:st|nd|rd|th))[^\S\n]+){0,4}"
+        r"(?:Judge|JUDGE|Justice|JUSTICE|Commissioner|COMMISSIONER|"
+        r"Magistrate|MAGISTRATE|Referee|REFEREE)\b"
     ),
     # court names
     re.compile(
@@ -209,12 +224,38 @@ _ALLOWLIST_GUARDS: tuple[tuple[bool, tuple[str, ...]], ...] = (
     (True, ()),                  # reporter citations require volume digits
     (True, ()),                  # party pair + reporter, likewise
     (False, ("judge", "commissioner", "justice", "magistrate", "hon")),
+    (False, ("judge", "commissioner", "justice", "magistrate", "referee")),
     (False, ("court",)),
     (False, ("court",)),
     (False, ("judicial",)),
     (False, ("clerk",)),
 )
 assert len(_ALLOWLIST_GUARDS) == len(ALLOWLIST_PATTERNS)
+
+
+@lru_cache(maxsize=64)
+def _extra_regex(terms: tuple[str, ...]) -> re.Pattern | None:
+    """One alternation for every literal term to shield.
+
+    Compiled once per distinct list rather than per text unit: the judicial
+    do-not-change list runs against every paragraph of every document, and a
+    separate ``finditer`` per term was the whole gain of the prefilter work
+    handed straight back.
+
+    Boundaries match the ones the person matcher uses, so a term protects the
+    word and its possessive ("Judge Cordova's order") without protecting a
+    longer word that merely starts the same way ("Cordovan").
+    """
+    from .names import escape_token          # local: names imports nothing here
+
+    bodies = [
+        r"\s+".join(escape_token(token) for token in term.split())
+        for term in sorted({t.strip() for t in terms if len(t.strip()) >= 2},
+                           key=len, reverse=True)
+    ]
+    if not bodies:
+        return None
+    return re.compile(rf"(?<![\w'’])(?:{'|'.join(bodies)})(?!\w)", re.IGNORECASE)
 
 
 def allowlist_spans(text: str, extra: Iterable[str] = ()) -> list[tuple[int, int]]:
@@ -230,11 +271,9 @@ def allowlist_spans(text: str, extra: Iterable[str] = ()) -> list[tuple[int, int
                 continue
         for m in pat.finditer(text):
             spans.append((m.start(), m.end()))
-    for term in extra:
-        term = term.strip()
-        if len(term) < 2:
-            continue
-        for m in re.finditer(re.escape(term), text, re.IGNORECASE):
+    regex = _extra_regex(tuple(extra))
+    if regex is not None:
+        for m in regex.finditer(text):
             spans.append((m.start(), m.end()))
     return _merge_spans(spans)
 
