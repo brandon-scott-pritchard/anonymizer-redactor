@@ -140,9 +140,15 @@ V_DATE = (
 
 
 def labeled(labels: Sequence[str], value: str = V_ANY_ID) -> str:
-    """Build a ``label + separator + (value)`` regex with the value in group 1."""
+    """Build a ``label + separator + (value)`` regex with the value in group 1.
+
+    A label never starts in the middle of a word: "DL" inside the Amazon order
+    code "GPBSDLHG5" read as a driver's licence label, and "HG5" was boxed.
+    Nor after a digit: "RX" closing the UPS number "1Z59T2L3YUS96VY4RX" read
+    as a prescription label and took the order date in the next cell.
+    """
     alt = "|".join(labels)
-    return rf"(?:{alt}){_SEP}({value})"
+    return rf"(?<![A-Za-z0-9])(?:{alt}){_SEP}({value})"
 
 
 # --------------------------------------------------------------------------
@@ -361,6 +367,18 @@ def _d(category, pattern, group=0, validator=None, priority=50, flags=_I,
                     needs_digit=digit, keywords=tuple(kw))
 
 
+# What follows a number when the number opens a street: "1734 W GENTILE ST",
+# "620 E 1200 S", "2750 ASPEN SPRINGS DR". Used to keep a bare four-digit card
+# tail off a house number. Nothing leaks by it: a number that opens a street is
+# taken by the street-address rule instead.
+_NOT_A_STREET = (
+    r"(?![^\S\n]{1,2}(?:North|South|East|West|[NSEW]\.?)[^\S\n]{1,2}[A-Z0-9])"
+    r"(?![^\S\n]{1,2}(?:[A-Z0-9][\w'\-]*\.?[^\S\n]{1,2}){1,4}"
+    r"(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Circle|Cir|"
+    r"Way|Place|Pl|Terrace|Ter|Parkway|Pkwy|Highway|Hwy|Trail|Trl|Loop)\b)"
+)
+
+
 DETECTORS: tuple[Detector, ...] = (
     # ------------------------------------------------------------- contact --
     _d("email", r"\b[\w!#$%&'*+/=?^`{|}~.-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+\b", priority=90,
@@ -502,7 +520,13 @@ DETECTORS: tuple[Detector, ...] = (
                               # "State ID card 12345678".
                               # "Account Ending 2-5666", "Card Ending 1-23456" -
                               # a charge card prints its tail after a prefix digit
-                              rf"(?:{V_MASKED}|{V_CARD}|(?<!\d)\d{{4}}(?!\d)|(?<![\d\-])\d{{1,2}}-\d{{4,5}}(?![\d\-]))"),
+                              # The tail is never the start of a date or of a
+                              # longer number - "Memory Card" wrapped above an
+                              # order date "2023-10-25" - nor a house number:
+                              # "Memory Card   1734 W GENTILE ST" in an order
+                              # export's row is the title's end and the address.
+                              rf"(?:{V_MASKED}|{V_CARD}|(?<!\d)\d{{4}}(?!\d|[-/.]\d){_NOT_A_STREET}"
+                              rf"|(?<![\d\-])\d{{1,2}}-\d{{4,5}}(?![\d\-]))"),
        group=1, priority=92,
        digit=True, kw=("card", "visa", "amex", "american", "discover")),
     _d("routing_number", labeled(("routing", "aba", "rtn", "transit")), group=1, priority=91,
@@ -590,19 +614,42 @@ DETECTORS: tuple[Detector, ...] = (
                                 "auth(?:orization)?\\s*(?:code|no\\.?|number)")), group=1, priority=80,
        digit=True, kw=("check", "cheque", "draft", "wire", "invoice", "transaction",
                        "confirmation", "reference", "receipt", "ref", "trace", "auth")),
+    # An online order number names the account that placed it: the retailer
+    # looks it up to the buyer's name, address and card. Amazon prints its
+    # orders as 3-7-7 digits ("112-4749744-4480307", "D01-" for digital
+    # orders) with or without a label; any other retailer's is taken when it
+    # is labelled and carries a digit.
+    _d("order_number", r"(?<![\w\-])(?:\d{3}|D\d{2})-\d{7}-\d{7}(?![\w\-])", priority=84,
+       digit=True),
+    _d("order_number", labeled(("order\\b", "purchase\\s+order\\b", "p\\.?o\\.?\\s*(?:#|no\\.?|number)"),
+                              r"(?=[A-Z0-9\-]*\d)[A-Z0-9][A-Z0-9\-]{5,28}[A-Z0-9](?![\w\-])"),
+       group=1, priority=83, digit=True, kw=("order", "p.o", "po")),
+    # A tracking number leads to the delivery address. The carriers' own
+    # shapes are taken anywhere - UPS "1Z" and sixteen, Amazon Logistics "TBA"
+    # and twelve digits, a USPS 22-digit barcode - and any other when a
+    # tracking label names it.
+    _d("tracking_number", r"(?<![\w])(?:1Z[0-9A-Z]{16}|TBA\d{12}|9[2-5]\d{20})(?![\w])",
+       priority=84, digit=True),
+    _d("tracking_number", labeled(("tracking", "shipment\\s*(?:id|no\\.?|number|#)",
+                                   "waybill", "air\\s*bill"),
+                                  r"(?=[A-Z0-9]*\d)[A-Z0-9]{8,34}(?![\w\-])"),
+       group=1, priority=83, digit=True, kw=("tracking", "shipment", "waybill", "air")),
     # A masked tail with no label at all - "****3907", "XXXX-XXXX-XXXX-4417",
     # "...6613". Nothing caught these, and two of them shipped whole because the
     # value-literal boundary in engine.py refuses to match after a "-" or a "."
     # (right for emails, wrong for a masked account). Priority 72 sits below
     # every labelled financial detector, so a labelled hit still wins.
     _d("masked_account", rf"(?<![\w\-]){V_MASKED}(?![\w\-])", priority=72, digit=True),
-    # OCR reads a run of asterisks as a quotation mark or an apostrophe:
-    # "Added cash from Bank "8697". Only after a word that introduces an
-    # account, so a quoted year in prose is left alone.
+    # OCR reads a run of asterisks as almost any other mark - a quotation mark,
+    # an apostrophe, "+*", "«*" - "Added cash from Bank "8697", "Visa +*8779".
+    # Only after a word that introduces an account or a card, so a quoted year
+    # in prose is left alone.
     _d("masked_account",
-       r"(?i:\b(?:bank|acct|account|card|ending(?:[^\S\n]+in)?))[^\S\n]*[:#]?[^\S\n]*"
-       r"[\"“”'‘’*•·]{1,4}[^\S\n]?(\d{4})(?![\d.,])",
-       group=1, priority=71, digit=True, kw=("bank", "acct", "account", "card", "ending")),
+       r"(?i:\b(?:bank|acct|account|card|ending(?:[^\S\n]+in)?|visa|mastercard|amex|discover))"
+       r"[^\S\n]*[:#]?[^\S\n]*"
+       r"[\"“”'‘’*•·+«»~^°]{1,4}[^\S\n]?(\d{4})(?![\d.,])",
+       group=1, priority=71, digit=True,
+       kw=("bank", "acct", "account", "card", "ending", "visa", "mastercard", "amex", "discover")),
     # The OCR scanline across the foot of a remittance coupon. It encodes the
     # account number and the amount due, and nothing else in a document is
     # twenty unbroken digits, so it needs no label.
@@ -627,8 +674,11 @@ DETECTORS: tuple[Detector, ...] = (
        # Its words are at most two spaces apart: the PDF reader renders a
        # column gap as three or more, and "12:47:13   Merchant Transacti
        # Complete   Sq" otherwise read as a street ending in Sq(uare).
-       r"(?<![\d.,/\-#:])\b\d{1,6}[A-Z]?[^\S\n]{1,2}(?:(?:North|South|East|West|N\.?|S\.?|E\.?|W\.?|NE|NW|SE|SW)[^\S\n]{1,2})?"
-       r"(?:[A-Z0-9][\w'\-]*\.?[^\S\n]{1,2}){0,4}"
+       # A house number never opens with a zero, and a street always has a
+       # name between its number and its type: "CHECKCARD 0328 SQ *BLUE MOON"
+       # is a posting date and a card processor, not 0328 Square.
+       r"(?<![\d.,/\-#:])\b(?!0)\d{1,6}[A-Z]?[^\S\n]{1,2}(?:(?:North|South|East|West|N\.?|S\.?|E\.?|W\.?|NE|NW|SE|SW)[^\S\n]{1,2})?"
+       r"(?:[A-Z0-9][\w'\-]*\.?[^\S\n]{1,2}){1,4}"
        r"(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Circle|Cir|Way|Wy|"
        r"Place|Pl|Terrace|Ter|Parkway|Pkwy|Highway|Hwy|Trail|Trl|Loop|Square|Sq|Plaza|Alley|Route|Rte|"
        # A subdivision names its streets Bend, Row, Run and Crossing as readily
@@ -734,9 +784,15 @@ DETECTORS: tuple[Detector, ...] = (
                        "submission", "exhibit")),
 
     # -------------------------------------------------------------- vital ----
-    _d("dob", labeled(("d\\.?o\\.?b\\.?", "date\\s+of\\s+birth", "birth\\s*date", "born\\s+on", "date\\s+born",
-                       "birthday"), V_DATE), group=1, priority=95,
+    _d("dob", labeled(("d\\.?o\\.?b\\.?", "date\\s+of\\s+birth", "birth\\s*date", "born\\s+on", "date\\s+born"),
+                      V_DATE), group=1, priority=95,
        digit=True, kw=("dob", "d.o", "do.", "birth", "born")),
+    # "Birthday" is a label only when the date follows it on its own line. It
+    # is also a greeting and a product - "Amazon Gift Card - Print - Happy
+    # Birthday" wraps in an order export, and the order date in the next cell
+    # read as a date of birth, and then every copy of that date was redacted.
+    _d("dob", rf"(?<![A-Za-z])(?<!happy\s)birthday(?:[^\S\n]*[:\-–][^\S\n]*|[^\S\n]+)({V_DATE})",
+       group=1, priority=95, digit=True, kw=("birthday",)),
     _d("dob", rf"\bborn\s+(?:on\s+)?({V_DATE})", group=1, priority=94,
        digit=True, kw=("born",)),
     _d("pob", labeled(("place\\s+of\\s+birth", "birth\\s*place", "born\\s+(?:in|at)", "city\\s+of\\s+birth",
@@ -815,7 +871,8 @@ _DECIMAL_NATIVE = frozenset({"diagnosis_code", "gps"})
 # A cheque number is never a date, and neither is a case number. "Transaction
 # 04/12/2026 posted" registered the date as a case number and blacked it out.
 _DATE_ONLY = re.compile(rf"^{V_DATE}$|^\d{{1,2}}[/\-]\d{{4}}$")
-_DATE_REJECTING = frozenset({"check_number", "case_number", "case_designator"})
+_DATE_REJECTING = frozenset({"check_number", "case_number", "case_designator", "order_number",
+                             "tracking_number", "prescription"})
 # A bare year is the commonest number after a financial label - "Roth IRA 2024
 # contribution", "401(k) 2023 limit", "Loan 2019 refinance" - and no account,
 # loan or policy number is four digits that happen to be a recent year. Once
@@ -825,7 +882,7 @@ _YEAR_ONLY = re.compile(r"^(?:19[5-9]\d|20[0-4]\d)$")
 # year costs less than a leaked card tail.
 _YEAR_REJECTING = frozenset({"investment_account", "bank_account", "loan_number",
                              "policy_number", "claim_number", "check_number",
-                             "employee_id"})
+                             "employee_id", "order_number", "tracking_number"})
 
 
 def _wrong_shape(category: str, value: str) -> bool:
@@ -836,6 +893,26 @@ def _wrong_shape(category: str, value: str) -> bool:
     if category in _YEAR_REJECTING and _YEAR_ONLY.match(cleaned):
         return True
     if category in _DATE_REJECTING and _DATE_ONLY.match(cleaned):
+        return True
+    return False
+
+
+_NUMBER_GOES_ON = re.compile(r"[.,]\d")
+_NUMBER_CAME_BEFORE = re.compile(r"\d[.,]$")
+
+
+def _cut_from_a_number(text: str, start: int, end: int) -> bool:
+    """True when a match is the front or the back of a longer number.
+
+    Every value shape stops at a comma, so "PRIMARY SAVINGS 111,274.97" read as
+    the savings account "111" followed by the rest of the balance, and the box
+    took the first three digits off the figure. No identifier is written with
+    a thousands separator or a decimal fraction running on from it; a figure
+    always is.
+    """
+    if text[start:end][-1:].isdigit() and _NUMBER_GOES_ON.match(text, end):
+        return True
+    if text[start:end][:1].isdigit() and _NUMBER_CAME_BEFORE.search(text[max(0, start - 2):start]):
         return True
     return False
 
@@ -882,6 +959,8 @@ def scan(
             if not value.strip() or _value_is_junk(value):
                 continue
             if _wrong_shape(det.category, value):
+                continue
+            if det.category not in _DECIMAL_NATIVE and _cut_from_a_number(text, start, end):
                 continue
             if det.validator and not det.validator(value):
                 continue

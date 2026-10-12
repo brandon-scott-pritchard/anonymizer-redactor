@@ -279,6 +279,7 @@ def collect_suggestions(
     filtered = rules_found + [s for s in raw
                               if s.text.casefold() not in known
                               and s.key not in seen]
+    filtered = ner.drop_bare_names(filtered)
 
     # A diminutive of a party's first name is that party, and the model has no
     # idea - it offered "Chrissy" as an organization while Christine sat on the
@@ -383,6 +384,7 @@ _LOCKBOX = pdf_processor._LOCKBOX
 _INSTITUTION = pdf_processor._INSTITUTION_LINE
 ADDRESS_BLOCK_LINES = 3
 ADDRESS_LINE_CHARS = pdf_processor.ADDRESS_LINE_CHARS
+_COLUMN_GAP = re.compile(r"\S {%d,}\S" % pdf_processor.MIN_GAP_SPACES)
 
 
 def register_address_blocks(files: Sequence[Path], store: MappingStore,
@@ -415,7 +417,12 @@ def register_address_blocks(files: Sequence[Path], store: MappingStore,
         except Exception:
             continue
         for text in [*parts.values(), *column_texts(tables_in(path))]:
-            lines = [" ".join(line.split()) for line in text.splitlines()]
+            # A line with a column gap in it is a table row, not an address
+            # line: squeezing the gap out made "Bath Set   8542 N ORCHARD DR
+            # 1734 W GENTILE ST" - a title's tail and two cells - one value.
+            # The column readings carry each cell on a line of its own.
+            lines = ["" if _COLUMN_GAP.search(line.strip()) else " ".join(line.split())
+                     for line in text.splitlines()]
             for index, line in enumerate(lines):
                 if (not _CITY_LINE.search(line) or _MONEY.search(line)
                         or len(line) > ADDRESS_LINE_CHARS or _LOCKBOX.search(line)):

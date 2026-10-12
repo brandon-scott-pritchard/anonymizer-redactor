@@ -743,3 +743,208 @@ def test_a_plan_sponsor_whose_name_carries_a_comma():
     # proposed without the trailing period, as every employer is; the literal
     # pass still finds it in "…Analytics, Inc. Profit Sharing Plan"
     assert "Silicon Slopes Analytics, Inc" in [p.name for p in transactions.employers(line)]
+
+
+def test_a_label_never_takes_the_front_of_a_figure():
+    """"PRIMARY SAVINGS 111,274.97" registered the account "111" and boxed the
+    first three digits off the balance."""
+    assert patterns.scan("PRIMARY SAVINGS\n111,274.97") == []
+    assert ("4471-9902", "bank_account") in [(m.text, m.category)
+                                             for m in patterns.scan("Acct 4471-9902, opened 2019")]
+
+
+# ---------------------------------------------------------------------------
+# online order records - "Your Orders", order details, the data export
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("text, value, category", [
+    ("ORDER # 114-9580105-2623065", "114-9580105-2623065", "order_number"),
+    ("111-3316909-9817429", "111-3316909-9817429", "order_number"),
+    ("Digital order D01-4471902-3359120", "D01-4471902-3359120", "order_number"),
+    ("Purchase Order PO-55123", "PO-55123", "order_number"),
+    ("Tracking ID: TBA833891300285", "TBA833891300285", "tracking_number"),
+    ("1Z59T2L3YUS96VY4RX", "1Z59T2L3YUS96VY4RX", "tracking_number"),
+    ("9400111899223344556677", "9400111899223344556677", "tracking_number"),
+    ("Shipment ID: 7XK44P9Q2", "7XK44P9Q2", "tracking_number"),
+])
+def test_an_order_or_a_shipment_number_is_an_identifier(text, value, category):
+    """An order number is looked up to the buyer's name, address and card; a
+    tracking number to the delivery address."""
+    assert (value, category) in [(m.text, m.category) for m in patterns.scan(text)]
+
+
+@pytest.mark.parametrize("text", [
+    "ORDER PLACED January 19, 2022", "Ordered on January 7, 2022", "Order Date 2023-01-05",
+    "order 2 of 3", "in order to pay 5,000.00",
+])
+def test_an_order_heading_or_date_is_not_an_order_number(text):
+    assert patterns.scan(text) == []
+
+
+@pytest.mark.parametrize("text", [
+    "Memory Card\n2023-10-25",                                   # a title wrapped above a date
+    "Amazon Gift Card\n2750 ASPEN SPRINGS DR",                   # the address cell beside it
+    "UHS-I Memory Card            1734 W GENTILE ST",            # a row across a column gap
+])
+def test_a_card_tail_is_not_a_year_or_a_house_number(text):
+    """The year registered as a card's last four, and every date in the
+    document lost its year."""
+    assert not [m for m in patterns.scan(text) if m.category == "credit_card"]
+
+
+@pytest.mark.parametrize("text, value", [
+    ("Visa ending in 4053", "4053"), ("Mastercard - 6256", "6256"),
+    ("card ending in 2019", "2019"), ("CARD 4417 PURCHASE 03/12 SHELL OIL", "4417"),
+])
+def test_a_card_tail_is_still_a_card_tail(text, value):
+    assert (value, "credit_card") in [(m.text, m.category) for m in patterns.scan(text)]
+
+
+def test_a_birthday_greeting_is_not_a_date_of_birth():
+    """"Amazon Gift Card - Print - Happy Birthday" wraps in an order export,
+    and the order date in the next cell read as a date of birth."""
+    for text in ("Happy Birthday\n2023-05-24", "Birthday\n2023-05-24", "Happy Birthday 2023-05-24"):
+        assert not [m for m in patterns.scan(text) if m.category == "dob"], text
+    for text in ("Birthday: 04/12/1988", "Birthday 04/12/1988", "DOB 04/12/1988"):
+        assert ("04/12/1988", "dob") in [(m.text, m.category) for m in patterns.scan(text)]
+
+
+@pytest.mark.parametrize("text", ["1Z59T2L3YUS96VY4RX\n2022-05-20", "1ZV051S1DL16WP3J24"])
+def test_a_label_never_starts_after_a_digit(text):
+    """"RX" closing a UPS number read as a prescription label, and "DL" inside
+    one as a driver's licence label."""
+    found = {m.category for m in patterns.scan(text)}
+    assert not found & {"prescription", "drivers_license"}
+
+
+def test_an_order_export_keeps_its_dates_and_products(tmp_path):
+    """One export row, every cell its own text call: the identifiers go, and
+    the dates, figures and products an LLM needs stay."""
+    cells = [
+        (30, 62, "Order Date"), (82, 62, "Order ID"), (168, 62, "Title"), (300, 62, "Seller"),
+        (432, 62, "Total Owed"), (476, 62, "Payment Instrument Type"),
+        (554, 62, "Shipping Address"), (640, 62, "Billing Address"), (726, 62, "Tracking"),
+        (168, 85, "Birthday"), (168, 111, "UHS-I Memory Card"),
+        (30, 104, "2023-10-25"), (82, 104, "114-4604251-1244467"),
+        (168, 104, "SanDisk 128GB Extreme microSDXC"), (300, 104, "Amazon.com"),
+        (432, 104, "17.99"), (476, 104, "Visa - 4053"),
+        (554, 104, "DEREK L NAKAMURA"), (554, 110.5, "1734 W GENTILE ST"),
+        (554, 117, "LAYTON UT 84041"),
+        (640, 104, "DEREK L NAKAMURA"), (640, 110.5, "1734 W GENTILE ST"),
+        (640, 117, "LAYTON UT 84041"), (726, 104, "TBA987858653459"),
+        (30, 78, "2023-05-24"), (82, 78, "111-3316909-9817429"),
+        (168, 78, "Amazon Gift Card - Print - Happy"), (300, 78, "Amazon.com"),
+        (432, 78, "50.00"), (476, 78, "Amazon Gift Card"), (726, 78, "1Z59T2L3YUS96VY4RX"),
+    ]
+    path = _placed(tmp_path, "export.pdf", cells, size=5.8)
+    after, store = _run_pdf(path, tmp_path, [("Derek L Nakamura", "person")])
+    for gone in ("114-4604251-1244467", "111-3316909-9817429", "TBA987858653459",
+                 "1Z59T2L3YUS96VY4RX", "4053", "NAKAMURA", "GENTILE"):
+        assert gone not in after, f"{gone} survived"
+    for kept in ("2023-10-25", "2023-05-24", "SanDisk 128GB Extreme microSDXC", "17.99",
+                 "50.00", "Amazon Gift Card"):
+        assert kept in after, f"{kept} was lost"
+    wrong = [(e.category, e.canonical) for e in store.entities.values()
+             if e.category in ("credit_card", "dob") and e.canonical in ("2023", "1734", "2023-05-24")]
+    assert not wrong
+
+
+def test_an_item_ending_in_a_set_number_is_not_a_street():
+    """"Items Ordered" stood above "2 of: LEGO ... Brick Box 10698" on an
+    invoice, and the trailing five digits read as a ZIP made it an addressee."""
+    text = "Items Ordered\n2 of: LEGO Classic Large Creative Brick Box 10698\nSold by: Amazon.com"
+    assert "Items Ordered" not in [p.name for p in transactions.account_holders(text)]
+    text = "OAKLEY V WARD\n12469 W CENTER ST\nLAYTON UT 84042"
+    assert "OAKLEY V WARD" in [p.name for p in transactions.account_holders(text)]
+
+
+def test_the_heading_over_an_address_block_stays(tmp_path):
+    """An order's shipping and billing blocks are told apart only by their
+    headings, and the block cover took both."""
+    cells = [(50, 112, "Shipping Address"), (50, 126, "PORTER ASHBY"), (50, 137, "4521 W CENTER ST"),
+             (50, 148, "RENO, NV 89502"), (220, 112, "Billing address:"),
+             (220, 126, "Jonathan E Whitfield"), (220, 137, "2750 Aspen Springs Dr"),
+             (220, 148, "Park City, UT 84060-8757")]
+    path = _placed(tmp_path, "details.pdf", cells, size=8, width=612, height=792)
+    after, _store = _run_pdf(path, tmp_path, [("Jonathan E Whitfield", "person")])
+    for kept in ("Shipping Address", "Billing address:"):
+        assert kept in after
+    for gone in ("PORTER", "ASHBY", "4521", "RENO", "Whitfield", "2750", "Park City", "84060"):
+        assert gone not in after, f"{gone} survived"
+
+
+# ---------------------------------------------------------------------------
+# the language model's proposals on an order record
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("junk", [
+    "Mastercard", "Visa", "Amex", "Discover",
+    "Mario Kart 8", "OXO Good Grips 3", "Retail.OrderHistory.1.csv", "Amazon.com",
+    "Franklin Sports Qty", "Scotch Heavy Duty Shipping", "Order ID", "Sales Tax", "Gift",
+])
+def test_an_order_records_furniture_is_not_a_person(junk):
+    """Card networks, product titles with a model number, a file name, and a
+    product run into the next column's heading were all offered as people."""
+    from redactor import ner
+    assert not ner._plausible(junk, "person")
+
+
+@pytest.mark.parametrize("real", [
+    "DAVID PRATT", "Chloe A Barrett-Whitfield", "Drew Halsted", "Sue Ellen Reed",
+    "O'Brien", "Mark Ambled",
+])
+def test_an_order_records_people_still_pass(real):
+    from redactor import ner
+    assert ner._plausible(real, "person")
+
+
+@pytest.mark.parametrize("tags, heading", [
+    (["NN", "VBN"], True),            # Order Placed
+    (["NNS", "VBN"], True),           # Items Ordered
+    (["VBN"], True),                  # Sold
+    (["NNP", "VBN"], False),          # a surname that is also a verb
+    (["NNP", "NNP"], False),
+    (["NN", "NN"], False),            # no participle: not this rule's business
+    ([], False),
+])
+def test_a_heading_is_common_nouns_and_a_participle(tags, heading):
+    from redactor import ner
+    assert ner._is_heading(tags) is heading
+
+
+def test_the_model_proposes_no_heading_or_card_network_on_an_invoice():
+    """An invoice offered "Order Placed" fourteen times and "Mastercard" ten,
+    as people, beside the one name on it that mattered."""
+    from redactor import ner
+    ok, _note = ner.available()
+    if not ok:
+        pytest.skip("no language model")
+    invoice = ("Order Placed: February 25, 2022\n"
+               "1 of: iRobot Roomba 694 Robot Vacuum\nSold by: iRobot\n$283.32\n"
+               "Shipping Address:\nGarrett Sandberg\n4718 S Highland Dr\n"
+               "Payment Method:\nMastercard | Last digits: 6256\n"
+               "Ship to: Drew Halsted\n")
+    texts = {s.text for s in ner.suggest({"invoice": invoice}) if s.category == "person"}
+    assert not texts & {"Order Placed", "Mastercard", "Sold"}
+    assert {"Garrett Sandberg", "Drew Halsted"} <= texts
+
+
+def test_a_bare_first_name_beside_the_full_name_is_not_proposed_again():
+    """An order export proposed "DAVID" twelve times beside "DAVID PRATT"; one
+    entry for the full name already matches the first name on its own."""
+    from redactor.ner import Suggestion, drop_bare_names
+    found = drop_bare_names([
+        Suggestion("DAVID PRATT", "person", 1, {"export.pdf"}),
+        Suggestion("DAVID", "person", 12, {"export.pdf"}),
+        Suggestion("Pratt", "person", 1, {"export.pdf"}),
+        # the full name was never proposed in the invoice, so there the bare
+        # name is the only proposal and must stay
+        Suggestion("Natalie", "person", 3, {"export.pdf", "invoice.pdf"}),
+        Suggestion("Natalie Rasmussen", "person", 1, {"export.pdf"}),
+        Suggestion("Pratt", "organization", 1, {"export.pdf"}),
+    ])
+    assert [(s.text, s.category) for s in found] == [
+        ("DAVID PRATT", "person"), ("Natalie", "person"),
+        ("Natalie Rasmussen", "person"), ("Pratt", "organization")]

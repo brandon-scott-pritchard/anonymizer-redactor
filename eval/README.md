@@ -56,7 +56,10 @@ found in one document is checked in all of them:
 1. **JSON fields that identify somebody**: holders, employees, both ends of a
    payment-app row, payroll counterparties, account/loan/policy numbers, VINs,
    plates, parcels, title numbers, handles, phones, emails, street lines, ZIP+4,
-   employers and the client's own business.
+   employers and the client's own business; on an online order record, the
+   order number, the tracking number, everyone it shipped to (a gift recipient
+   is a counterparty) and the card's last four wherever a line names it as a
+   card ("Visa ending in 4053", "Mastercard - 4053").
 2. **The corpus's own conventions**, read off the original page: SSNs with a
    never-issued `9xx` prefix and EINs with a `00-` prefix are planted
    identifiers even where no JSON field carries them; a 1040's dependents line.
@@ -74,10 +77,33 @@ exhibit gets read by something that sorts its transactions:
 - **destroyed dollar figures** - every amount on the original page, compared
   as a multiset against the output page;
 - **merchant names lost** - every merchant, store and institution the JSON
-  names that was on the original page.
+  names that was on the original page, and on an order record every seller
+  and product title.
+
+Dates are not scored. When a run turns up a new kind of document, read one
+delivered page by eye as well: an order date taken as a birth date, or a year
+registered as a card's last four, removes every date in the file and costs the
+leak count nothing.
 
 For scanned PDFs the output is OCR'd to be checked, so their leak counts are a
 floor rather than an exact figure.
+
+## Online order records
+
+`eval/make_amazon.py` gives every client in the corpus - the ten households
+and both discovery households - a year of Amazon orders in four layouts of at
+least ten pages each, written into `<household>/amazon/` with a JSON label per
+PDF in the corpus's own shape:
+
+    ~/.venvs/anonymizer-redactor/bin/python -m eval.make_amazon CORPUS_ROOT
+
+The people, home address and card last-fours come from the client's other
+labels, so a household run sees one consistent client; the gift recipients,
+their addresses, order and tracking numbers are invented and deterministic.
+The invoice layout (`Amazon_Invoices_<year>.pdf`) was written after the fixes
+the first three prompted and scored before any change for it - keep one layout
+like that in reserve whenever a new kind of record is added, because a set
+the rules were fitted to can only show that they fit it.
 
 ## Reading the report
 

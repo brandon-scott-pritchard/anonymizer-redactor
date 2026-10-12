@@ -40,21 +40,22 @@ from pathlib import Path
 # keys whose string value is one or more people in the household or their orbit
 PERSON_KEYS = {
     "primary", "secondary", "employee", "person", "owner", "patient", "student",
-    "subjects", "recipient", "beneficiary", "borrower", "me",
+    "subjects", "recipient", "beneficiary", "borrower", "me", "ship_to_name",
 }
 # keys that name the *other* end of a transaction on a payment rail
-COUNTERPARTY_KEYS = {"frm", "to", "tenant"}
+COUNTERPARTY_KEYS = {"frm", "to", "tenant", "gift_recipient"}
 # a structured identifier, checked digit-for-digit
 ID_KEYS = {
     "account_number": "account", "routing_number_fake": "routing",
     "loan_no": "account", "policy": "policy", "vin": "vin", "plate": "plate",
     "hin": "vin", "parcel": "parcel", "title_no": "title", "ein": "ein",
+    "order_id": "order", "tracking": "tracking",
 }
 HANDLE_KEYS = {"user", "tag"}
 ADDRESS_KEYS = {"addr", "property"}
 ORG_KEYS = {"business", "entity"}
 # things that must survive: the merchant a card line names, the institution
-MERCHANT_KEYS = {"merchant", "store", "institution", "creditor", "lien"}
+MERCHANT_KEYS = {"merchant", "store", "institution", "creditor", "lien", "seller", "product"}
 
 # payment-rail and payroll kinds from the statement generator
 _P2P_KINDS = {"p2p_in", "p2p_out"}
@@ -107,6 +108,7 @@ class Secrets:
     zip4: set[str] = field(default_factory=set)
     orgs: dict[str, str] = field(default_factory=dict)          # name -> employer|business
     surnames: set[str] = field(default_factory=set)
+    card_tails: set[str] = field(default_factory=set)           # last four of a card
 
     def household_names(self) -> list[str]:
         return sorted(p.full for p in self.people.values() if p.household)
@@ -204,6 +206,12 @@ def collect(label: dict, secrets: Secrets, merchants: set[str]) -> None:
                 secrets.emails.add(value.casefold())
             elif len(_digits(value)) == 10:
                 secrets.phones.add(_digits(value))
+        elif key == "account_email" and "@" in value:
+            secrets.emails.add(value.casefold())
+        elif key == "account_phone" and len(_digits(value)) == 10:
+            secrets.phones.add(_digits(value))
+        elif key in ("card4", "card4b") and re.fullmatch(r"\d{4}", value):
+            secrets.card_tails.add(value)
         elif key == "lines":
             for match in PHONE.finditer(value):
                 secrets.phones.add("".join(match.groups()))
@@ -362,6 +370,13 @@ def leaks(output: str, secrets: Secrets, *, ocr: bool = False,
                 match = _word(head).search(output)
         if match:
             add("address", street, output, match)
+    for tail in secrets.card_tails:
+        # "Visa ending in 5546", "Mastercard - 5546": four digits are only a
+        # card when the line says so
+        match = re.search(rf"(?i)\b(?:visa|mastercard|master card|american express|amex|"
+                          rf"discover|card|ending(?: in)?)\b[^\n\d]{{0,6}}{tail}\b", output)
+        if match:
+            add("card_tail", tail, output, match)
     for z in secrets.zip4:
         match = re.search(re.escape(z), output)
         if match:

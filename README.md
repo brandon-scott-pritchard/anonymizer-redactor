@@ -234,13 +234,13 @@ client before anyone opens it.
 
 ## What it looks for
 
-61 categories across eight groups:
+63 categories across eight groups:
 
 - People—person names, minor children, organizations, employers (their own category), schools, locations, counterparties in a transaction line
 - Contact—email, phone, fax, URLs, social handles, usernames, IP and MAC addresses, GPS coordinates
 - Government ID—SSN, EIN/Tax ID, driver's license, passport, USCIS A-number, military, inmate, student, voter, bar, notary, professional license, tribal enrollment
 - Health—medical record numbers, health plan/member/group numbers, ICD/CPT/DSM codes, prescription numbers
-- Financial—bank accounts, routing numbers, IBAN, SWIFT, cards (Luhn-checked, including masked forms like `XXXX-XXXX-XXXX-1234` and "card ending in 9876"), Venmo/PayPal/Zelle/Cash App handles, crypto wallets, retirement and brokerage accounts, loans, policies, claims, checks and wires
+- Financial—bank accounts, routing numbers, IBAN, SWIFT, cards (Luhn-checked, including masked forms like `XXXX-XXXX-XXXX-1234` and "card ending in 9876"), Venmo/PayPal/Zelle/Cash App handles, crypto wallets, retirement and brokerage accounts, loans, policies, claims, checks and wires, online order numbers (Amazon's `112-4749744-4480307` and `D01-` forms, or any labelled one) and shipment tracking numbers (UPS `1Z…`, Amazon `TBA…`, USPS, or any labelled one)
 - Property—street addresses, PO boxes, ZIP+4 codes, APN/parcel numbers, deed book-and-page, legal descriptions, VINs, plates, vehicle title numbers, hull and tail numbers, safe deposit boxes, storage units
 - Case—case and docket numbers, case names, other designators
 - Vital—dates of birth (ISO forms included), places of birth
@@ -558,7 +558,7 @@ the language model, and copy the result back into `dist/`.
 ~/.venvs/anonymizer-redactor/bin/python -m pytest tests/ -q
 ```
 
-581 tests covering detector accuracy, allowlist protection, judicial-officer
+638 tests covering detector accuracy, allowlist protection, judicial-officer
 harvesting in every layout a court prints, child rosters and custody clauses,
 name-variant expansion and merging, overlapping-name folding, typo matching,
 Word's own run and tab structure, surrogate determinism, image redaction,
@@ -576,7 +576,7 @@ repository and a full run takes about half an hour. See `eval/README.md`.
 
 ```
 redactor/
-  categories.py       the 61 categories and how each is replaced
+  categories.py       the 63 categories and how each is replaced
   patterns.py         regex detectors, validators, and the allowlist
   names.py            full name -> every written form, and back again
   caption.py          party names harvested from legal captions and headers

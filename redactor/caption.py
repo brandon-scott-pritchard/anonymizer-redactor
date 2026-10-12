@@ -198,11 +198,18 @@ def plausible_name(raw: str) -> bool:
     tokens = [t for t in re.split(r"[\s,]+", name) if t]
     if not 2 <= len(tokens) <= 5:
         return False
+    from . import ner
     for tok in tokens:
         bare = tok.strip(".,'-").casefold()
         if bare in BOILERPLATE:
             return False
         if any(ch.isdigit() for ch in tok):
+            return False
+        # a financial document's heading over a role-word column - "Credit
+        # Scores" above "Applicant" on a credit report - is not a party. The
+        # organisation markers are deliberately not used: a party can be
+        # surnamed Church or Banks.
+        if bare in ner._TRANSACTION_WORDS or bare in ner._NEVER_IN_A_NAME:
             return False
     # at least two tokens must be real words, not lone initials
     if sum(1 for t in tokens if len(t.strip(".")) > 1) < 2:
@@ -225,6 +232,10 @@ _IN_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _V_LINE = re.compile(r"^\s*(?:v\.?|vs\.?)\s*$", re.IGNORECASE)
+_COURT_PAPER = re.compile(
+    r"(?i)\b(?:court|case\s+(?:no|number)|civil\s+no|docket|petitioner|respondent|plaintiff"
+    r"|defendant|in\s+re\b|in\s+the\s+matter|judicial\s+district|commissioner|judge)"
+    r"|^\s*vs?\.?\s*$", re.MULTILINE)
 _INLINE_V = re.compile(r"(.{3,60}?)\s+(?:v\.?|vs\.?)\s+(.{3,60}?)(?:,|\s*$|\s+Case\b)", re.IGNORECASE)
 _ATTORNEY_FOR = re.compile(rf"\bAttorneys?\s+for\s+(?:the\s+)?({ROLE_ALT})", re.IGNORECASE)
 _SIGNATURE = re.compile(r"/s/\s*(.{3,60})")
@@ -310,12 +321,16 @@ def harvest(text: str, source: str = "") -> list[CaptionName]:
         found.append(CaptionName(cleaned, role, source, confidence, _role_category(role)))
 
     lines = text.splitlines()
+    # A role word under a name is a caption only in a court paper. A credit
+    # report heads a column "Applicant", a loan file "Borrower"; there the same
+    # layout is proposed, but not pre-ticked.
+    sure = "high" if _COURT_PAPER.search(text) else "medium"
 
     # 1. "NAME, Petitioner," on one line
     for line in lines:
         m = _NAME_ROLE_SAME_LINE.match(line)
         if m:
-            add(m.group(1), m.group(2).title(), "high")
+            add(m.group(1), m.group(2).title(), sure)
 
     # 2. a name line followed within three lines by a bare role line
     for i, line in enumerate(lines):
@@ -335,7 +350,7 @@ def harvest(text: str, source: str = "") -> list[CaptionName]:
             name = (_first_name_in(left, lenient=True)
                     or _first_name_in(candidate, lenient=True))
             if name:
-                add(name, role, "high")
+                add(name, role, sure)
                 break
 
     # 3. "In re the Marriage of X and Y"

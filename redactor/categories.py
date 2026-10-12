@@ -98,6 +98,8 @@ CATEGORIES: tuple[Category, ...] = (
     _c("policy_number", "Insurance policy number", "POLICY", "Financial"),
     _c("claim_number", "Insurance claim number", "CLAIM", "Financial"),
     _c("check_number", "Check / invoice / wire number", "CHECK", "Financial"),
+    _c("order_number", "Online order number", "ORDER", "Financial"),
+    _c("tracking_number", "Shipment tracking number", "TRACKING", "Financial"),
 
     # ---------------------------------------------------------- property
     _c("street_address", "Street address", "ADDRESS", "Property"),

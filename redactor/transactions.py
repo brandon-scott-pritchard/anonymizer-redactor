@@ -403,6 +403,7 @@ def harvest(text: str, source: str = "") -> list[Party]:
 # This is how every statement, bill and remittance coupon prints the account
 # holder, and it is the only place a statement names them at all.
 _STREET_LINE = re.compile(r"^[^\S\n]*\d{1,6}[A-Za-z]?[^\S\n]+[A-Za-z0-9]")
+_TRAILING_ZIP = re.compile(r"\s*\b\d{5}(?:-\d{4})?\s*$")
 
 
 def _is_street(line: str) -> bool:
@@ -414,7 +415,10 @@ def _is_street(line: str) -> bool:
     """
     if not _STREET_LINE.match(line):
         return False
-    if caption.is_address(line):
+    # Ending in five digits does not make it one: "2 of: LEGO Classic Large
+    # Creative Brick Box 10698" is an invoice's item and its set number, and
+    # "Items Ordered" above it was proposed as the account holder.
+    if caption.is_address(_TRAILING_ZIP.sub("", line)):
         return True
     return any(m.category == "street_address" and m.start <= len(line) - len(line.lstrip()) + 1
                for m in patterns.scan(line, enabled=["street_address"]))
@@ -525,7 +529,24 @@ def employers(text: str, source: str = "") -> list[Party]:
             found.setdefault(name.casefold(), Party(name, source, "employer"))
     for name in pay_stub_employers(text):
         found.setdefault(name.casefold(), Party(name, source, "employer"))
-    return list(found.values())
+    return [party for party in found.values() if not _paid_by_the_account(text, party.name)]
+
+
+# a figure printed as money going out: "-$139.27", "-139.27", "139.27-"
+_OUTGOING = re.compile(r"(?<![\w.,])-[^\S\n]?\$?\d[\d,]*\.\d{2}\b|\b\d[\d,]*\.\d{2}-(?!\d)")
+
+
+def _paid_by_the_account(text: str, name: str) -> bool:
+    """True when the statement also sends money to ``name``.
+
+    An employer only ever pays in. A payment app, a brokerage or the client's
+    own other account shows up as a "Direct deposit - Pingo" line and, on the
+    same statement, as "Pingo - ACH  -$139.27" going the other way - money
+    moving both directions is a transfer partner, not a payroll.
+    """
+    folded = name.casefold()
+    return any(folded in line.casefold() and _OUTGOING.search(line)
+               for line in text.splitlines())
 
 
 # A pay stub names the employer in its letterhead and nowhere else - no label,

@@ -87,7 +87,17 @@ _NEVER_IN_A_NAME = frozenset({
     "loan", "secured", "unsecured", "trustee", "custodian", "holder",
     # the same thing on an explanation of benefits
     "patient", "dob", "insured", "guarantor", "provider", "claimant",
+    # and on an order record, whose product titles the model reads as people
+    # and runs into the next column: "Franklin Sports Qty", "Scotch Heavy Duty
+    # Shipping", "Order ID", "Sales Tax"
+    "qty", "quantity", "sku", "seller", "shipping", "billing", "order", "tax",
 })
+
+# The card networks. They are what a payment line is paid *with*, so they
+# name nobody, and the model proposed "Mastercard" as a person on every
+# invoice that was paid with one. The same four transactions._ACCOUNT_WORDS
+# already treats as account types; no issuer or merchant belongs here.
+_CARD_NETWORKS = frozenset({"visa", "mastercard", "amex", "discover"})
 
 # Transaction-type abbreviations, rejected for *every* category rather than
 # only for people. A statement's description column is mostly these, and the
@@ -129,6 +139,14 @@ _STREET_SUFFIX = frozenset("""
 # the pattern layer already owns.
 _ALL_MASK = re.compile(r"^[Xx*•#\-\s]+$")
 _ID_FRAGMENT = re.compile(r"[A-Z]{2,}-\d|\d-\d")
+# "Amazon.com" and "Retail.OrderHistory.1.csv" were both offered as people.
+_DOTTED_WORD = re.compile(r"[A-Za-z]\.[A-Za-z]{2,}")
+
+# Part-of-speech tags for a column heading: common nouns and a participle -
+# "Order Placed", "Items Ordered", "Amount Paid", "Sold". A personal name is
+# tagged a proper noun, even one that is also an English verb ("Drew", "Reed").
+_HEADING_NOUNS = frozenset({"NN", "NNS"})
+_PARTICIPLES = frozenset({"VBN", "VBD"})
 
 _NOT_A_NAME = frozenset({
     "order", "orders", "debt", "debts", "title", "titles", "asset", "assets",
@@ -144,6 +162,7 @@ _NOT_A_NAME = frozenset({
     "medical", "dental", "vision", "extra-curricular", "extracurricular",
     "tutoring", "venue", "grounds", "jurisdiction", "residency", "marriage",
     "divorce", "parent-time", "parenting", "visitation", "arrears", "arrearages",
+    "gift", "gifts",
 })
 # Seasons are deliberately absent. "Spring Brake" appeared in the sample - a
 # typo for Spring Break - and adding "brake" and the four seasons would have
@@ -313,7 +332,13 @@ def suggest(documents: dict[str, str], protected: dict[str, list[tuple[int, int]
                 # as one: a payment ledger prints its payer and payee on
                 # consecutive lines, and "Elizabeth Kimball Jenna Harrington"
                 # came back as one person. Each line is its own candidate.
+                offset = ent.start_char
                 for line in ent.text.split("\n"):
+                    tags = [tok.tag_ for tok in ent
+                            if offset <= tok.idx < offset + len(line) and tok.is_alpha]
+                    offset += len(line) + 1
+                    if _is_heading(tags):
+                        continue
                     value = " ".join(line.split()).strip(" .,;:'\"+-–—*#")
                     value = re.sub(r"['\u2019]s$", "", value).strip()   # drop possessives
                     category = refine_category(value, label_category)
@@ -327,6 +352,37 @@ def suggest(documents: dict[str, str], protected: dict[str, list[tuple[int, int]
                     item.documents.add(label)
 
     return sorted(merged.values(), key=lambda s: (s.category, -s.count, s.text.casefold()))
+
+
+def _is_heading(tags: list[str]) -> bool:
+    """A column heading the model read as an entity: "Order Placed" (NN VBN).
+
+    Only common nouns and at least one participle. One proper noun anywhere
+    keeps the candidate, so a surname that is also a verb survives.
+    """
+    return (any(tag in _PARTICIPLES for tag in tags)
+            and all(tag in _PARTICIPLES or tag in _HEADING_NOUNS for tag in tags))
+
+
+def drop_bare_names(suggestions: list[Suggestion]) -> list[Suggestion]:
+    """Drop a one-word person already inside a fuller name from the same documents.
+
+    An order export proposed "DAVID" twelve times beside "DAVID PRATT". One
+    name-list entry matches the first name and the surname on their own, so
+    ticking the full name already covers the bare one, and listing both only
+    lengthens a list the operator has to read. A bare name kept anywhere the
+    full name was not proposed stays: there it is the only proposal.
+    """
+    parts: dict[str, set[str]] = {}
+    for item in suggestions:
+        tokens = item.text.split()
+        if item.category != "person" or len(tokens) < 2:
+            continue
+        for token in (tokens[0], tokens[-1]):
+            parts.setdefault(token.strip(".,").casefold(), set()).update(item.documents)
+    return [item for item in suggestions
+            if item.category != "person" or len(item.text.split()) != 1
+            or not item.documents <= parts.get(item.text.strip(".,").casefold(), set())]
 
 
 def _chunks(text: str):
@@ -391,7 +447,7 @@ def _plausible(value: str, category: str) -> bool:
     # candidate hid the junk word behind it
     bare = [re.sub(r"['’]s$", "", tok.strip(".,'’-").casefold())
             for tok in tokens]
-    if any(tok in _TRANSACTION_WORDS for tok in bare):
+    if any(tok in _TRANSACTION_WORDS or tok in _CARD_NETWORKS for tok in bare):
         return False
     # a lone word that is only an organization marker is a fragment of a name,
     # not a name: "Bank", "Credit", "Services"
@@ -411,6 +467,10 @@ def _plausible(value: str, category: str) -> bool:
     if category == "person" and any(tok in _NEVER_IN_A_NAME for tok in bare):
         return False
     if category == "person":
+        # Nobody's name has a digit or a domain in it; a product title has
+        # both - "Mario Kart 8", "OXO Good Grips 3", "Amazon.com"
+        if any(ch.isdigit() for ch in value) or _DOTTED_WORD.search(value):
+            return False
         # a person suggestion worth reviewing has at least one capitalised word
         if not any(tok[:1].isupper() for tok in value.split()):
             return False

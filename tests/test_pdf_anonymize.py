@@ -279,3 +279,31 @@ def test_the_page_header_above_the_holder_is_not_part_of_the_address(tmp_path):
     for mode in ("anonymize", "redact"):
         out, _result, _store = _run(tmp_path, _pdf(tmp_path, cells, name=f"{mode}.pdf"), mode=mode)
         assert "December 15, 2020 - Page 1 of 4" in _text(out), mode
+
+
+# ---------------------------------------------------------------------------
+# OCR's predictable misreads
+# ---------------------------------------------------------------------------
+
+
+def test_a_misread_name_or_number_on_a_scan_is_still_found():
+    store, _ = review.build_store([("Anthony Garcia", "person"), ("Nathan C Blackburn", "person")])
+    store.add_value("bank_account", "1027-4419-3301")
+    store.add_value("employee_id", "124735")
+    words = [(0, 0, 10, 10, t, 0, 0, i) for i, t in enumerate(
+        ["Garcla", "BLACKBUM", "1O27-4419-33O1", "Garden", "Statement", "1,247.35", "12/47/35"])]
+    found = {hit.text: hit.replacement
+             for hit, _rect in pdf_processor._ocr_near_misses(words, store, Settings())}
+    garcia = next(e for e in store.persons() if e.canonical.startswith("Anthony"))
+    assert found["Garcla"] == garcia.surrogate.last
+    assert found["BLACKBUM"].isupper()
+    assert found["1O27-4419-33O1"].startswith("[ACCOUNT")
+    for left in ("Garden", "Statement", "1,247.35", "12/47/35"):
+        assert left not in found, f"{left} was taken"
+
+
+def test_ocr_reads_a_run_of_asterisks_as_other_marks():
+    from redactor import patterns
+    found = [(m.text, m.category) for m in
+             patterns.scan("Payment method Visa +*8779 Mastercard «*1741 Status")]
+    assert ("8779", "masked_account") in found and ("1741", "masked_account") in found

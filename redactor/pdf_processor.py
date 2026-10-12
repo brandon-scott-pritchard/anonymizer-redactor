@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pymupdf
 
-from . import categories, engine, names as _names, ocr
+from . import categories, engine, names as _names, ocr, patterns
 from .engine import Hit, PersonMatcher, Settings
 from .mapping import MappingStore
 
@@ -363,6 +363,13 @@ _ZIP_LINE = re.compile(r"\b[A-Z]{2}\.?[ \t]+\d{5}(?:-\d{4})?[ \t]*$")
 _MONEY_ON_LINE = re.compile(r"\d[\d,]*\.\d{2}")
 # the lines above the ZIP: a street number, or a person's or company's name
 _ADDRESS_LINE = re.compile(r"^\s*(?:\d{1,6}[A-Za-z]?\s+\S|P\.?\s?O\.?\s+Box\b|[A-Za-z])")
+# The heading over a block names what the address is for - "Shipping Address",
+# "Billing address", "Bill to:" - and is the one line of it worth keeping: an
+# order's shipping and billing blocks were otherwise indistinguishable once
+# covered. No name or street ends in a colon.
+_ADDRESS_HEADING = re.compile(
+    r"(?i)^\s*(?:[\w&/' ]{0,30}\baddress(?:ee)?|(?:ship|bill|sold|mail|deliver(?:ed)?|remit)"
+    r"\s+to|[^:\n]{0,40}:)\s*:?\s*$")
 
 # A lockbox is the institution's address, not anybody's home, and the line
 # above it is the institution's name - "Write: Pioneer Trail Bank, N.A. /
@@ -449,7 +456,8 @@ def address_blocks(words, ocr: bool = False) -> list[pymupdf.Rect]:
                     or _numbered_but_not_an_address(line)
                     # must be the line directly above, not across a gap
                     or top.y0 - line_rect.y0 > height * 2.2
-                    or _INSTITUTION_LINE.search(line)):
+                    or _INSTITUTION_LINE.search(line)
+                    or _ADDRESS_HEADING.match(line)):
                 break
             block |= line_rect
             top = line_rect
@@ -817,6 +825,89 @@ def _write(page: pymupdf.Page, edit: _Edit, span: dict, right_limit: float) -> b
     return True
 
 
+def _distance(a: str, b: str, limit: int) -> int:
+    """Edit distance between ``a`` and ``b``, giving up past ``limit``."""
+    if abs(len(a) - len(b)) > limit:
+        return limit + 1
+    previous = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        current = [i]
+        for j, cb in enumerate(b, 1):
+            current.append(min(previous[j] + 1, current[j - 1] + 1,
+                               previous[j - 1] + (ca != cb)))
+        if min(current) > limit:
+            return limit + 1
+        previous = current
+    return previous[-1]
+
+
+# Characters OCR swaps among themselves; a misread value is compared in this
+# folded alphabet, so "1O27-4419" and "1027-4419" are the same number.
+_OCR_FOLD = str.maketrans({"o": "0", "O": "0", "l": "1", "I": "1", "i": "1", "|": "1",
+                           "s": "5", "S": "5", "b": "6", "B": "8", "z": "2", "Z": "2"})
+
+
+def _allowance(length: int) -> int:
+    return 2 if length >= 9 else 1
+
+
+def _ocr_near_misses(words, store: MappingStore, settings: Settings):
+    """(hit, rect) for every OCR word within a letter or two of a registered value.
+
+    OCR misreads predictably - an l for a 1, an O for a 0, a dropped or doubled
+    letter - and a misread name or number matches nothing exactly, while the
+    picture under it shows the real one to anybody who looks. On a scanned page
+    a registered name part of five letters or more, or a registered number of
+    six characters or more, is found one character off, two if it is nine or
+    longer. Only on scans: a text layer spells what it shows.
+    """
+    names: list[tuple[str, object, str]] = []
+    values: list[tuple[str, object]] = []
+    for entity in store.entities.values():
+        if not entity.enabled or not settings.category_enabled(entity.category):
+            continue
+        if entity.is_person and entity.person is not None:
+            person, fake = entity.person, entity.surrogate
+            parts = [(person.first, fake.first if fake else "")]
+            parts += list(zip(person.middles, (fake.middles if fake else ()) or [""] * 9))
+            parts += [(person.last, fake.last if fake else "")]
+            for piece, stand_in in parts:
+                bit = re.sub(r"[^a-z]", "", (piece or "").casefold())
+                if len(bit) >= GLUED_NAME_MIN:
+                    names.append((bit, entity, stand_in))
+        elif not entity.is_person:
+            folded = re.sub(r"[^0-9a-z]", "", entity.canonical.translate(_OCR_FOLD).casefold())
+            if len(folded) >= 6 and any(ch.isdigit() for ch in folded):
+                values.append((folded, entity))
+    if not names and not values:
+        return []
+    out = []
+    for x0, y0, x1, y1, text, *_rest in words:
+        letters = re.sub(r"[^a-z]", "", text.casefold())
+        folded = re.sub(r"[^0-9a-z]", "", text.translate(_OCR_FOLD).casefold())
+        match, replacement = None, ""
+        if len(letters) >= GLUED_NAME_MIN:
+            found = next(((e, part) for bit, e, part in names
+                          if _distance(letters, bit, _allowance(len(bit))) <= _allowance(len(bit))),
+                         None)
+            if found:
+                match, replacement = found[0], _names.match_case(text, found[1] or found[0].replacement)
+        # a figure or a date is never a misread identifier, however its digits fold
+        if match is None and len(folded) >= 6 and not (
+                patterns._CURRENCY_SHAPE.match(text.strip("+-()$ ")) or patterns._DATE_ONLY.match(text)):
+            match = next((e for value, e in values
+                          if _distance(folded, value, _allowance(len(value)))
+                          <= _allowance(len(value))), None)
+            replacement = match.replacement if match is not None else ""
+        if match is None:
+            continue
+        rect = pymupdf.Rect(x0, y0, x1, y1) + (-OCR_BOX_PADDING, -OCR_BOX_PADDING,
+                                                OCR_BOX_PADDING, OCR_BOX_PADDING)
+        out.append((Hit(0, len(text), text, match.category, replacement or engine.REDACTION_TEXT,
+                        match.key, engine.FUZZY_PRIORITY), rect))
+    return out
+
+
 # A recognised word that begins or ends with a registered name is that name
 # with its neighbours glued on. RapidOCR returns a line with its spaces lost
 # as often as not - "NATHANCBLACKBURN", "fromBank***1711" - and no pattern
@@ -902,7 +993,8 @@ def _plan_edits(word_sets: list[list], store, anon_settings, matcher, settings,
                     say, words_in = "", fresh
                 edits.append(_Edit(words_in, say, run_hits[0]))
         if ocr:
-            for hit, rect in _glued_names(words, store, settings):
+            for hit, rect in [*_glued_names(words, store, settings),
+                              *_ocr_near_misses(words, store, settings)]:
                 rect = rect + (OCR_BOX_PADDING, OCR_BOX_PADDING, -OCR_BOX_PADDING, -OCR_BOX_PADDING)
                 if claim([rect]):
                     edits.append(_Edit([rect], hit.replacement, hit))
@@ -1522,7 +1614,8 @@ def process(
                     hits.append((hit, rects))
             if report.ocr_used:
                 for words in word_sets:
-                    for hit, rect in _glued_names(words, store, settings):
+                    for hit, rect in [*_glued_names(words, store, settings),
+                                      *_ocr_near_misses(words, store, settings)]:
                         if any(rect in b for b in boxed):
                             continue
                         boxed.append(rect)
