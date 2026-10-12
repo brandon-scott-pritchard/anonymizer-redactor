@@ -100,3 +100,20 @@ def test_a_scan_is_refused_when_every_engine_is_disabled(scanned_page, tmp_path,
 def test_ocr_boxes_get_extra_padding():
     """OCR boxes are approximate; too wide costs nothing, too narrow leaks."""
     assert pdf_processor.OCR_BOX_PADDING > pdf_processor.BOX_PADDING
+
+
+def test_a_tesseract_failure_reports_tesseracts_own_words(tmp_path, monkeypatch):
+    """Tesseract echoes the bytes of an image it cannot open, and pytesseract's
+    strict UTF-8 decode turned the real cause into a UnicodeDecodeError."""
+    pytesseract = pytest.importorskip("pytesseract")
+    from PIL import Image
+    engine = ocr.TesseractEngine()
+    if not engine.available()[0]:
+        pytest.skip("no Tesseract")
+    fake = tmp_path / "tesseract"
+    fake.write_text("#!/bin/sh\nprintf 'Leptonica Error in pixRead: image file not found: \\211PNG\\n' >&2\nexit 1\n")
+    fake.chmod(0o755)
+    monkeypatch.setattr(pytesseract.pytesseract, "tesseract_cmd", str(fake))
+    with pytest.raises(pytesseract.TesseractError) as failure:
+        engine.read(Image.new("RGB", (40, 20), "white"))
+    assert "image file not found" in str(failure.value)

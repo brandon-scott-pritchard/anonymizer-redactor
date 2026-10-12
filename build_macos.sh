@@ -7,6 +7,35 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# The app is built and tested on Python 3.11, and PyInstaller freezes for the
+# architecture of the interpreter it runs under - so the build needs a 3.11
+# built for THIS Mac. "python3" alone is not that: Homebrew's moved on to 3.14,
+# and the first "python3.11" on this machine's PATH is an Intel copy, which
+# would have produced an Intel app running under Rosetta. Set PYTHON to choose
+# one explicitly.
+WANT="3.11 $(uname -m)"
+describe() { "$1" -c 'import platform, sys; print("%d.%d %s" % (*sys.version_info[:2], platform.machine()))' 2>/dev/null; }
+pick_python() {
+  if [ -n "${PYTHON:-}" ]; then
+    [ "$(describe "$PYTHON")" = "$WANT" ] && { echo "$PYTHON"; return 0; }
+    echo "PYTHON=$PYTHON is $(describe "$PYTHON" || echo 'not runnable'), not Python $WANT." >&2
+    return 1
+  fi
+  local candidate found
+  for candidate in python3.11 python3 /opt/homebrew/bin/python3.11 \
+      /Library/Frameworks/Python.framework/Versions/3.11/bin/python3.11 \
+      /opt/anaconda3/bin/python3.11 /usr/local/bin/python3.11; do
+    found="$(command -v "$candidate" 2>/dev/null)" || continue
+    [ "$(describe "$found")" = "$WANT" ] && { echo "$found"; return 0; }
+  done
+  echo "No Python $WANT found. Install one (brew install python@3.11) or set" >&2
+  echo "PYTHON=/path/to/python3.11 and run this again." >&2
+  return 1
+}
+BUILD_PYTHON="$(pick_python)"
+echo "==> Building with $BUILD_PYTHON ($(describe "$BUILD_PYTHON"))"
+
 STAGE="$(mktemp -d /tmp/anonymizer-build-XXXXXX)"
 BUILD_VENV="$STAGE/venv"
 cleanup() { rm -rf "$STAGE"; }
@@ -28,7 +57,7 @@ else
 fi
 
 echo "==> Creating build environment"
-python3 -m venv "$BUILD_VENV"
+"$BUILD_PYTHON" -m venv "$BUILD_VENV"
 "$BUILD_VENV/bin/python" -m pip install --upgrade pip wheel
 "$BUILD_VENV/bin/python" -m pip install -r "$STAGE/src/requirements.txt" pyinstaller
 "$BUILD_VENV/bin/python" -m spacy download en_core_web_sm

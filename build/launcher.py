@@ -11,8 +11,6 @@ import sys
 
 
 def selftest() -> int:
-    from pathlib import Path
-
     from redactor import __version__, ner, ocr
 
     lines = [f"Document Redactions & Anonymization {__version__}",
@@ -36,15 +34,37 @@ def selftest() -> int:
     report = "\n".join(lines)
     print(report)
     # the Windows build is windowed (console=False), so stdout goes nowhere;
-    # a file beside the executable is the only visible result there
-    try:
-        target = Path(sys.executable).resolve().parent / "selftest.txt"
-        target.write_text(report + "\n", encoding="utf-8")
+    # a file is the only visible result there
+    for target in _selftest_targets():
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(report + "\n", encoding="utf-8")
+        except OSError:
+            continue
         print(f"written to {target}")
-    except OSError:
-        pass
+        break
 
     return 0 if ok and model_ok else 1
+
+
+def _selftest_targets():
+    """Where the self-test report goes, most visible first.
+
+    Never inside the macOS bundle: a file written into Contents/MacOS breaks
+    the app's code seal, and codesign then reports it as modified. On Windows
+    nothing is sealed, so beside the .exe is where anyone looks first.
+    """
+    import os
+    from pathlib import Path
+
+    home = Path.home()
+    if sys.platform == "darwin":
+        return [home / "Library" / "Logs" / "Anonymizer-Redactor" / "selftest.txt"]
+    if sys.platform.startswith("win"):
+        local = Path(os.environ.get("LOCALAPPDATA", home / "AppData" / "Local"))
+        return [Path(sys.executable).resolve().parent / "selftest.txt",
+                local / "Anonymizer-Redactor" / "selftest.txt"]
+    return [home / ".cache" / "Anonymizer-Redactor" / "selftest.txt"]
 
 
 def main() -> int:

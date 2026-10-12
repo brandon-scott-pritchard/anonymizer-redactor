@@ -218,6 +218,17 @@ def bundled_tesseract() -> tuple[Path, Path] | None:
 # --------------------------------------------------------------------------
 
 
+def _readable_errors(error_string: bytes) -> str:
+    """Tesseract's own error message, however it is encoded.
+
+    pytesseract decodes Tesseract's stderr strictly as UTF-8, and Tesseract
+    echoes the bytes of an image it could not open - "\\x89PNG". The decode
+    then raised UnicodeDecodeError, which is what the run report showed instead
+    of "image file not found: /tmp/tess_..._input.PNG", the actual cause.
+    """
+    return " ".join(error_string.decode("utf-8", "replace").splitlines()).strip()
+
+
 class TesseractEngine:
     name = "Tesseract"
 
@@ -239,6 +250,7 @@ class TesseractEngine:
             import pytesseract
         except Exception as exc:                    # pragma: no cover - env dependent
             return False, f"pytesseract is not installed ({exc})"
+        pytesseract.pytesseract.get_errors = _readable_errors
 
         bundled = bundled_tesseract()
         if bundled:

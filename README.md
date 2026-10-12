@@ -567,6 +567,17 @@ macOS:
 Produces `dist/Document Redactions & Anonymization.app`. It is unsigned, so the first launch
 needs a right-click → Open, then Open again in the dialog.
 
+The build needs Python 3.11 built for the Mac it runs on—PyInstaller freezes
+for the interpreter's architecture, and an Intel 3.11 on an Apple Silicon Mac
+would produce an Intel app. The script looks in the usual places and stops if
+none fits; `PYTHON=/path/to/python3.11 ./build_macos.sh` chooses one.
+
+To check a build, run
+`"dist/Document Redactions & Anonymization.app/Contents/MacOS/Anonymizer-Redactor" --selftest`.
+It prints the OCR engine and language model the bundle actually loaded, and
+writes the same to `~/Library/Logs/Anonymizer-Redactor/selftest.txt`—never into
+the app, where a new file would break its code signature.
+
 Windows—the `.exe` must be built on a Windows machine; it cannot be
 cross-built from macOS. Package the sources to send over:
 
@@ -592,7 +603,7 @@ the language model, and copy the result back into `dist/`.
 ~/.venvs/anonymizer-redactor/bin/python -m pytest tests/ -q
 ```
 
-674 tests covering detector accuracy, allowlist protection, judicial-officer
+677 tests covering detector accuracy, allowlist protection, judicial-officer
 harvesting in every layout a court prints, child rosters and custody clauses,
 name-variant expansion and merging, overlapping-name folding, typo matching,
 Word's own run and tab structure, surrogate determinism, image redaction,
