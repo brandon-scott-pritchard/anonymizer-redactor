@@ -302,3 +302,10 @@ span.expander { cursor: default; }
 tr.form-row td { font-size: 15px; background: color-mix(in srgb, var(--line) 25%, transparent); }
 tr.form-row td:nth-child(3) { padding-left: 28px; }
 td.warn.small { font-size: 14px; }
+
+/* folders dropped in whole: hundreds of rows scroll, and what is left out is listed */
+ul.files { max-height: 340px; overflow-y: auto; }
+details.skipped { margin: 8px 0 0; }
+details.skipped summary { cursor: pointer; font-size: 15px; }
+details.skipped ul { max-height: 180px; overflow-y: auto; margin: 6px 0 0; padding-left: 20px;
+                     font-size: 14px; color: var(--muted); }

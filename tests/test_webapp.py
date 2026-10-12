@@ -224,3 +224,79 @@ def test_the_review_list_groups_forms_and_splits_one_out(client):
     split = client.post("/api/entities/split", json={"key": form_key}).json()
     alone = next(r for r in split["entities"] if r["key"] == form_key)
     assert alone["parent"] is None and alone["replacement"] != head["replacement"]
+
+
+def _docx_bytes(*lines):
+    import io
+    docx = pytest.importorskip("docx")
+    document = docx.Document()
+    for line in lines:
+        document.add_paragraph(line)
+    buffer = io.BytesIO()
+    document.save(buffer)
+    return buffer.getvalue()
+
+
+DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
+def test_a_dropped_folder_comes_back_as_the_same_tree(client):
+    import io
+    import zipfile
+    body = _docx_bytes("Petitioner Kyle D Harrington")
+    sent = client.post("/api/files", files=[
+        ("files", ("Petition.docx", body, DOCX_TYPE)),
+        ("files", ("Jan.docx", body, DOCX_TYPE)),
+        ("files", ("Jan.docx", body, DOCX_TYPE)),
+    ], data={"paths": ["Harrington Case/Pleadings/Petition.docx",
+                       "Harrington Case/2024 Statements/Jan.docx",
+                       "Harrington Case/2023 Statements/Jan.docx"],
+             "skipped": ["Harrington Case/2024 Statements/check.jpg", "Harrington Case/.DS_Store"]}
+    ).json()
+    assert sent["added"] == 3
+    assert [f["name"] for f in sent["files"]] == [
+        "Harrington Case/Pleadings/Petition.docx", "Harrington Case/2024 Statements/Jan.docx",
+        "Harrington Case/2023 Statements/Jan.docx"]
+    assert sent["skipped"] == ["Harrington Case/2024 Statements/check.jpg"]
+    options = {"docx_mode": "anonymize", "ner": False, "ocr": False}
+    names = [{"name": "Kyle D Harrington", "category": "person"}]
+    wait_for(client, client.post("/api/review", json={"options": options, "names": names}).json()["job"])
+    result = wait_for(client, client.post("/api/run", json={"options": options, "password": "pw-123456"}).json()["job"])
+    assert result["failed"] == 0 and result["skipped"] == 1
+    with zipfile.ZipFile(io.BytesIO(client.get("/api/download/archive").content)) as archive:
+        delivered = sorted(archive.namelist())
+    assert len(delivered) == 3 and len({n.split("/")[0] for n in delivered}) == 1
+    assert not any("harrington" in n.casefold() for n in delivered)
+    assert [n.split("/", 1)[1] for n in delivered] == [
+        "2023 Statements/Jan.docx", "2024 Statements/Jan.docx", "Pleadings/Petition.docx"]
+    report = client.get("/api/download/report").text
+    assert "Harrington Case/2024 Statements/check.jpg" in report
+
+
+@pytest.mark.parametrize("path", ["../../escape.docx", "a/../../escape.docx"])
+def test_a_path_that_climbs_out_lands_flat_in_the_upload_area(client, path):
+    sent = client.post("/api/files", files=[("files", ("escape.docx", _docx_bytes("x"), DOCX_TYPE))],
+                       data={"paths": [path]}).json()
+    assert [f["name"] for f in sent["files"]] == ["escape.docx"]
+    assert all(webapp.SESSION.uploads in p.parents for p in webapp.SESSION.files)
+
+
+def test_remove_all_clears_files_and_the_left_out_list(client):
+    client.post("/api/files", files=[("files", ("a.docx", _docx_bytes("x"), DOCX_TYPE))],
+                data={"paths": ["Case/a.docx"], "skipped": ["Case/b.png"]})
+    cleared = client.delete("/api/files").json()
+    assert cleared == {"files": [], "skipped": []}
+
+
+def test_the_app_windows_folder_button_reads_the_folder_from_disk(client, tmp_path):
+    root = tmp_path / "Case"
+    (root / "2024").mkdir(parents=True)
+    (root / "2024" / "a.docx").write_bytes(_docx_bytes("x"))
+    (root / "2024" / "photo.jpg").write_bytes(b"\xff\xd8")
+    added = webapp.add_paths([root])
+    assert added["added"] == 1
+    assert [f["name"] for f in added["files"]] == ["Case/2024/a.docx"]
+    assert added["skipped"] == ["Case/2024/photo.jpg"]
+    # copied in: the original stays where it was, untouched
+    assert (root / "2024" / "a.docx").exists()
+    assert webapp.SESSION.uploads in webapp.SESSION.files[0].parents

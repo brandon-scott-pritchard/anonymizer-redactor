@@ -102,10 +102,44 @@ function Progress({ busy }) {
   </div>`;
 }
 
+// Everything in a drop, folders walked, each file with its path inside what
+// was dropped ("Case/2024/statement.pdf"). The entries are taken from the
+// event before the first await: the browser empties dataTransfer once the
+// handler returns.
+async function readDrop(dataTransfer) {
+  const entries = [...(dataTransfer.items || [])]
+    .map((item) => (item.webkitGetAsEntry ? item.webkitGetAsEntry() : null))
+    .filter(Boolean);
+  if (!entries.length) return [...dataTransfer.files].map((file) => ({ file, path: file.name }));
+  const out = [];
+  const walk = async (entry, prefix) => {
+    if (entry.isFile) {
+      const file = await new Promise((ok, fail) => entry.file(ok, fail));
+      out.push({ file, path: prefix + entry.name });
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      for (;;) {                      // readEntries hands back a batch at a time
+        const batch = await new Promise((ok, fail) => reader.readEntries(ok, fail));
+        if (!batch.length) break;
+        for (const child of batch) await walk(child, `${prefix}${entry.name}/`);
+      }
+    }
+  };
+  for (const entry of entries) await walk(entry, "");
+  return out;
+}
+
+function folderCount(files) {
+  return new Set(files.map((f) => f.name.includes("/") ? f.name.slice(0, f.name.lastIndexOf("/")) : ""))
+    .size;
+}
+
 function FilesStep({ state, set, actions }) {
   const [over, setOver] = useState(false);
   const pick = () => document.getElementById("filepick").click();
-  const onFiles = (list) => list.length && actions.upload(list);
+  const onPicked = (list) => list.length && actions.upload(list);
+  const asItems = (files) => [...files].map((file) => ({ file, path: file.webkitRelativePath || file.name }));
+  const folders = folderCount(state.files);
   return html`
     <div class="columns">
       <div class="card">
@@ -114,16 +148,30 @@ function FilesStep({ state, set, actions }) {
              onClick=${pick}
              onDragOver=${(e) => { e.preventDefault(); setOver(true); }}
              onDragLeave=${() => setOver(false)}
-             onDrop=${(e) => { e.preventDefault(); setOver(false); onFiles([...e.dataTransfer.files]); }}>
-          Drop documents here, or click to choose. They stay on this computer.
+             onDrop=${async (e) => { e.preventDefault(); setOver(false);
+                                     onPicked(await readDrop(e.dataTransfer)); }}>
+          Drop documents or whole folders here, or click to choose files.
+          Folders keep their layout in the results. Everything stays on this computer.
           <input id="filepick" type="file" multiple accept=".docx,.pdf" hidden
-                 onChange=${(e) => { onFiles([...e.target.files]); e.target.value = ""; }} />
+                 onChange=${(e) => { onPicked(asItems(e.target.files)); e.target.value = ""; }} />
+          <input id="folderpick" type="file" multiple hidden webkitdirectory=${true}
+                 onChange=${(e) => { onPicked(asItems(e.target.files)); e.target.value = ""; }} />
         </div>
+        <div class="bar">
+          <button onClick=${actions.chooseFolder}>Choose folder…</button>
+          ${state.files.length ? html`<button onClick=${actions.removeAll}>Remove all</button>` : null}
+        </div>
+        ${state.files.length ? html`<p class="hint">${state.files.length} document${
+          state.files.length === 1 ? "" : "s"}${folders > 1 || state.files.some((f) => f.name.includes("/"))
+          ? ` in ${folders} folder${folders === 1 ? "" : "s"}` : ""}.</p>` : null}
+        ${state.skipped.length ? html`<details class="skipped">
+          <summary class="warn">${`${state.skipped.length} other file${state.skipped.length === 1 ? "" : "s"} will be left out - not PDF or Word. They are listed in the run report and nothing from them is delivered.`}</summary>
+          <ul>${state.skipped.map((name, i) => html`<li key=${i}>${name}</li>`)}</ul>
+        </details>` : null}
         <ul class="files">
           ${state.files.map((f, i) => html`<li key=${i}>
             <span class="kind">${(f.kind || "?").toUpperCase()}</span>
             <span class="name">${f.name}</span>
-            <span class="hint">anonymize or redact</span>
             <button onClick=${() => actions.removeFile(i)}>Remove</button>
           </li>`)}
         </ul>
@@ -433,6 +481,8 @@ function RunStep({ state, actions, meta }) {
           ${result.failed
             ? `${result.failed} file(s) were refused or failed and are NOT in the archive.`
             : "Finished."}</p>
+        ${result.skipped ? html`<p class="hint">${result.skipped} other file(s) in the
+          folders were left out - not PDF or Word. The report lists them.</p>` : null}
         <div class="downloads">
           ${result.archive ? html`<a href=${dl("archive")} download><button class="primary">Download archive</button></a>` : null}
           ${result.key ? html`<a href=${dl("key")} download><button>Download mapping key</button></a>` : null}
@@ -464,6 +514,7 @@ function App() {
   const [suggestions, setSuggestions] = useState([]);
   const [suggChecked, setSuggChecked] = useState(new Set());
   const [suggCats, setSuggCats] = useState({});
+  const [skipped, setSkipped] = useState([]);
   const [entities, setEntities] = useState([]);
   const [active, setActive] = useState(0);
   const [instructions, setInstructions] = useState("");
@@ -502,6 +553,10 @@ function App() {
     finally { settle(); }
   }
 
+  const applyFiles = (payload) => {
+    setFiles(payload.files); setSkipped(payload.skipped || []);
+  };
+
   const applyReview = (payload) => {
     setEntities(payload.entities); setRisky(payload.risky); setUnused(payload.unused);
     setActive(payload.active); setInstructions(payload.instructions);
@@ -510,17 +565,51 @@ function App() {
   const actions = {
     go: (target) => setStep(target),
 
-    upload: (list) => guarded(async () => {
-      const form = new FormData();
-      for (const file of list) form.append("files", file);
-      track("Uploading", 0);
-      const result = await api.post("/api/files", form);
-      setFiles(result.files);
+    // Documents go up a batch at a time - a case folder runs to hundreds -
+    // each with its path inside the folder it was dropped in. The rest are
+    // only named, so the report can list them; their contents never leave.
+    upload: (items) => guarded(async () => {
+      const quiet = (name) => name.startsWith(".") || name.startsWith("~$")
+        || ["thumbs.db", "desktop.ini"].includes(name.toLowerCase());
+      const leaf = (path) => path.slice(path.lastIndexOf("/") + 1);
+      const kept = items.filter((item) => !quiet(leaf(item.path)));
+      const docs = kept.filter((item) => /\.(pdf|docx)$/i.test(item.path));
+      const others = kept.filter((item) => !/\.(pdf|docx)$/i.test(item.path));
+      let result = null;
+      const BATCH = 20;
+      for (let start = 0; start < Math.max(docs.length, 1); start += BATCH) {
+        const form = new FormData();
+        for (const item of docs.slice(start, start + BATCH)) {
+          form.append("files", item.file);
+          form.append("paths", item.path);
+        }
+        if (start === 0) for (const item of others) form.append("skipped", item.path);
+        track(docs.length > BATCH
+          ? `Adding documents ${Math.min(start + BATCH, docs.length)} of ${docs.length}`
+          : "Adding documents", docs.length ? start / docs.length : 1);
+        result = await api.post("/api/files", form);
+      }
+      applyFiles(result);
+    }),
+
+    chooseFolder: () => guarded(async () => {
+      // the app window: a native folder panel, read straight from disk
+      const bridge = window.pywebview && window.pywebview.api;
+      if (bridge && bridge.choose_folder) {
+        track("Reading the folder", 0);
+        const result = await bridge.choose_folder();
+        if (result) applyFiles(result);
+        return;
+      }
+      document.getElementById("folderpick").click();   // a browser's own
     }),
 
     removeFile: (index) => guarded(async () => {
-      const result = await api.del(`/api/files/${index}`);
-      setFiles(result.files);
+      applyFiles(await api.del(`/api/files/${index}`));
+    }),
+
+    removeAll: () => guarded(async () => {
+      applyFiles(await api.del("/api/files"));
     }),
 
     toNames: () => guarded(async () => {
@@ -657,7 +746,7 @@ function App() {
 
   const state = { files, options, password, showPassword, namesText, captions,
                   officials, guardNotes, overlaps,
-                  suggestions, suggChecked, suggCats, entities, risky, unused, active, instructions,
+                  suggestions, suggChecked, suggCats, entities, risky, unused, active, instructions, skipped,
                   editing, runInfo, busy };
 
   return html`<div>

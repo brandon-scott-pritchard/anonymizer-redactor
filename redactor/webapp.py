@@ -13,7 +13,10 @@ Run with ``python -m redactor.webapp``.
 
 from __future__ import annotations
 
+import os
+import re
 import secrets
+import shutil
 import sys
 import tempfile
 import threading
@@ -22,7 +25,7 @@ import webbrowser
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -69,6 +72,10 @@ class Session:
         self.uploads.mkdir()
         self.output.mkdir()
         self.files: list[Path] = []
+        # where each file sat in what was dropped in ("Case/2024/a.pdf"), and
+        # what those folders held that is not a PDF or Word file
+        self.relative: dict[Path, str] = {}
+        self.skipped: list[str] = []
         self.store = MappingStore()
         self.caption_names: list[caption.CaptionName] = []
         self.officials: list[officials.Official] = []
@@ -262,7 +269,7 @@ def state():
     ocr_ok, ocr_note = pipeline.pdf_processor.ocr_available()
     return {
         "version": __version__,
-        "files": [{"name": p.name, "kind": pipeline.classify(p)} for p in SESSION.files],
+        **_files_payload(),
         "categories": [{"key": c.key, "label": c.label, "group": c.group}
                        for c in categories.CATEGORIES],
         "name_categories": ["person", "minor", "organization", "location"],
@@ -274,25 +281,81 @@ def state():
     }
 
 
+def _files_payload() -> dict:
+    return {"files": [{"name": SESSION.relative.get(p, p.name), "kind": pipeline.classify(p)}
+                      for p in SESSION.files],
+            "skipped": list(SESSION.skipped)}
+
+
+def _safe_relative(raw: str) -> str | None:
+    """A browser-supplied path inside a dropped folder, or None if it is not one.
+
+    The path names where the file goes in the upload area, so nothing in it may
+    climb out: no "..", no absolute root, no drive letter.
+    """
+    parts = [part for part in re.split(r"[\\/]+", raw or "") if part not in ("", ".")]
+    if not parts or any(part == ".." or "\0" in part for part in parts):
+        return None
+    if os.name == "nt" and any(":" in part for part in parts):
+        return None
+    return "/".join(parts)
+
+
+def _keep(relative: str, write) -> Path:
+    """Store one document under its relative path; ``write(target)`` fills it."""
+    target = SESSION.uploads.joinpath(*relative.split("/"))
+    counter = 1
+    while target.exists():
+        stem, suffix = Path(relative).stem, Path(relative).suffix
+        target = target.with_name(f"{stem}-{counter}{suffix}")
+        counter += 1
+    target.parent.mkdir(parents=True, exist_ok=True)
+    write(target)
+    SESSION.files.append(target)
+    SESSION.relative[target] = relative
+    return target
+
+
 @app.post("/api/files")
-async def upload(files: list[UploadFile]):
+async def upload(files: list[UploadFile] = File(default=[]),
+                 paths: list[str] = Form(default=[]),
+                 skipped: list[str] = Form(default=[])):
+    """Documents, each with its place in a dropped folder when it came in one.
+
+    ``paths[i]`` is ``files[i]``'s path inside what was dropped; ``skipped``
+    names the files the page did not send because they are not PDF or Word,
+    so the report can list them.
+    """
     added = 0
-    for item in files:
-        name = Path(item.filename or "upload").name
-        target = SESSION.uploads / name
-        counter = 1
-        while target.exists():
-            target = SESSION.uploads / f"{target.stem}-{counter}{target.suffix}"
-            counter += 1
-        target.write_bytes(await item.read())
-        if pipeline.classify(target) is None:
-            target.unlink()
+    for index, item in enumerate(files):
+        given = paths[index] if index < len(paths) else ""
+        relative = _safe_relative(given) or Path(item.filename or "upload").name
+        name = relative.rsplit("/", 1)[-1]
+        if pipeline._housekeeping(name):
             continue
-        SESSION.files.append(target)
+        if pipeline.classify(Path(name)) is None:
+            SESSION.skipped.append(relative)
+            continue
+        data = await item.read()
+        _keep(relative, lambda target: target.write_bytes(data))
         added += 1
-    return {"added": added,
-            "files": [{"name": p.name, "kind": pipeline.classify(p)}
-                      for p in SESSION.files]}
+    for name in skipped:
+        relative = _safe_relative(name)
+        if relative and not pipeline._housekeeping(relative.rsplit("/", 1)[-1]):
+            SESSION.skipped.append(relative)
+    return {"added": added, **_files_payload()}
+
+
+def add_paths(paths: list[str | Path]) -> dict:
+    """Add files and whole folders straight from disk - the app window's
+    "Choose folder" button, which has no browser in the way to upload through.
+    The documents are copied into the session; the originals are not touched.
+    """
+    gathered = pipeline.gather([Path(p) for p in paths])
+    for source, relative in gathered.files:
+        _keep(relative, lambda target, source=source: shutil.copyfile(source, target))
+    SESSION.skipped.extend(gathered.skipped)
+    return {"added": len(gathered.files), **_files_payload()}
 
 
 @app.delete("/api/files/{index}")
@@ -300,9 +363,19 @@ def remove_file(index: int):
     if not 0 <= index < len(SESSION.files):
         raise HTTPException(404, "no such file")
     path = SESSION.files.pop(index)
+    SESSION.relative.pop(path, None)
     path.unlink(missing_ok=True)
-    return {"files": [{"name": p.name, "kind": pipeline.classify(p)}
-                      for p in SESSION.files]}
+    return _files_payload()
+
+
+@app.delete("/api/files")
+def remove_all_files():
+    for path in SESSION.files:
+        path.unlink(missing_ok=True)
+    SESSION.files.clear()
+    SESSION.relative.clear()
+    SESSION.skipped.clear()
+    return _files_payload()
 
 
 # --------------------------------------------------------------------------
@@ -459,10 +532,12 @@ async def run(request: Request):
 
     def work(progress):
         result = pipeline.run_job(files, store, settings,
-                                  SESSION.output, password, progress)
+                                  SESSION.output, password, progress,
+                                  relative=dict(SESSION.relative),
+                                  skipped=list(SESSION.skipped))
         SESSION.run_result = result
         outcomes = [{
-            "source": o.source.name, "status": o.status,
+            "source": o.shown, "status": o.status,
             "delivered": o.delivered_name, "hits": o.hits,
             "warnings": o.warnings, "error": o.error,
         } for o in result.outcomes]
@@ -472,6 +547,7 @@ async def run(request: Request):
             "key": bool(result.key_path),
             "report": bool(result.report_path),
             "failed": len(result.failed),
+            "skipped": len(result.skipped),
         }
 
     return {"job": _start_job(work)}

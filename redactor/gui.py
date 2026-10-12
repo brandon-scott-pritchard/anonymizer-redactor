@@ -262,6 +262,8 @@ class App(Tk):
         self.minsize(980, 700)
 
         self.files: list[Path] = []
+        self.relative: dict[Path, str] = {}     # a file's place in an added folder
+        self.skipped: list[str] = []            # what added folders held besides documents
         self.store = MappingStore()
         self.caption_names: list[caption.CaptionName] = []
         # the bench: harvested from the documents, never redacted
@@ -424,6 +426,7 @@ class App(Tk):
         buttons = ttk.Frame(frame)
         buttons.grid(row=2, column=0, sticky="w", pady=(0, 10))
         self._button(buttons, text="Add documents…", command=self.add_files).pack(side="left")
+        self._button(buttons, text="Add folder…", command=self.add_folder).pack(side="left", padx=(6, 0))
         self._button(buttons, text="Remove selected", command=self.remove_files).pack(side="left", padx=6)
         self._button(buttons, text="Clear", command=self.clear_files).pack(side="left")
 
@@ -698,21 +701,45 @@ class App(Tk):
         if added:
             self.status.set(f"{len(self.files)} document(s) selected.")
 
+    def add_folder(self, chosen: str | None = None):
+        """A whole folder: every PDF and Word file in it, at any depth.
+
+        The results come back in the same tree. Anything else in the folder is
+        left out and listed in the run report.
+        """
+        chosen = chosen or filedialog.askdirectory(title="Choose a folder of documents")
+        if not chosen:
+            return
+        gathered = pipeline.gather([Path(chosen)])
+        added = 0
+        for path, relative in gathered.files:
+            if path not in self.files:
+                self.files.append(path)
+                self.relative[path] = relative
+                added += 1
+        self.skipped.extend(s for s in gathered.skipped if s not in self.skipped)
+        self._refresh_files()
+        note = (f"  {len(gathered.skipped)} other file(s) in it will be left out - "
+                "not PDF or Word; the run report lists them." if gathered.skipped else "")
+        self.status.set(f"{added} document(s) added from {Path(chosen).name}.{note}")
+
     def remove_files(self):
         for index in sorted(self.file_list.curselection(), reverse=True):
+            self.relative.pop(self.files[index], None)
             del self.files[index]
         self._refresh_files()
 
     def clear_files(self):
         self.files.clear()
+        self.relative.clear()
+        self.skipped.clear()
         self._refresh_files()
 
     def _refresh_files(self):
         self.file_list.delete(0, "end")
         for path in self.files:
             kind = pipeline.classify(path)
-            action = "anonymize or redact" if kind == "docx" else "redact"
-            self.file_list.insert("end", f"{path.name}    ({kind.upper()} - {action})")
+            self.file_list.insert("end", f"{self.relative.get(path, path.name)}    ({kind.upper()})")
 
     def choose_output(self):
         chosen = filedialog.askdirectory(title="Where should the results go?")
@@ -1274,8 +1301,11 @@ class App(Tk):
         password = self.key_password.get()
         self.run_button.configure(state="disabled")
 
+        relative, skipped = dict(self.relative), list(self.skipped)
+
         def work(report):
-            return pipeline.run_job(files, store, settings, outdir, password, report)
+            return pipeline.run_job(files, store, settings, outdir, password, report,
+                                    relative=relative, skipped=skipped)
 
         self._work("Processing", work, self._run_finished)
 
@@ -1285,7 +1315,7 @@ class App(Tk):
         self._log("")
         self._log("=" * 60)
         for outcome in result.outcomes:
-            line = f"{outcome.source.name}: {outcome.status}"
+            line = f"{outcome.shown}: {outcome.status}"
             if outcome.delivered_name:
                 line += f"  ->  {outcome.delivered_name}"
             line += f"  ({outcome.hits} change(s))"
@@ -1304,9 +1334,13 @@ class App(Tk):
         self.open_button.configure(state="normal")
         self.copy_button.configure(state="normal")
 
+        if result.skipped:
+            self._log(f"{len(result.skipped)} other file(s) in the folders were left out - "
+                      "not PDF or Word. The report lists them.")
+
         failures = result.failed
         if failures:
-            names = ", ".join(f.source.name for f in failures)
+            names = ", ".join(f.shown for f in failures)
             messagebox.showwarning(
                 "Some files were not written",
                 f"These were refused or failed and are NOT in the archive:\n\n{names}\n\n"

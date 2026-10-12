@@ -99,8 +99,28 @@ Windows machine with Tesseract installed. Skip it and RapidOCR covers you.
 
 ### 1. Documents & options
 
-Add DOCX and PDF files. Choose what happens to each kind - DOCX defaults to
-anonymize, PDF to redact:
+Add DOCX and PDF files, or whole folders: drop a folder on the window, or use
+**Choose folder…** (**Add folder…** in the Tk version). Every PDF and Word file
+inside it, at any depth, is processed as one batch, and the results come back
+in the same tree:
+
+```
+Harrington Divorce/                     Baird_Divorce/
+  2024 Bank Statements/                   2024 Bank Statements/
+    Harrington_statement_Jan.pdf   →        Baird_statement_Jan.pdf
+  Pleadings/Petition.docx                 Pleadings/Petition.docx
+```
+
+Folder names are scrubbed exactly like filenames (and left alone when that
+option is off); a name with nothing identifying in it comes back exactly as it
+was. Two folders that scrub to the same name stay separate. Anything in the
+folder that is not a PDF or Word file—a photo of a cheque, a spreadsheet, an
+old `.doc`—is left out, never delivered, and listed by its path in the run
+report. Hidden files and Word's `~$` lock files are ignored, and links are not
+followed. In the app window the folder is read straight from disk; the
+originals are never changed.
+
+Choose what happens to each kind - DOCX defaults to anonymize, PDF to redact:
 
 | Mode | Result |
 | --- | --- |
@@ -603,7 +623,7 @@ the language model, and copy the result back into `dist/`.
 ~/.venvs/anonymizer-redactor/bin/python -m pytest tests/ -q
 ```
 
-677 tests covering detector accuracy, allowlist protection, judicial-officer
+690 tests covering detector accuracy, allowlist protection, judicial-officer
 harvesting in every layout a court prints, child rosters and custody clauses,
 name-variant expansion and merging, overlapping-name folding, typo matching,
 Word's own run and tab structure, surrogate determinism, image redaction,

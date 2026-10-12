@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
 import traceback
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable, Sequence
 
 from dataclasses import replace as _replace
@@ -500,11 +502,16 @@ class FileOutcome:
     source: Path
     kind: str
     status: str                    # processed | refused | error | skipped
-    delivered_name: str = ""
+    delivered_name: str = ""       # relative path inside the archive, "/"-separated
     hits: int = 0
     warnings: list[str] = field(default_factory=list)
     error: str = ""
     detail: object | None = None
+    original: str = ""             # where it sat in what was dropped in
+
+    @property
+    def shown(self) -> str:
+        return self.original or self.source.name
 
 
 @dataclass
@@ -517,6 +524,7 @@ class RunResult:
     started: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     finished: datetime | None = None
     notes: list[str] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)   # left out: not PDF or Word
 
     @property
     def processed(self) -> list[FileOutcome]:
@@ -591,22 +599,118 @@ def anonymized_filename(path: Path, store: MappingStore, settings: Settings,
     stem, suffix = path.stem, path.suffix.lower()
     if not settings.anonymize_filenames:
         return f"{stem}{suffix}"
+    cleaned = _anonymized_stem(stem, store, settings, matcher)
+    # Nothing safe could be salvaged from the original name.
+    return f"{cleaned or f'document_{index:02d}'}{suffix}"
 
+
+def anonymized_folder(name: str, store: MappingStore, settings: Settings,
+                      matcher: PersonMatcher, index: int) -> str:
+    """A delivered folder name, scrubbed the way a filename is.
+
+    "Harrington Divorce/2024 Bank Statements" names the client twice before a
+    single document is opened.
+    """
+    if not settings.anonymize_filenames:
+        return name
+    return _anonymized_stem(name, store, settings, matcher) or f"folder_{index:02d}"
+
+
+def _anonymized_stem(stem: str, store: MappingStore, settings: Settings,
+                     matcher: PersonMatcher) -> str:
+    """The stem with client identifiers replaced, or "" if none can be made safe."""
     sensitive = _sensitive_strings(store)
     spaced = _SEPARATORS.sub(" ", stem).strip()
 
     # First a conservative pass; if anything recognisable survives it, try again
     # with the glued forms broken apart.
     for candidate in (spaced, _GLUE.sub(" ", spaced)):
-        replaced = engine.apply_hits(
-            candidate, engine.scan_text(candidate, store, settings, matcher, register=True)
-        )
-        cleaned = _tidy(replaced)
+        hits = engine.scan_text(candidate, store, settings, matcher, register=True)
+        # nothing to take out: the name goes through exactly as written, so a
+        # dropped folder comes back as the same tree ("2024 Bank Statements",
+        # not "2024_Bank_Statements")
+        if not hits and not _leaks(stem, sensitive):
+            return stem
+        cleaned = _tidy(engine.apply_hits(candidate, hits))
         if cleaned and not _leaks(cleaned, sensitive):
-            return f"{cleaned}{suffix}"
+            return cleaned
+    return ""
 
-    # Nothing safe could be salvaged from the original name.
-    return f"document_{index:02d}{suffix}"
+
+class _FolderNamer:
+    """Each source folder's delivered path, the same for every file inside it.
+
+    Two different folders that scrub to the same name in one parent are kept
+    apart ("[NAME-1]_Divorce", "[NAME-1]_Divorce_2"): merging them would mix
+    two sets of documents under one heading.
+    """
+
+    def __init__(self, store: MappingStore, settings: Settings, matcher: PersonMatcher):
+        self.store, self.settings, self.matcher = store, settings, matcher
+        self.done: dict[tuple[str, ...], tuple[str, ...]] = {(): ()}
+        self.used: dict[tuple[str, ...], set[str]] = {}
+
+    def __call__(self, parts: tuple[str, ...]) -> tuple[str, ...]:
+        if parts not in self.done:
+            parent = self(parts[:-1])
+            name = anonymized_folder(parts[-1], self.store, self.settings, self.matcher,
+                                     len(self.done))
+            self.done[parts] = parent + (_unique(name, self.used.setdefault(parent, set())),)
+        return self.done[parts]
+
+
+# --------------------------------------------------------------------------
+# folders dropped in whole
+# --------------------------------------------------------------------------
+
+# Never documents and never worth a line in the report: Finder's and Windows'
+# own bookkeeping, and the lock file Word leaves beside an open document.
+_HOUSEKEEPING = {"thumbs.db", "desktop.ini", "__macosx", "icon\r"}
+
+
+def _housekeeping(name: str) -> bool:
+    return name.startswith((".", "~$")) or name.casefold() in _HOUSEKEEPING
+
+
+@dataclass
+class Gathered:
+    """What a set of dropped files and folders holds."""
+
+    files: list[tuple[Path, str]] = field(default_factory=list)   # (on disk, relative)
+    skipped: list[str] = field(default_factory=list)              # relative, left out
+
+
+def gather(paths: Sequence[Path]) -> Gathered:
+    """Every PDF and Word file under ``paths``, with where each sat.
+
+    A folder's own name is the first part of each relative path, so the tree
+    comes back out under the same top folder. Anything that is not a PDF or a
+    .docx is left out and listed, never delivered: a JPG of a cheque or a CSV
+    export would otherwise ship with its contents intact. Links are not
+    followed - a link inside a case folder can point anywhere on the disk.
+    """
+    out = Gathered()
+    for raw in paths:
+        root = Path(raw)
+        if root.is_file():
+            if not _housekeeping(root.name):
+                (out.files.append((root, root.name)) if classify(root)
+                 else out.skipped.append(root.name))
+            continue
+        if not root.is_dir():
+            continue
+        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+            dirnames[:] = sorted(d for d in dirnames if not _housekeeping(d))
+            for name in sorted(filenames):
+                if _housekeeping(name):
+                    continue
+                path = Path(dirpath) / name
+                relative = path.relative_to(root.parent).as_posix()
+                if path.is_symlink() or not classify(path):
+                    out.skipped.append(relative)
+                else:
+                    out.files.append((path, relative))
+    return out
 
 
 def _unique(name: str, used: set[str]) -> str:
@@ -629,8 +733,16 @@ def run_job(
     output_dir: Path,
     key_password: str,
     progress: Progress = _noop,
+    relative: dict[Path, str] | None = None,
+    skipped: Sequence[str] = (),
 ) -> RunResult:
-    """Process every file, archive the results, write the encrypted key."""
+    """Process every file, archive the results, write the encrypted key.
+
+    ``relative`` gives each file's place in a dropped folder ("Case/2024/
+    statement.pdf"); the archive repeats that tree, folder names scrubbed like
+    filenames. ``skipped`` lists what the folders held that was not processed,
+    for the report.
+    """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     result = RunResult(output_dir=output_dir)
@@ -639,7 +751,10 @@ def run_job(
     work_dir.mkdir(parents=True, exist_ok=True)
 
     matcher = PersonMatcher(store, settings)
-    used_names: set[str] = set()
+    used_names: dict[tuple[str, ...], set[str]] = {}
+    folders = _FolderNamer(store, settings, matcher)
+    relative = relative or {}
+    result.skipped = list(skipped)
     total = max(len(files), 1)
 
     # the review prescan recorded occurrences into this same store; the run
@@ -651,18 +766,22 @@ def run_job(
     for index, raw_path in enumerate(files, start=1):
         path = Path(raw_path)
         kind = classify(path)
-        progress(f"Processing {path.name}", (index - 1) / total)
+        original = relative.get(raw_path) or relative.get(path) or path.name
+        progress(f"Processing {original}", (index - 1) / total)
 
         if kind is None:
             result.outcomes.append(
-                FileOutcome(path, "unknown", "skipped", error="unsupported file type")
+                FileOutcome(path, "unknown", "skipped", error="unsupported file type",
+                            original=original)
             )
             continue
 
-        delivered = _unique(
-            anonymized_filename(path, store, settings, matcher, index), used_names
-        )
+        place = folders(tuple(PurePosixPath(original).parts[:-1]))
+        delivered = "/".join(place + (_unique(
+            anonymized_filename(path, store, settings, matcher, index),
+            used_names.setdefault(place, set())),))
         target = work_dir / delivered
+        target.parent.mkdir(parents=True, exist_ok=True)
 
         try:
             if kind == "docx":
@@ -671,16 +790,18 @@ def run_job(
                 detail = pdf_processor.process(path, target, store, settings, matcher)
             if detail.refused:
                 outcome = FileOutcome(path, kind, "refused", "", len(detail.hits),
-                                      list(detail.warnings), detail=detail)
+                                      list(detail.warnings), detail=detail, original=original)
             else:
                 outcome = FileOutcome(path, kind, "processed", delivered,
-                                      len(detail.hits), list(detail.warnings), detail=detail)
+                                      len(detail.hits), list(detail.warnings), detail=detail,
+                                      original=original)
         except Exception as exc:
-            outcome = FileOutcome(path, kind, "error", error=f"{type(exc).__name__}: {exc}")
+            outcome = FileOutcome(path, kind, "error", error=f"{type(exc).__name__}: {exc}",
+                                  original=original)
             outcome.warnings.append(traceback.format_exc(limit=3))
 
         if outcome.status == "processed":
-            store.register_filename(path.name, delivered)
+            store.register_filename(original, delivered)
         result.outcomes.append(outcome)
 
     progress("Building the archive", 0.9)
@@ -701,15 +822,7 @@ def run_job(
     result.report_path = write_report(result, store, settings,
                                       output_dir / f"redaction-report-{stamp}.txt")
 
-    for leftover in work_dir.glob("*"):
-        try:
-            leftover.unlink()
-        except OSError:
-            pass
-    try:
-        work_dir.rmdir()
-    except OSError:
-        pass
+    shutil.rmtree(work_dir, ignore_errors=True)
 
     progress("Done", 1.0)
     return result
@@ -751,7 +864,7 @@ def write_report(result: RunResult, store: MappingStore, settings: Settings,
     add("FILES")
     add("-" * 62)
     for outcome in result.outcomes:
-        add(f"  {outcome.source.name}")
+        add(f"  {outcome.shown}")
         add(f"      status:    {outcome.status}")
         if outcome.delivered_name:
             add(f"      delivered: {outcome.delivered_name}")
@@ -761,6 +874,13 @@ def write_report(result: RunResult, store: MappingStore, settings: Settings,
         for warning in outcome.warnings:
             add(f"      WARNING:   {warning.splitlines()[0]}")
     add("")
+
+    if result.skipped:
+        add("LEFT OUT - NOT PDF OR WORD, NOTHING FROM THESE WAS DELIVERED")
+        add("-" * 62)
+        for name in result.skipped:
+            add(f"  {name}")
+        add("")
 
     add("CHANGES BY CATEGORY")
     add("-" * 62)

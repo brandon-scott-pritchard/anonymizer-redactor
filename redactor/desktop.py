@@ -17,7 +17,7 @@ import urllib.error
 import urllib.request
 
 from . import __version__
-from .webapp import COOKIE, TOKEN, app
+from .webapp import COOKIE, TOKEN, add_paths, app
 
 WINDOW_TITLE = "Document Redactions & Anonymization"
 MIN_SIZE = (900, 620)
@@ -72,6 +72,27 @@ def enable_downloads(webview) -> bool:
         return False
 
 
+class Bridge:
+    """What the page can ask of the window itself: a folder picker.
+
+    The window's own file input cannot choose a folder - pywebview answers it
+    with a files-only panel - and a folder of several hundred documents is
+    better read from disk than uploaded through the page anyway. The page calls
+    ``window.pywebview.api.choose_folder()`` and gets the file list back.
+    """
+
+    def choose_folder(self):
+        import webview
+
+        if not webview.windows:
+            return None
+        chosen = webview.windows[0].create_file_dialog(
+            webview.FileDialog.FOLDER, allow_multiple=True)
+        if not chosen:
+            return None
+        return add_paths(list(chosen))
+
+
 def main() -> int:
     port = _free_port()
     _serve(port)
@@ -106,6 +127,7 @@ def main() -> int:
         resizable=True,
         text_select=True,           # operators need to copy values out
         confirm_close=False,
+        js_api=Bridge(),
     )
     print(f"{WINDOW_TITLE} {__version__}")
     print("Everything stays on this computer. Close the window to quit.")
