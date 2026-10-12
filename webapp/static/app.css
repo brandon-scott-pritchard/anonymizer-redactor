@@ -287,3 +287,18 @@ code {
   pre.log { max-height: 38vh; }
   .progress { position: static; }
 }
+
+/* the review list: what a tick means, and the forms gathered under a row */
+.instructions {
+  font-size: 16px; line-height: 1.5; padding: 10px 14px; margin: 0 0 12px;
+  border-left: 4px solid var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+td.tick { white-space: nowrap; }
+.expander {
+  display: inline-block; width: 26px; padding: 0; border: 0; background: none;
+  font-size: 16px; cursor: pointer; color: var(--muted); vertical-align: middle;
+}
+span.expander { cursor: default; }
+tr.form-row td { font-size: 15px; background: color-mix(in srgb, var(--line) 25%, transparent); }
+tr.form-row td:nth-child(3) { padding-left: 28px; }
+td.warn.small { font-size: 14px; }

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Iterable, Sequence
 
-from . import categories, names as _names
+from . import categories, grouping, names as _names
 from .mapping import Entity, MappingStore
 
 # --------------------------------------------------------------------------
@@ -136,28 +136,42 @@ def retype_entity(store: MappingStore, entity: Entity, new_category: str) -> Ent
     fresh.enabled = entity.enabled
     fresh.occurrences = entity.occurrences
     fresh.documents = entity.documents
+    if store.grouped:
+        grouping.group(store)
     return fresh
 
 
-def snapshot_decisions(store: MappingStore) -> dict[str, tuple[bool, str, str]]:
-    """What the operator decided, keyed by the found text."""
+def snapshot_decisions(store: MappingStore) -> dict[str, tuple[bool, str, str, bool]]:
+    """What the operator decided, keyed by the found text.
+
+    The fourth field is whether the operator split the row out of its group.
+    A variant's replacement is its head's, so only a head's is carried.
+    """
     return {
         entity.canonical.casefold():
-            (entity.enabled, entity.category, entity.replacement)
+            (entity.enabled, entity.category,
+             "" if entity.parent else entity.replacement,
+             entity.key in store.split_out)
         for entity in store.entities.values()
     }
 
 
 def carry_decisions(store: MappingStore,
-                    carryover: dict[str, tuple[bool, str, str]]) -> None:
+                    carryover: dict[str, tuple]) -> None:
     """Re-apply earlier review decisions to a freshly scanned store."""
     valid = {c.key for c in categories.CATEGORIES}
+    split = [key for key, decided in carryover.items() if len(decided) > 3 and decided[3]]
+    if split:
+        for entity in store.entities.values():
+            if entity.canonical.casefold() in split:
+                store.split_out.add(entity.key)
+        grouping.group(store)
     taken = {e.replacement for e in store.entities.values()}
     for entity in list(store.entities.values()):
         previous = carryover.get(entity.canonical.casefold())
         if previous is None:
             continue
-        enabled, category, replacement = previous
+        enabled, category, replacement = previous[:3]
         if category != entity.category and category in valid:
             moved = retype_entity(store, entity, category)
             if moved is not None:
@@ -171,10 +185,40 @@ def carry_decisions(store: MappingStore,
             if entity.is_person and entity.surrogate is not None:
                 entity.surrogate = _names.parse(replacement)
         entity.enabled = enabled
+    grouping.sync(store)
 
 
-def set_replacement(entity: Entity, replacement: str) -> None:
-    """Apply an operator-edited replacement, keeping the surrogate in step."""
+def set_replacement(entity: Entity, replacement: str,
+                    store: MappingStore | None = None) -> None:
+    """Apply an operator-edited replacement, keeping the surrogate in step.
+
+    Editing a variant's replacement takes it out of its group: it no longer
+    reads as the same thing. Editing a head's carries to its variants.
+    """
+    if store is not None and entity.parent:
+        grouping.split(store, entity)
     entity.replacement = replacement
     if entity.is_person and entity.surrogate is not None:
         entity.surrogate = _names.parse(replacement)
+    if store is not None:
+        grouping.sync(store)
+
+
+# --------------------------------------------------------------------------
+# what the review list says about itself - one wording for both front ends
+# --------------------------------------------------------------------------
+
+REVIEW_INSTRUCTIONS = (
+    "☑ Ticked = this WILL BE CHANGED (redacted or anonymized) everywhere it appears.   "
+    "☐ Unticked = left exactly as written.\n"
+    "A row with ▸ gathers every form of one person, address or number: ticking it ticks "
+    "them all. Open it to untick a single form, or to split out a form that is not the "
+    "same thing. Edit a row to change its type or replacement. Nothing has been written yet."
+)
+
+
+def review_note(entity: Entity) -> str:
+    """Why a row deserves a second look - shown beside it."""
+    if entity.candidates:
+        return "Could be " + " or ".join(entity.candidates) + " - kept on its own row"
+    return entity.group_note

@@ -427,3 +427,21 @@ def test_a_judge_sharing_a_party_surname_is_only_partly_shielded(app):
     assert "Amber M. Smith" in app.protection.terms
     assert "Smith" not in app.protection.terms
     assert "shares a surname" in app.guard_label.cget("text")
+
+
+def test_the_review_list_nests_every_form_under_its_group(app):
+    from redactor import grouping, review
+    store, _ = review.build_store([("BRETT H. PRITCHARD", "person"), ("BRETT H", "person")])
+    grouping.group(store)
+    app._review_ready(store)
+    tree = app.review_tree
+    head = "person:brett h. pritchard"
+    assert tree.get_children(head) == ("person:brett h",)
+    assert tree.heading("#0", "text") == "Change?"
+    app._review_toggle(head)
+    assert not store.entities["person:brett h"].enabled
+    app._review_toggle("person:brett h")
+    assert store.entities["person:brett h"].enabled and not store.entities[head].enabled
+    tree.selection_set("person:brett h")
+    app._split_review_rows()
+    assert tree.parent("person:brett h") == ""

@@ -874,6 +874,14 @@ def test_the_heading_over_an_address_block_stays(tmp_path):
         assert gone not in after, f"{gone} survived"
 
 
+def test_a_payroll_line_is_pay_whatever_sign_ocr_gives_it():
+    """OCR read a table rule as a minus in front of an HSA payroll contribution."""
+    text = ("07/20/2020   PAYROLL CONTRIBUTION NU SKIN ENTERPRISE   -$236.01   -$186.01\n"
+            "08/03/2020   PAYROLL CONTRIBUTION NU SKIN ENTERPRISE   $132.54   $81.88")
+    assert not transactions._paid_by_the_account(text, "NU SKIN ENTERPRISE")
+    assert transactions._paid_by_the_account("Pingo - ACH  -$139.27", "Pingo")
+
+
 # ---------------------------------------------------------------------------
 # the language model's proposals on an order record
 # ---------------------------------------------------------------------------

@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from . import categories, names as _names, patterns
+from . import categories, grouping, names as _names, patterns
 from .mapping import Entity, MappingStore
 
 REDACTION_TEXT = "[REDACTED]"
@@ -124,6 +124,7 @@ class EntityMatcher:
         self.settings = settings
         self._value_rules: list[tuple[re.Pattern, Entity]] = []
         self._value_version = -1
+        self._unticked_rules: list[tuple[re.Pattern, str]] = []
         # One combined alternation per entity instead of one regex per written
         # form - a person expands into dozens of variants, and running each as
         # its own finditer pass over every paragraph was the scan's hot spot.
@@ -155,10 +156,12 @@ class EntityMatcher:
             bodies = []
             lookup: dict[str, tuple[_names.NameVariant, int]] = {}
             for variant, priority in usable:
-                bodies.append(r"\s+".join(_names.escape_token(tok)
+                bodies.append(r"\s+".join(_token_body(tok, variant.token_count)
                                           for tok in variant.text.split()))
-                lookup.setdefault(" ".join(variant.text.split()).casefold(),
-                                  (variant, priority))
+                lookup.setdefault(_exact_key(variant.text), (variant, priority))
+            # the period-less spelling of each, behind every exact spelling
+            for variant, priority in usable:
+                lookup.setdefault(_lookup_key(variant.text), (variant, priority))
             regex = re.compile(
                 rf"{_names.BOUNDARY_LEFT}(?:{'|'.join(bodies)})"
                 rf"{_names.BOUNDARY_RIGHT}", re.IGNORECASE)
@@ -198,6 +201,22 @@ class EntityMatcher:
         if self._value_version == self._state_fingerprint():
             return
         rules: list[tuple[re.Pattern, Entity]] = []
+        # An unticked row is left as written, even where another row's rule
+        # would reach it: unticking "BRETT H" under "Brett H. Pritchard" means
+        # that form stays, though the full name's variants include it.
+        # A form unticked inside its group is left as written, though the
+        # group's other forms reach it: "BRETT H" under "Brett H. Pritchard".
+        # Only the group's own hits are held back there - a shared surname is
+        # still the other party's, and goes while they are ticked.
+        self._unticked_rules = []
+        for entity in self.store.entities.values():
+            text = entity.canonical.strip()
+            if entity.enabled or not entity.parent or len(text) < 2:
+                continue
+            body = r"[\s,]+".join(_token_body(tok, 2) for tok in text.split())
+            self._unticked_rules.append((
+                re.compile(rf"(?<![^\W_])(?:{body})(?![^\W_])", re.IGNORECASE),
+                grouping.head_of(self.store, entity).key))
         for entity in self.store.entities.values():
             if entity.is_person or not entity.enabled:
                 continue
@@ -234,9 +253,31 @@ class EntityMatcher:
             flexible = _digits_any_separator(text)
             if flexible is not None:
                 rules.append((flexible, entity))
+            if entity.category in _ORG_CATEGORIES:
+                company = _company_any_form(text)
+                if company is not None:
+                    rules.append((company, entity))
         rules.sort(key=lambda rule: -len(rule[1].canonical))
         self._value_rules = rules
         self._value_version = self._state_fingerprint()
+
+    def held_back(self, text: str, hits: list[Hit]) -> list[Hit]:
+        """Drop each hit that lies inside an unticked form of its own group."""
+        self._refresh_values()
+        if not self._unticked_rules:
+            return hits
+        spans = [(m.start(), m.end(), head) for regex, head in self._unticked_rules
+                 for m in regex.finditer(text)]
+        if not spans:
+            return hits
+        out = []
+        for hit in hits:
+            entity = self.store.entities.get(hit.entity_key)
+            head = grouping.head_of(self.store, entity).key if entity is not None else None
+            if not any(s <= hit.start and hit.end <= e and head == group
+                       for s, e, group in spans):
+                out.append(hit)
+        return out
 
     def find_values(self, text: str, protected: list[tuple[int, int]], redact: bool) -> list[Hit]:
         self._refresh_values()
@@ -258,8 +299,8 @@ class EntityMatcher:
                 start, end = m.span()
                 if _overlaps(start, end, protected):
                     continue
-                found = lookup.get(
-                    " ".join(m.group(0).replace("’", "'").split()).casefold())
+                found = (lookup.get(_exact_key(m.group(0)))
+                         or lookup.get(_lookup_key(m.group(0))))
                 if found is None:      # pragma: no cover - defensive
                     continue
                 variant, priority = found
@@ -292,7 +333,8 @@ class EntityMatcher:
         """
         out: list[Hit] = []
         for word in _WORD_IN_NAME.finditer(m.group(0)):
-            found = lookup.get(word.group(0).replace("’", "'").casefold())
+            found = (lookup.get(_exact_key(word.group(0)))
+                     or lookup.get(_lookup_key(word.group(0))))
             if found is None or found[0].token_count != 1:
                 continue
             part = found[0]
@@ -366,6 +408,56 @@ def _digits_any_separator(value: str) -> re.Pattern | None:
     return re.compile(rf"(?<![\d.,])(?<!\d[ \-]){body}(?![ \-]?\d)(?![.,]\d)")
 
 
+_INITIAL_TOKEN = re.compile(r"^[A-Za-z]\.$")
+
+
+def _token_body(token: str, token_count: int) -> str:
+    """An initial inside a longer form matches with or without its period.
+
+    "BRETT H" is "Brett H." written by a form that drops periods; only the
+    full stop was keeping the full name's own variant from finding it.
+    """
+    if token_count > 1 and _INITIAL_TOKEN.match(token):
+        return re.escape(token[0]) + r"\.?"
+    return _names.escape_token(token)
+
+
+def _exact_key(text: str) -> str:
+    return " ".join(text.replace("’", "'").split()).casefold()
+
+
+def _lookup_key(text: str) -> str:
+    folded = _exact_key(text)
+    return re.sub(r"(?<![a-z])([a-z])\.", r"\1", folded) if " " in folded else folded
+
+
+_ORG_CATEGORIES = {"organization", "employer"}
+_COMPANY_SUFFIX = (r"(?:inc|incorporated|llc|l\.l\.c|corp|corporation|co|company|ltd|"
+                   r"limited|lp|llp|pllc|pc|n\.a)\.?")
+
+
+def _company_any_form(value: str) -> re.Pattern | None:
+    """A company however its punctuation and its "Inc"/"LLC" are written.
+
+    "Silicon Slopes Analytics, Inc." on the pay stub is "SILICON SLOPES
+    ANALYTICS INC" on the W-2 and "Silicon Slopes Analytics" in the bank's
+    deposit line. Two words of name at least: one alone - "Pingo" - is too
+    often a merchant's name as well.
+    """
+    words = re.findall(r"[A-Za-z0-9']+", value.replace("&", " and "))
+    core = [w for w in words
+            if not re.fullmatch(_COMPANY_SUFFIX.replace(r"\.?", ""), w, re.IGNORECASE)
+            and w.casefold() != "the"]
+    while core and core[-1].casefold() in {"l", "c", "a", "n"}:
+        core.pop()
+    if len(core) < 2 or sum(len(w) for w in core) < 6:
+        return None
+    pieces = [r"(?:and|&)" if w.casefold() == "and" else _names.escape_token(w) for w in core]
+    body = r"[\s,.\-]+".join(pieces)
+    return re.compile(rf"(?<![^\W_])(?<![@.\-])(?:the\s+)?{body}"
+                      rf"(?:[\s,]+{_COMPANY_SUFFIX})?(?![^\W_])(?![@\-])", re.IGNORECASE)
+
+
 def _overlaps(start: int, end: int, spans) -> bool:
     return any(start < e and s < end for s, e in spans)
 
@@ -435,6 +527,7 @@ def scan_text(
     # bare recurrence of one must be matched in this same piece of text.
     hits.extend(matcher.find_values(text, protected, redact))
 
+    hits = matcher.held_back(text, hits)
     return _resolve(hits)
 
 

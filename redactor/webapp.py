@@ -26,7 +26,7 @@ from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import (__version__, caption, categories, feedback, names as _names, ner,
+from . import (__version__, caption, categories, feedback, grouping, names as _names, ner,
                officials, pipeline, review)
 from .engine import Settings
 from .mapping import MappingStore
@@ -174,8 +174,8 @@ def _guard_payload() -> dict:
     }
 
 
-def _entity_row(entity) -> dict:
-    return {
+def _entity_row(entity, store=None) -> dict:
+    row = {
         "key": entity.key,
         "category": entity.category,
         "label": entity.label,
@@ -185,18 +185,27 @@ def _entity_row(entity) -> dict:
         "source": entity.source,
         "enabled": entity.enabled,
         "is_person": entity.is_person,
+        "parent": entity.parent,
+        "note": review.review_note(entity),
     }
+    if store is not None and entity.parent is None:
+        # a head row: its forms ride along, and Times counts all of them
+        row["forms"] = [_entity_row(e) for e in grouping.members(store, entity)]
+        row["occurrences"] = grouping.group_total(store, entity)
+    return row
 
 
 def _entities_payload() -> dict:
     store = SESSION.store
-    rows = sorted(store.entities.values(),
-                  key=lambda e: (0 if e.is_person else 1, e.category,
-                                 -e.occurrences, e.canonical.casefold()))
+    heads = sorted((e for e in store.entities.values() if e.parent is None),
+                   key=lambda e: (0 if e.is_person else 1, e.category,
+                                  -grouping.group_total(store, e), e.canonical.casefold()))
     risky = sorted({v.text for e in store.persons() for v in e.variants if v.risky})
     unused = sum(1 for e in store.entities.values() if e.occurrences == 0)
-    return {"entities": [_entity_row(e) for e in rows],
-            "risky": risky[:12], "unused": unused}
+    return {"entities": [_entity_row(e, store) for e in heads],
+            "risky": risky[:12], "unused": unused,
+            "active": sum(1 for e in store.entities.values() if e.enabled),
+            "instructions": review.REVIEW_INSTRUCTIONS}
 
 
 # --------------------------------------------------------------------------
@@ -373,7 +382,7 @@ async def edit_entity(request: Request):
     if entity is None:
         raise HTTPException(404, "no such entity")
     if "enabled" in body:
-        entity.enabled = bool(body["enabled"])
+        grouping.set_enabled(SESSION.store, entity, bool(body["enabled"]))
     if body.get("category") and body["category"] != entity.category:
         moved = review.retype_entity(SESSION.store, entity, body["category"])
         if moved is None:
@@ -383,7 +392,18 @@ async def edit_entity(request: Request):
         replacement = str(body["replacement"])
         if not replacement.strip():
             raise HTTPException(422, "The replacement cannot be empty.")
-        review.set_replacement(entity, replacement)
+        review.set_replacement(entity, replacement, SESSION.store)
+    return _entities_payload()
+
+
+@app.post("/api/entities/split")
+async def split_entity(request: Request):
+    """Take one form out of its group: it is not the same thing."""
+    body = await request.json()
+    entity = SESSION.store.entities.get(body.get("key", ""))
+    if entity is None:
+        raise HTTPException(404, "no such entity")
+    grouping.split(SESSION.store, entity)
     return _entities_payload()
 
 

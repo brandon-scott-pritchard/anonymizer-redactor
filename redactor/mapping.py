@@ -43,6 +43,12 @@ class Entity:
     occurrences: int = 0
     documents: set[str] = field(default_factory=set)
     notes: str = ""
+    # Another written form of a head entity (see grouping.py): the key of that
+    # head. It keeps its own tick and count and takes the head's replacement.
+    parent: str | None = None
+    # A form that fits more than one head is left on its own and names them.
+    candidates: tuple[str, ...] = ()
+    group_note: str = ""
 
     @property
     def is_person(self) -> bool:
@@ -67,6 +73,11 @@ class MappingStore:
         self._used_replacements: set[str] = set()
         self.started = datetime.now(timezone.utc)
         self.filenames: dict[str, str] = {}
+        # keys the operator took out of a group; never regrouped
+        self.split_out: set[str] = set()
+        # once the review scan has grouped the store, a value first met during
+        # the run joins its group instead of minting a new placeholder
+        self.grouped = False
 
     # ------------------------------------------------------------- people --
     def add_person(
@@ -270,17 +281,23 @@ class MappingStore:
         if existing:
             return existing
 
-        tag = categories.tag_for(category)
-        self._counters[tag] = self._counters.get(tag, 0) + 1
         entity = Entity(
             key=key,
             category=category,
             canonical=norm,
-            replacement=surrogates.placeholder(tag, self._counters[tag]),
+            replacement=self.fresh_placeholder(category),
             source=source,
         )
         self.entities[key] = entity
+        if self.grouped:
+            from . import grouping
+            grouping.attach(self, entity)
         return entity
+
+    def fresh_placeholder(self, category: str) -> str:
+        tag = categories.tag_for(category)
+        self._counters[tag] = self._counters.get(tag, 0) + 1
+        return surrogates.placeholder(tag, self._counters[tag])
 
     # --------------------------------------------------------------- misc --
     def get(self, category: str, original: str) -> Entity | None:
@@ -314,6 +331,8 @@ class MappingStore:
                     "role": entity.role,
                     "source": entity.source,
                     "applied": "yes" if entity.enabled else "no",
+                    "same_as": (self.entities[entity.parent].canonical
+                                if entity.parent in self.entities else ""),
                     "occurrences": entity.occurrences,
                     "documents": "; ".join(sorted(entity.documents)),
                 }
@@ -335,7 +354,7 @@ class MappingStore:
         rows = self.rows()
         buf = io.StringIO()
         fields = [
-            "category_label", "original", "replacement", "role",
+            "category_label", "original", "replacement", "same_as", "role",
             "source", "applied", "occurrences", "documents",
         ]
         writer = csv.DictWriter(buf, fieldnames=fields, extrasaction="ignore")

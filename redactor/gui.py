@@ -28,10 +28,11 @@ from tkinter import ttk
 
 import webbrowser
 
-from . import (__version__, caption, categories, feedback, names as _names, ner,
+from . import (__version__, caption, categories, feedback, grouping, names as _names, ner,
                officials, pdf_processor, pipeline, review)
 from .engine import Settings
 from .mapping import MappingStore
+from .review import REVIEW_INSTRUCTIONS, review_note
 
 def _checkbox_images(size: int = 22) -> "tuple[tk.PhotoImage, tk.PhotoImage]":
     """(checked, unchecked) images for the Treeview rows.
@@ -607,20 +608,18 @@ class App(Tk):
         frame.rowconfigure(1, weight=1)
 
         ttk.Label(frame, justify="left", anchor="w", wraplength=1040,
-                  text=("Everything below will change. Untick anything that should stay. "
-                        "Double-click the Found or Replaced-with columns to edit an item. "
-                        "Nothing has been written yet."),
+                  text=REVIEW_INSTRUCTIONS,
                   ).grid(row=0, column=0, sticky="ew", pady=(0, 8))
 
-        columns = ("type", "original", "replacement", "hits", "source")
+        columns = ("type", "original", "replacement", "hits", "source", "note")
         self.review_tree = ttk.Treeview(frame, columns=columns, show="tree headings",
                                         selectmode="extended", style="Big.Treeview")
-        self.review_tree.heading("#0", text="")
-        self.review_tree.column("#0", width=48, stretch=False, anchor="center")
+        self.review_tree.heading("#0", text="Change?")
+        self.review_tree.column("#0", width=96, stretch=False, anchor="w")
         for key, label, width, anchor in (
-            ("type", "Type", 210, "w"), ("original", "Found", 330, "w"),
-            ("replacement", "Replaced with", 260, "w"), ("hits", "Times", 60, "e"),
-            ("source", "How found", 110, "w"),
+            ("type", "Type", 170, "w"), ("original", "Found", 300, "w"),
+            ("replacement", "Replaced with", 200, "w"), ("hits", "Times", 60, "e"),
+            ("source", "How found", 100, "w"), ("note", "Check", 220, "w"),
         ):
             self.review_tree.heading(key, text=label)
             self.review_tree.column(key, width=width, anchor=anchor)
@@ -644,6 +643,7 @@ class App(Tk):
         buttons.grid(row=3, column=0, sticky="ew")
         self._button(buttons, text="Tick all", command=lambda: self._set_all_review(True)).pack(side="left")
         self._button(buttons, text="Untick all", command=lambda: self._set_all_review(False)).pack(side="left", padx=6)
+        self._button(buttons, text="Split out of group", command=self._split_review_rows).pack(side="left", padx=(18, 0))
         self._button(buttons, text="Rescan documents", command=self.go_to_review).pack(side="left", padx=(18, 0))
 
         self._nav_bar(frame, row=4, back=self.tab_names,
@@ -1025,16 +1025,31 @@ class App(Tk):
 
     def _review_ready(self, store: MappingStore):
         self.store = store
+        open_rows = {iid for iid in self.review_tree.get_children()
+                     if self.review_tree.item(iid, "open")}
         self.review_tree.delete(*self.review_tree.get_children())
-        for entity in sorted(store.entities.values(),
-                             key=lambda e: (0 if e.is_person else 1, e.category,
-                                            -e.occurrences, e.canonical.casefold())):
+        heads = [e for e in store.entities.values() if e.parent is None]
+        for entity in sorted(heads, key=lambda e: (0 if e.is_person else 1, e.category,
+                                                   -grouping.group_total(store, e),
+                                                   e.canonical.casefold())):
+            variants = grouping.members(store, entity)
+            found = entity.canonical
+            if variants:
+                found += f"   (+{len(variants)} other form{'s' if len(variants) > 1 else ''})"
             self.review_tree.insert(
-                "", "end", iid=entity.key, text="",
+                "", "end", iid=entity.key, text="", open=entity.key in open_rows,
                 image=self._img_checked if entity.enabled else self._img_unchecked,
-                values=(entity.label, entity.canonical, entity.replacement,
-                        entity.occurrences, entity.source),
+                values=(entity.label, found, entity.replacement,
+                        grouping.group_total(store, entity), entity.source,
+                        review_note(entity)),
             )
+            for variant in variants:
+                self.review_tree.insert(
+                    entity.key, "end", iid=variant.key, text="",
+                    image=self._img_checked if variant.enabled else self._img_unchecked,
+                    values=(variant.label, variant.canonical, variant.replacement,
+                            variant.occurrences, variant.source, review_note(variant)),
+                )
         self._restripe(self.review_tree)
         risky = sorted({v.text for e in store.persons() for v in e.variants if v.risky})
         unused = [e.canonical for e in store.entities.values() if e.occurrences == 0]
@@ -1053,8 +1068,20 @@ class App(Tk):
         entity = self.store.entities.get(iid)
         if entity is None:
             return
-        entity.enabled = not entity.enabled
-        self._paint_check(self.review_tree, iid, entity.enabled)
+        for changed in grouping.set_enabled(self.store, entity, not entity.enabled):
+            if self.review_tree.exists(changed.key):
+                self._paint_check(self.review_tree, changed.key, changed.enabled)
+
+    def _split_review_rows(self) -> None:
+        chosen = [self.store.entities.get(iid) for iid in self.review_tree.selection()]
+        chosen = [e for e in chosen if e is not None and e.parent]
+        if not chosen:
+            self.status.set("Select one of the forms inside a group (expand a ▸ row) to split it out.")
+            return
+        for entity in chosen:
+            grouping.split(self.store, entity)
+        self._review_ready(self.store)
+        self.status.set(f"Split {len(chosen)} form(s) out - each now has its own replacement.")
 
     def _review_click(self, event):
         if self.review_tree.identify_column(event.x) != "#0":
@@ -1128,18 +1155,12 @@ class App(Tk):
                 self.status.set(f"“{new_label}” did not accept that value - nothing was changed.")
                 return
         if replacement is not None and replacement != old_replacement:
-            entity.replacement = replacement
-            if entity.is_person and entity.surrogate is not None:
-                from . import names as _names
-                entity.surrogate = _names.parse(replacement)
+            # a head's edit carries to its forms; a form's edit splits it out
+            review.set_replacement(entity, replacement, self.store)
 
+        self._review_ready(self.store)         # groups may have changed - repaint
         if new_category != old_category:
-            self._review_ready(self.store)     # keys changed - repaint the table
             self.status.set("Type changed - Rescan documents to refresh counts and matches.")
-        else:
-            values = list(self.review_tree.item(iid, "values"))
-            values[2] = entity.replacement
-            self.review_tree.item(iid, values=values)
 
         if error_type != feedback.NO_ERROR:
             self._offer_report(feedback.build_report(
@@ -1204,12 +1225,10 @@ class App(Tk):
             webbrowser.open(feedback.mailto_url(report))
 
     def _set_all_review(self, enabled: bool):
-        for iid in self.review_tree.get_children():
-            entity = self.store.entities.get(iid)
-            if entity is None:
-                continue
+        for entity in self.store.entities.values():
             entity.enabled = enabled
-            self._paint_check(self.review_tree, iid, enabled)
+            if self.review_tree.exists(entity.key):
+                self._paint_check(self.review_tree, entity.key, enabled)
 
     # --------------------------------------------------------------- run --
     def go_to_run(self):

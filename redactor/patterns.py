@@ -924,6 +924,22 @@ def _overlaps(start: int, end: int, spans: Sequence[tuple[int, int]]) -> bool:
     return False
 
 
+def _unwrap_a_cell(text: str, start: int, value: str) -> str:
+    """A street that does not open its line keeps to its line.
+
+    A mailing address wraps its city under its street, and the street then
+    starts the line. One that starts mid-line is a table cell read across a
+    row, and the next line opens with the first column's cell: an order
+    export's billing street took the shipping city under it, "2750 ASPEN
+    SPRINGS DR / TWIN FALLS ID 83301", and the client's home was registered
+    in a town the gift went to.
+    """
+    line_start = text.rfind("\n", 0, start) + 1
+    if text[line_start:start].strip():
+        return value.split("\n", 1)[0]
+    return value
+
+
 def scan(
     text: str,
     enabled: Sequence[str] | None = None,
@@ -954,6 +970,8 @@ def scan(
             if not value:
                 continue
             start, end = m.span(det.group)
+            if det.category == "street_address" and "\n" in value:
+                value = _unwrap_a_cell(text, start, value)
             value = value.rstrip(" .,;:")
             end = start + len(value)
             if not value.strip() or _value_is_junk(value):

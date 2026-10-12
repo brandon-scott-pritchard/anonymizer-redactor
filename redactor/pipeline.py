@@ -12,7 +12,7 @@ from typing import Callable, Iterable, Sequence
 
 from dataclasses import replace as _replace
 
-from . import (caption, categories, children, docx_processor, engine, mapping,
+from . import (caption, categories, children, docx_processor, engine, grouping, mapping,
                names, ner, officials, pdf_processor, places,
                transactions)
 from .engine import PersonMatcher, Settings
@@ -483,6 +483,9 @@ def prescan(
                         store.record_hit(entity, path.name)
         except Exception:
             continue
+    # one row per person, address or account however many ways it was written
+    grouping.group(store)
+    store.grouped = True
     progress("Scan complete", 1.0)
     return found
 

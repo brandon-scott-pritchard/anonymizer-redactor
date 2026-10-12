@@ -546,7 +546,15 @@ def _paid_by_the_account(text: str, name: str) -> bool:
     """
     folded = name.casefold()
     return any(folded in line.casefold() and _OUTGOING.search(line)
+               and not _PAID_IN.search(line)
                for line in text.splitlines())
+
+
+# A line that says it is pay is money coming in, whatever its sign: a scanned
+# HSA statement's "PAYROLL CONTRIBUTION NU SKIN ENTERPRISE  -$236.01" carried
+# a minus OCR made out of a table rule, and the employer was dropped as a
+# transfer partner.
+_PAID_IN = re.compile(r"(?i)pay\s*roll|direct\s*dep|dir\s*dep|salary|wages|contribution")
 
 
 # A pay stub names the employer in its letterhead and nowhere else - no label,

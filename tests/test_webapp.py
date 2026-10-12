@@ -202,3 +202,25 @@ def test_a_download_works_without_the_cookie(client, sample_docx):
 
     # the query token opens nothing else
     assert client.get(f"/api/state?token={token}").status_code == 401
+
+
+def test_the_review_list_groups_forms_and_splits_one_out(client):
+    from redactor import grouping, review
+    store, _ = review.build_store([("BRETT H. PRITCHARD", "person"), ("BRETT H", "person")])
+    for text, count in (("123 N Main St", 3), ("123 North Main Street", 1)):
+        store.add_value("street_address", text).occurrences = count
+    grouping.group(store)
+    webapp.SESSION.store = store
+    payload = webapp._entities_payload()
+    assert "WILL BE CHANGED" in payload["instructions"]
+    street = next(r for r in payload["entities"] if r["canonical"] == "123 N Main St")
+    assert [f["canonical"] for f in street["forms"]] == ["123 North Main Street"]
+    assert street["occurrences"] == 4
+    # unticking the group unticks the form; the count of active rows follows
+    after = client.patch("/api/entities", json={"key": street["key"], "enabled": False}).json()
+    head = next(r for r in after["entities"] if r["key"] == street["key"])
+    assert not head["forms"][0]["enabled"]
+    form_key = head["forms"][0]["key"]
+    split = client.post("/api/entities/split", json={"key": form_key}).json()
+    alone = next(r for r in split["entities"] if r["key"] == form_key)
+    assert alone["parent"] is None and alone["replacement"] != head["replacement"]

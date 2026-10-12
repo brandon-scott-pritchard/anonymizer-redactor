@@ -328,31 +328,61 @@ function ReviewStep({ state, actions, meta }) {
     setSort((s) => ({ key, desc: s.key === key && !s.desc }))}>${label}
     ${sort.key === key ? (sort.desc ? " ↓" : " ↑") : ""}</th>`;
 
+  const [open, setOpen] = useState(() => new Set());
+  const toggleOpen = (key) => setOpen((was) => {
+    const next = new Set(was);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  });
+  const cells = (row, form) => html`
+    <td>${row.label}</td>
+    <td>${row.canonical}${!form && row.forms && row.forms.length ? html`
+      <span class="hint"> (+${row.forms.length} other form${row.forms.length > 1 ? "s" : ""})</span>` : null}</td>
+    <td>${row.replacement}</td>
+    <td class="num">${row.occurrences}</td>
+    <td class="hint">${row.source}</td>
+    <td class="warn small">${row.note}</td>`;
+
   return html`
     <div class="card">
-      <p class="hint">Everything below will change. Untick anything that should
-        stay; the pencil edits an item's type and replacement. Nothing has been
-        written yet.</p>
+      <p class="instructions">${(state.instructions || "").split("\n").map((line, i) =>
+        html`<span key=${i}>${line}<br /></span>`)}</p>
       ${state.risky.length ? html`<p class="warn">Common words used as names -
         check these did not over-match: ${state.risky.join(", ")}</p>` : null}
-      ${state.unused ? html`<p class="warn">${state.unused} entr${state.unused === 1 ? "y" : "ies"}
-        did not appear in any document.</p>` : null}
+      ${state.unused ? html`<p class="warn">${`${state.unused} ${state.unused === 1 ? "entry" : "entries"} did not appear in any document.`}</p>` : null}
       <div class="tablewrap"><table>
-        <thead><tr><th></th>${header("label", "Type")}${header("canonical", "Found")}
+        <thead><tr><th title="Ticked = will be changed">Change?</th>${header("label", "Type")}
+          ${header("canonical", "Found")}
           ${header("replacement", "Replaced with")}${header("occurrences", "Times")}
-          ${header("source", "How found")}<th></th></tr></thead>
+          ${header("source", "How found")}<th>Check</th><th></th></tr></thead>
         <tbody>
-          ${rows.map((row) => html`<tr key=${row.key}>
-            <td><input type="checkbox" checked=${row.enabled}
+          ${rows.map((row) => html`
+            <tr key=${row.key}>
+              <td class="tick">
+                ${row.forms && row.forms.length ? html`<button class="expander"
+                    aria-expanded=${open.has(row.key)}
+                    title=${open.has(row.key) ? "Hide the other forms" : "Show every form found"}
+                    onClick=${() => toggleOpen(row.key)}>${open.has(row.key) ? "▾" : "▸"}</button>`
+                  : html`<span class="expander"></span>`}
+                <input type="checkbox" checked=${row.enabled}
+                       title=${row.enabled ? "Will be changed" : "Left as written"}
                        onChange=${(e) => actions.setEnabled(row, e.target.checked)} /></td>
-            <td>${row.label}</td>
-            <td>${row.canonical}</td>
-            <td>${row.replacement}</td>
-            <td class="num">${row.occurrences}</td>
-            <td class="hint">${row.source}</td>
-            <td><button title="Edit type or replacement"
-                        onClick=${() => actions.openEditor(row)}>✎ Edit</button></td>
-          </tr>`)}
+              ${cells(row, false)}
+              <td><button title="Edit type or replacement"
+                          onClick=${() => actions.openEditor(row)}>✎ Edit</button></td>
+            </tr>
+            ${open.has(row.key) ? (row.forms || []).map((form) => html`
+              <tr key=${form.key} class="form-row">
+                <td class="tick"><span class="expander"></span>
+                  <input type="checkbox" checked=${form.enabled}
+                         title=${form.enabled ? "Will be changed" : "Left as written"}
+                         onChange=${(e) => actions.setEnabled(form, e.target.checked)} /></td>
+                ${cells(form, true)}
+                <td><button title="Not the same thing - give it its own row and replacement"
+                            onClick=${() => actions.split(form)}>Split out</button>
+                    <button title="Edit type or replacement"
+                            onClick=${() => actions.openEditor(form)}>✎</button></td>
+              </tr>`) : null}`)}
         </tbody>
       </table></div>
       <div class="bar">
@@ -373,7 +403,7 @@ function ReviewStep({ state, actions, meta }) {
 }
 
 function RunStep({ state, actions, meta }) {
-  const active = state.entities.filter((e) => e.enabled).length;
+  const active = state.active;
   const result = state.runInfo;
   // The token goes on the URL because a download is a plain navigation, and a
   // web view runs it as a separate task that does not reliably carry the
@@ -435,6 +465,8 @@ function App() {
   const [suggChecked, setSuggChecked] = useState(new Set());
   const [suggCats, setSuggCats] = useState({});
   const [entities, setEntities] = useState([]);
+  const [active, setActive] = useState(0);
+  const [instructions, setInstructions] = useState("");
   const [risky, setRisky] = useState([]);
   const [unused, setUnused] = useState(0);
   const [editing, setEditing] = useState(null);
@@ -472,6 +504,7 @@ function App() {
 
   const applyReview = (payload) => {
     setEntities(payload.entities); setRisky(payload.risky); setUnused(payload.unused);
+    setActive(payload.active); setInstructions(payload.instructions);
   };
 
   const actions = {
@@ -561,6 +594,10 @@ function App() {
       applyReview(await api.post("/api/entities/all", { enabled }));
     }),
 
+    split: (row) => guarded(async () => {
+      applyReview(await api.post("/api/entities/split", { key: row.key }));
+    }),
+
     openEditor: (row) => setEditing(row),
     closeEditor: () => setEditing(null),
 
@@ -620,7 +657,7 @@ function App() {
 
   const state = { files, options, password, showPassword, namesText, captions,
                   officials, guardNotes, overlaps,
-                  suggestions, suggChecked, suggCats, entities, risky, unused,
+                  suggestions, suggChecked, suggCats, entities, risky, unused, active, instructions,
                   editing, runInfo, busy };
 
   return html`<div>

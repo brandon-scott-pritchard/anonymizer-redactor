@@ -211,11 +211,42 @@ nothing is applied without a tick.
 ### 3. Review
 
 Every proposed change, listed with what it found, what it will become, and how
-many times it appears. Untick anything that should stay. The row editor changes
-an item's type or replacement, and takes an optional what-went-wrong report
-(logged locally, with a yes/no offer to open a pre-filled email draft—nothing
-is ever sent on its own). A rescan keeps your ticks, type changes and edited
-replacements. Nothing has been written yet.
+many times it appears. **Ticked means it will be changed** (redacted or
+anonymized) everywhere it appears; unticked means it is left exactly as
+written. The screen says so above the list, and the tick column is headed
+"Change?".
+
+One row stands for one thing however many ways it was written. A row with ▸
+gathers every form found and counts them together:
+
+- **People**: a partial name under the one full name it is part of—"BRETT H"
+  and "PRITCHARD BRETT" under "Brett H. Pritchard"—each written with the full
+  name's stand-in in its own shape ("Arlo E", "Nolt Arlo"). A partial that fits
+  two people ("PRITCHARD" with two Pritchards on the list) is not guessed at: it
+  keeps its own row, with a note naming who it could be.
+- **Addresses**: "N" and "North", "St" and "Street", case, punctuation, a
+  dropped or doubled letter in the street name, the street with or without its
+  city line, and the ZIP+4 on its own. The row shows the form written most
+  often. A different house number, unit or ZIP is a different address—a near
+  miss on the house number is flagged, never merged—and a form with no town
+  joins only when one town fits.
+- **Companies** with and without "Inc."/"LLC" and their punctuation;
+  **accounts and cards** however they are spaced, with their masked tails
+  ("XXXX4417", "ending in 4417") when exactly one number ends that way;
+  **phones** however they are punctuated; **emails** in any case.
+
+Ticking a group ticks every form in it; open it to untick a single form, which
+is then left as written even where the full form's rules would have reached it.
+A form that is not the same thing can be split out, and gets its own
+replacement. Forms first met during the run join their group rather than
+getting a new placeholder, and the mapping key records which group each form
+belongs to.
+
+The row editor changes an item's type or replacement (on a group, for every
+form), and takes an optional what-went-wrong report (logged locally, with a
+yes/no offer to open a pre-filled email draft—nothing is ever sent on its own).
+A rescan keeps your ticks, splits, type changes and edited replacements.
+Nothing has been written yet.
 
 ### 4. Run
 
@@ -340,34 +371,37 @@ routing numbers and check MICR lines shipped; and `Bend`, `Row` and `Crossing`
 were missing from the street-suffix list, so a home address on any of them
 survived.
 
-### Tested against 8,188 documents
+### Tested against 8,236 documents
 
-The tool is now measured against a labelled corpus of 8,188 generated financial
+The tool is now measured against a labelled corpus of 8,236 generated financial
 PDFs - ten households' worth of bank, card, loan, brokerage, retirement and
 payment-app statements, pay stubs in six payroll formats, tax returns, W-2s and
-1099s, credit reports, utility bills, insurance, vehicle and property records -
-including 268 image-only scans. Every document is also rendered as a Word file
+1099s, credit reports, utility bills, insurance, vehicle and property records,
+and a year of Amazon orders per client in four layouts - including 268
+image-only scans. Every document is also rendered as a Word file
 and run through the DOCX path. `eval/README.md` explains how it is scored.
 
 | | Before | After |
 | --- | --- | --- |
-| PDF: files with a surviving identifier (names typed in) | 2,172 | 30 |
-| PDF: identifiers surviving (names typed in) | 4,248 | 30 |
-| PDF: files leaking when only the tool's own proposals are ticked | 5,714 | 304 |
-| PDF: dollar figures destroyed | 1,119 | 3 |
-| PDF: merchant names removed | 7,355 | 1,002 |
+| PDF: files with a surviving identifier (names typed in) | 2,172 | 25 |
+| PDF: identifiers surviving (names typed in) | 4,248 | 25 |
+| PDF: files leaking when only the tool's own proposals are ticked | 5,714 | 478 |
+| PDF: dollar figures destroyed | 1,119 | 0 |
+| PDF: merchant names removed | 7,355 | 426 |
+| PDF anonymize: files with a surviving identifier (names typed in) | - | 32 |
 | DOCX (anonymize): files with a surviving identifier | 6,403 | 26 |
 | DOCX: dollar figures destroyed | 751 | 0 |
 
-Of the 30 PDF survivors, 17 are the scorer's own noise: "State of Utah" on a
+Of the 25 PDF survivors, 17 are the scorer's own noise: "State of Utah" on a
 title certificate and a school district on a property-tax line, both of which
-share a name with somebody's employer, and two chance digit overlaps. Four were
-a profit-sharing plan named "…Analytics, Inc. Profit Sharing Plan", fixed after
-the run. Five are a property-management company paid by Zelle, which the policy
-above leaves alone as a business. Four are on scans, where OCR misread the
-line on the way in. The merchant losses that remain are mostly payment-app
-names the corpus invented (its "Pingo" is Venmo), which the tool does not know
-are merchants and should not be taught from a test set.
+share a name with somebody's employer, and two chance digit overlaps. Five are
+a property-management company paid by Zelle, which the policy above leaves
+alone as a business. Three are on scans: an employer whose payroll line OCR
+gave a minus sign (fixed after the run), a payment-app counterparty the OCR'd
+table never proposes, and a masked tail OCR misread. The merchant losses that
+remain are mostly payment-app names the corpus invented (its "Pingo" is
+Venmo), which the tool does not know are merchants and should not be taught
+from a test set.
 
 What the run found, in the order it mattered:
 
@@ -558,7 +592,7 @@ the language model, and copy the result back into `dist/`.
 ~/.venvs/anonymizer-redactor/bin/python -m pytest tests/ -q
 ```
 
-638 tests covering detector accuracy, allowlist protection, judicial-officer
+674 tests covering detector accuracy, allowlist protection, judicial-officer
 harvesting in every layout a court prints, child rosters and custody clauses,
 name-variant expansion and merging, overlapping-name folding, typo matching,
 Word's own run and tab structure, surrogate determinism, image redaction,
@@ -591,6 +625,7 @@ redactor/
   ner.py              optional spaCy suggestions (proposals only)
   engine.py           scan, resolve overlaps, apply; typo matching
   review.py           name-list and review decisions, shared by both UIs
+  grouping.py         one review row per person, address or number, however written
   feedback.py         classification error reports and the mailto draft
   docx_processor.py   OOXML-level DOCX reading and rewriting
   pdf_processor.py    PyMuPDF redaction, image blackout, and the OCR path
