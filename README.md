@@ -47,8 +47,13 @@ The frozen `.app` and `.exe` open the window version by default. Pass
 
 ### OCR
 
-Scanned PDFs are pictures of text with no text layer. Two engines handle them,
-tried in order:
+Scanned PDFs are pictures of text with no text layer. Two engines read them,
+and where both are available both read every scanned page, and what either one
+finds is redacted. They misread differently: on one statement Tesseract read
+the mask in `***8697` as a quotation mark and did not see `***1711` at all,
+while RapidOCR read both. A scan is also read when the documents are added,
+not only during the run, so what is on it is proposed on the Names screen and
+counted on the Review screen like everything else.
 
 1. Tesseract—preferred. `vendor_tesseract_macos.py` copies the binary, its
    whole dylib chain and `eng.traineddata` into `vendor/`, rewrites the absolute
@@ -61,7 +66,8 @@ tried in order:
    vendoring Tesseract is entirely optional.
 
 Only if BOTH are unavailable does the tool refuse a scanned page; it refuses
-rather than writing a file that looks redacted without being redacted.
+rather than writing a file that looks redacted without being redacted. With
+only one available, that one is used alone.
 
 To bundle Tesseract into the macOS app:
 
@@ -93,21 +99,51 @@ Windows machine with Tesseract installed. Skip it and RapidOCR covers you.
 
 ### 1. Documents & options
 
-Add DOCX and PDF files. Choose what happens to DOCX:
+Add DOCX and PDF files. Choose what happens to each kind - DOCX defaults to
+anonymize, PDF to redact:
 
 | Mode | Result |
 | --- | --- |
-| Anonymize | People become realistic invented names—`John Michael Smith` → `Tamsin Quentin Middleton`, consistently across the whole batch, with family members sharing a surname. Everything else becomes a tagged placeholder: `[SSN-1]`, `[ACCOUNT-2]`. The document still reads like a normal pleading, so a reader may not realize it was altered unless told. |
-| Redact | Text is removed and replaced with `[REDACTED]` on a black bar. Nothing is invented. |
+| Anonymize | People become short invented names—`John Michael Smith` → `Ezra Lars Holm`, consistently across the whole batch and across both kinds of file, with family members sharing a surname and no two families sharing one. Everything else becomes a tagged placeholder: `[SSN-1]`, `[ACCOUNT-2]`. The document still reads like a normal one, so a reader may not realize it was altered unless told. |
+| Redact | DOCX: text is removed and replaced with `[REDACTED]` on a black bar. PDF: the glyphs are removed and a black box drawn over the space. Nothing is invented. |
 
-PDFs are always redacted, never anonymized. The glyphs are physically deleted
-from the content stream with PyMuPDF redaction annotations and an opaque box is
-drawn over the space. Copy, paste and text extraction find nothing.
+Either way, a PDF's original glyphs are physically deleted from the content
+stream with PyMuPDF redaction annotations. Copy, paste and text extraction find
+nothing of them.
+
+Anonymizing a PDF then writes the replacement where the original was. The
+invented names are kept short - three to five letters a part - because a PDF
+cannot reflow: the replacement has to fit the space the real name took, and is
+squeezed sideways in the rare case it does not. It is set in the nearest of
+the fourteen standard faces at the original size, weight and colour; the
+issuer's own font is almost always a subset holding only the letters it used,
+so it cannot spell anything new. Table rules and row shading are kept.
+
+Because a delivered PDF is usually read by a language model, the page's text
+is redrawn in the order the issuer drew it, with each replacement in the slot
+of the words it replaced. Text added to a PDF otherwise lands at the end of the
+page, so a parser that reads in file order - LangChain's PyPDFLoader, pypdf,
+PyMuPDF's default - would find every name after the page footer instead of in
+its transaction row. Every piece is drawn back at its original width, so the
+layout holds. Where a page cannot be redrawn (rotated text, a character no
+available face can draw) the replacement is written on top instead, and the
+run's warnings say which pages.
+
+The file's properties say it is an anonymized copy; the pages do not. Scanned
+pages and embedded images are still blacked out in anonymize mode - invented
+text painted onto a photograph of a page looks forged.
 
 A PDF has no tables, only words with coordinates, so its columns are rebuilt
 from the gaps between those words before anything is scanned. That matters
 because bank statements arrive as PDFs and a statement is nothing but columns.
-See "Financial exhibits" below.
+Each page is also read twice - in the order the file wrote it, and row by row
+as it sits on the page - and whatever either reading finds is boxed. See
+"Financial exhibits" below.
+
+Each box is trimmed to the middle of its line. PyMuPDF deletes every character
+whose box touches a redaction, and in a tightly set table a character's box is
+taller than the gap between rows, so a full-height box took letters off the
+lines above and below it.
 
 ### 2. Names
 
@@ -198,14 +234,14 @@ client before anyone opens it.
 
 ## What it looks for
 
-60 categories across eight groups:
+61 categories across eight groups:
 
 - People—person names, minor children, organizations, employers (their own category), schools, locations, counterparties in a transaction line
 - Contact—email, phone, fax, URLs, social handles, usernames, IP and MAC addresses, GPS coordinates
 - Government ID—SSN, EIN/Tax ID, driver's license, passport, USCIS A-number, military, inmate, student, voter, bar, notary, professional license, tribal enrollment
 - Health—medical record numbers, health plan/member/group numbers, ICD/CPT/DSM codes, prescription numbers
 - Financial—bank accounts, routing numbers, IBAN, SWIFT, cards (Luhn-checked, including masked forms like `XXXX-XXXX-XXXX-1234` and "card ending in 9876"), Venmo/PayPal/Zelle/Cash App handles, crypto wallets, retirement and brokerage accounts, loans, policies, claims, checks and wires
-- Property—street addresses, PO boxes, APN/parcel numbers, deed book-and-page, legal descriptions, VINs, plates, hull and tail numbers, safe deposit boxes, storage units
+- Property—street addresses, PO boxes, ZIP+4 codes, APN/parcel numbers, deed book-and-page, legal descriptions, VINs, plates, vehicle title numbers, hull and tail numbers, safe deposit boxes, storage units
 - Case—case and docket numbers, case names, other designators
 - Vital—dates of birth (ISO forms included), places of birth
 
@@ -236,6 +272,9 @@ So the policy is narrow on purpose:
 - Counterparty names on the payment rails are redacted: the person on the other
   end of a Zelle, a Venmo, a PayPal, a check. That is the childcare provider,
   the landlord, the paramour—the exact facts a declaration gets fought over.
+- The client's own business is redacted: the name a business account is
+  addressed to, the heading on its profit-and-loss, the entity a financial
+  statement says they own. For a self-employed client it is the employer.
 - Every other merchant is LEFT ALONE. A grocery store, a utility, an insurer
   and a mortgage servicer appear on millions of statements and say nothing
   about who this is. Renaming one is worse than blanking it, because it sends
@@ -301,11 +340,61 @@ routing numbers and check MICR lines shipped; and `Bend`, `Row` and `Crossing`
 were missing from the street-suffix list, so a home address on any of them
 survived.
 
-One limit, stated plainly: PDFs are REDACTED, NEVER ANONYMIZED, so every hit
-becomes the same black bar. You keep the line items and the numbers, but within
-a statement you cannot tell one redacted payee from another. For sorting
-transactions that is usually fine. For tracking a recurring payment to one
-person across six months, it is not.
+### Tested against 8,188 documents
+
+The tool is now measured against a labelled corpus of 8,188 generated financial
+PDFs - ten households' worth of bank, card, loan, brokerage, retirement and
+payment-app statements, pay stubs in six payroll formats, tax returns, W-2s and
+1099s, credit reports, utility bills, insurance, vehicle and property records -
+including 268 image-only scans. Every document is also rendered as a Word file
+and run through the DOCX path. `eval/README.md` explains how it is scored.
+
+| | Before | After |
+| --- | --- | --- |
+| PDF: files with a surviving identifier (names typed in) | 2,172 | 30 |
+| PDF: identifiers surviving (names typed in) | 4,248 | 30 |
+| PDF: files leaking when only the tool's own proposals are ticked | 5,714 | 304 |
+| PDF: dollar figures destroyed | 1,119 | 3 |
+| PDF: merchant names removed | 7,355 | 1,002 |
+| DOCX (anonymize): files with a surviving identifier | 6,403 | 26 |
+| DOCX: dollar figures destroyed | 751 | 0 |
+
+Of the 30 PDF survivors, 17 are the scorer's own noise: "State of Utah" on a
+title certificate and a school district on a property-tax line, both of which
+share a name with somebody's employer, and two chance digit overlaps. Four were
+a profit-sharing plan named "…Analytics, Inc. Profit Sharing Plan", fixed after
+the run. Five are a property-management company paid by Zelle, which the policy
+above leaves alone as a business. Four are on scans, where OCR misread the
+line on the way in. The merchant losses that remain are mostly payment-app
+names the corpus invented (its "Pingo" is Venmo), which the tool does not know
+are merchants and should not be taught from a test set.
+
+What the run found, in the order it mattered:
+
+- A PDF writes each table cell as its own line far more often than not, so
+  columns, labels and payee headings were invisible. Every page is now read
+  twice, in file order and row by row, and cells are aligned to their column.
+- The account holder, the counterparty and the employer are printed in more
+  shapes than the rules knew: stacked joint holders, ACH `INDN:` fields,
+  `ZELLE CREDIT JESSICA COOK`, `Pay Friends to`, `TYPE: P2P CO:`, a Venmo
+  ledger's From and To columns, seven ways of printing a payroll deposit, a pay
+  stub's letterhead, a W-2's employer box, `Employee:`, `Shareholder`, a 1040's
+  name line, a plan named for its sponsor.
+- Scans were read only during the run, so nothing on them was ever proposed.
+  They are now read up front, by both OCR engines.
+- Debits printed `636.09-`, cheque-protected `**832.81`, a masked account beside
+  a figure, grouped digits across a line break, a date or a store number read
+  as a house number, and redaction boxes taller than the line pitch - each
+  destroyed figures or neighbouring text without any detector reporting it.
+- A Word letterhead laid out as a two-column table reads across its columns,
+  so tables are now also read down them, and the mailing block is recognised
+  as text as well as by geometry.
+
+One limit, stated plainly: in redact mode every hit in a PDF becomes the same
+black bar. You keep the line items and the numbers, but within a statement you
+cannot tell one redacted payee from another. For sorting transactions that is
+usually fine. For tracking a recurring payment to one person across six months
+it is not - which is what anonymize mode is for.
 
 ### Town and city names
 
@@ -469,13 +558,17 @@ the language model, and copy the result back into `dist/`.
 ~/.venvs/anonymizer-redactor/bin/python -m pytest tests/ -q
 ```
 
-306 tests covering detector accuracy, allowlist protection, judicial-officer
+581 tests covering detector accuracy, allowlist protection, judicial-officer
 harvesting in every layout a court prints, child rosters and custody clauses,
 name-variant expansion and merging, overlapping-name folding, typo matching,
 Word's own run and tab structure, surrogate determinism, image redaction,
 mapping-key encryption, the web API, and end-to-end leak checks that assert no
 original value survives in the delivered DOCX XML or PDF text. Every leak found
-in review has a regression test that encodes the exact failing input.
+in review has a regression test that encodes the exact failing input;
+`tests/test_corpus_regressions.py` holds the ones the corpus run found.
+
+The corpus run itself is not part of the suite - the corpus lives outside the
+repository and a full run takes about half an hour. See `eval/README.md`.
 
 ---
 
@@ -483,14 +576,15 @@ in review has a regression test that encodes the exact failing input.
 
 ```
 redactor/
-  categories.py       the 60 categories and how each is replaced
+  categories.py       the 61 categories and how each is replaced
   patterns.py         regex detectors, validators, and the allowlist
   names.py            full name -> every written form, and back again
   caption.py          party names harvested from legal captions and headers
   officials.py        the bench, and the do-not-change list built from it
   children.py         child rosters, cue lines and bare custody clauses
   places.py           town and city names: context proposes, gazetteer confirms
-  transactions.py     counterparties and employers named in financial documents
+  transactions.py     account holders, counterparties, employers and the
+                      client's business, as financial documents name them
   data/               the 101,160-name US place list (Census + USGS, 399 KB)
   surrogates.py       deterministic fake names (HMAC, fixed salt)
   mapping.py          entity registry and the encrypted mapping key
@@ -508,6 +602,7 @@ webapp/static/        the React front end (vendored runtime, no build step)
 build/                PyInstaller spec, frozen-app entry point, gazetteer builder
 vendor/               vendored Tesseract (gitignored; rebuild with the scripts)
 tests/                the suite described above
+eval/                 the corpus evaluation: run, score, report (see eval/README.md)
 samples/              example pleading in DOCX and PDF
 ```
 

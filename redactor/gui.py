@@ -62,7 +62,7 @@ def _checkbox_images(size: int = 22) -> "tuple[tk.PhotoImage, tk.PhotoImage]":
 
 ANONYMIZE_NOTE = (
     "ANONYMIZE replaces each person with a realistic, invented name - "
-    "\"John Michael Smith\" becomes something like \"Tamsin Quentin Middleton\", "
+    "\"John Michael Smith\" becomes something like \"Ezra Lars Holm\", "
     "consistently in every document in this batch, and family members keep a "
     "shared surname. The document still reads like a normal pleading, so a "
     "reader may not realize it has been altered unless you tell them. "
@@ -75,10 +75,17 @@ REDACT_NOTE = (
     "Nothing is invented and nothing is recoverable from the file."
 )
 
-PDF_NOTE = (
-    "PDFs are always redacted, never anonymized: the glyphs are physically "
-    "deleted from the page and a black box is drawn over the space. "
-    "Copy, paste and text extraction find nothing."
+PDF_REDACT_NOTE = (
+    "REDACT physically deletes the glyphs from the page and draws a black box "
+    "over the space. Copy, paste and text extraction find nothing."
+)
+
+PDF_ANONYMIZE_NOTE = (
+    "ANONYMIZE deletes the original glyphs and writes the replacement in their "
+    "place - the same invented names and placeholders as the Word files - so "
+    "the page still reads as a statement, to a person or to a language model. "
+    "The file's properties say it is an anonymized copy; the pages do not. "
+    "Scanned pages and images are still blacked out."
 )
 
 
@@ -435,12 +442,22 @@ class App(Tk):
         self.mode_note = ttk.Label(mode_box, text=ANONYMIZE_NOTE, wraplength=380,
                                    justify="left", anchor="w", style="Warn.TLabel")
         self.mode_note.pack(anchor="w", pady=(6, 4), fill="x")
-        ttk.Separator(mode_box).pack(fill="x", pady=4)
-        ttk.Label(mode_box, text=PDF_NOTE, wraplength=380, justify="left",
-                  anchor="w", style="Hint.TLabel").pack(anchor="w", fill="x")
+
+        pdf_box = ttk.LabelFrame(options, text="What to do with PDF files", padding=8)
+        pdf_box.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        self.pdf_mode = StringVar(value="redact")
+        ttk.Radiobutton(pdf_box, text="Redact  (black boxes, nothing invented)",
+                        variable=self.pdf_mode, value="redact",
+                        command=self._update_mode_note).pack(anchor="w")
+        ttk.Radiobutton(pdf_box, text="Anonymize  (replacement text in place)",
+                        variable=self.pdf_mode, value="anonymize",
+                        command=self._update_mode_note).pack(anchor="w")
+        self.pdf_note = ttk.Label(pdf_box, text=PDF_REDACT_NOTE, wraplength=380,
+                                  justify="left", anchor="w", style="Hint.TLabel")
+        self.pdf_note.pack(anchor="w", pady=(6, 4), fill="x")
 
         opt_box = ttk.LabelFrame(options, text="Also scrub", padding=8)
-        opt_box.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        opt_box.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         self.opt_metadata = BooleanVar(value=True)
         self.opt_comments = BooleanVar(value=True)
         self.opt_embedded = BooleanVar(value=True)
@@ -462,7 +479,7 @@ class App(Tk):
             ttk.Checkbutton(opt_box, text=text, variable=var).pack(anchor="w")
 
         key_box = ttk.LabelFrame(options, text="Mapping key password", padding=8)
-        key_box.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        key_box.grid(row=3, column=0, sticky="ew", pady=(0, 8))
         self.key_password = StringVar(value=_password())
         entry_row = ttk.Frame(key_box)
         entry_row.pack(fill="x")
@@ -503,6 +520,9 @@ class App(Tk):
         anonymize = self.docx_mode.get() == "anonymize"
         self.mode_note.configure(text=ANONYMIZE_NOTE if anonymize else REDACT_NOTE,
                                  style="Warn.TLabel" if anonymize else "Hint.TLabel")
+        pdf_anonymize = self.pdf_mode.get() == "anonymize"
+        self.pdf_note.configure(text=PDF_ANONYMIZE_NOTE if pdf_anonymize else PDF_REDACT_NOTE,
+                                style="Warn.TLabel" if pdf_anonymize else "Hint.TLabel")
 
     # ------------------------------------------------------------ tab two --
     def _build_names_tab(self):
@@ -706,6 +726,7 @@ class App(Tk):
                  self.allowlist_text.get("1.0", "end").splitlines() if line.strip()]
         return Settings(
             docx_mode=self.docx_mode.get(),
+            pdf_mode=self.pdf_mode.get(),
             enabled_categories=enabled,
             use_ner=self.opt_ner.get(),
             extra_allowlist=extra,
@@ -1197,7 +1218,7 @@ class App(Tk):
         active = len(self.store.active())
         self.run_summary.configure(
             text=(f"{len(self.files)} document(s), {active} item(s) will be replaced.\n"
-                  f"DOCX: {self.docx_mode.get()}.  PDF: redact (always).\n"
+                  f"DOCX: {self.docx_mode.get()}.  PDF: {self.pdf_mode.get()}.\n"
                   f"Results go to {self.output_dir.get()}"))
 
     def execute(self):

@@ -112,6 +112,8 @@ def _settings(options: dict) -> Settings:
              if line.strip()]
     return Settings(
         docx_mode=options.get("docx_mode", "anonymize"),
+        # anything but an explicit "anonymize" redacts: the safe default
+        pdf_mode="anonymize" if options.get("pdf_mode") == "anonymize" else "redact",
         use_ner=bool(options.get("ner", True)),
         extra_allowlist=extra,
         protected_names=list(SESSION.protection.terms),

@@ -106,6 +106,7 @@ CATEGORIES: tuple[Category, ...] = (
     _c("legal_description", "Legal description (lot/block)", "LEGALDESC", "Property"),
     _c("vin", "VIN", "VIN", "Property"),
     _c("license_plate", "License plate", "PLATE", "Property"),
+    _c("vehicle_title", "Vehicle title number", "TITLE", "Property"),
     _c("vessel_number", "Boat hull / aircraft tail number", "VESSEL", "Property"),
     _c("safe_deposit", "Safe deposit box", "SAFEBOX", "Property"),
     _c("storage_unit", "Storage unit", "STORAGE", "Property"),

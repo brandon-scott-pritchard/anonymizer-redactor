@@ -53,6 +53,11 @@ class Entity:
         return categories.label_for(self.category)
 
 
+def _given(person: _names.PersonName) -> set[str]:
+    """A name's first and middle names, casefolded."""
+    return {n.casefold() for n in (person.first, *person.middles) if n}
+
+
 class MappingStore:
     """Assigns and remembers every replacement used in a run."""
 
@@ -139,7 +144,8 @@ class MappingStore:
                 continue
             clash = (other.surrogate.canonical.casefold() == parsed.canonical.casefold()
                      or (parsed.last and other.surrogate.last
-                         and other.surrogate.last.casefold() == parsed.last.casefold()))
+                         and other.surrogate.last.casefold() == parsed.last.casefold())
+                     or (parsed.first and _given(other.surrogate) & {parsed.first.casefold()}))
             if clash:
                 clashing.append(other)
         for other in clashing:
@@ -169,6 +175,27 @@ class MappingStore:
         entity.replacement = entity.surrogate.canonical
         self.entities[entity.key] = entity
         self._used_replacements.add(entity.surrogate.canonical.casefold())
+
+    def _surrogate_surname_taken(self, last: str) -> bool:
+        if not last:
+            return False
+        folded = last.casefold()
+        return any(e.is_person and e.surrogate is not None and e.surrogate.last
+                   and e.surrogate.last.casefold() == folded
+                   for e in self.entities.values())
+
+    def _real_first_names(self) -> set[str]:
+        """Real given names, which no surrogate may use as a first or middle.
+
+        A stand-in called "Marcus Inglewood" in a file whose client is Marcus
+        Valdez reads as the client wherever the surname is out of sight.
+        """
+        out: set[str] = set()
+        for entity in self.entities.values():
+            if entity.is_person and entity.person is not None and entity.person.first:
+                if len(entity.person.first.rstrip(".")) > 1:     # not an initial
+                    out.add(entity.person.first.casefold())
+        return out
 
     def _real_person_names(self) -> set[str]:
         """Real names (and surnames) no surrogate may collide with."""
@@ -202,6 +229,7 @@ class MappingStore:
         want_middle = bool(parsed.middles)
         shared_last = self._shared_surrogate_surname(parsed.last)
         real = self._real_person_names()
+        real_first = self._real_first_names()
         for attempt in range(64):
             candidate = surrogates.person(parsed.canonical, want_middle, attempt)
             if shared_last:
@@ -222,6 +250,13 @@ class MappingStore:
                 continue
             if (not shared_last and candidate.last
                     and candidate.last.casefold() in real):
+                continue
+            if _given(candidate) & real_first:
+                continue
+            # a different real family may not wear this family's invented
+            # surname: "Elizabeth Kimball" came out "Vidar Jarl" beside the
+            # Harringtons' "Jarl", and read as one of them
+            if not shared_last and self._surrogate_surname_taken(candidate.last):
                 continue
             return candidate
         return surrogates.person(parsed.canonical, want_middle, 999)

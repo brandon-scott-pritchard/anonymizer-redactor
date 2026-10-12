@@ -6,7 +6,7 @@ const html = htm.bind(React.createElement);
 
 const ANONYMIZE_NOTE =
   "ANONYMIZE replaces each person with a realistic, invented name - " +
-  '"John Michael Smith" becomes something like "Tamsin Quentin Middleton", ' +
+  '"John Michael Smith" becomes something like "Ezra Lars Holm", ' +
   "consistently in every document in this batch, and family members keep a " +
   "shared surname. The document still reads like a normal pleading, so a " +
   "reader may not realize it has been altered unless you tell them. " +
@@ -17,9 +17,16 @@ const REDACT_NOTE =
   "REDACT removes the text outright and marks it [REDACTED] on a black bar. " +
   "Nothing is invented and nothing is recoverable from the file.";
 
-const PDF_NOTE =
-  "PDFs are always redacted, never anonymized: the glyphs are physically " +
-  "deleted from the page and a black box is drawn over the space.";
+const PDF_REDACT_NOTE =
+  "REDACT physically deletes the glyphs from the page and draws a black box " +
+  "over the space. Copy, paste and text extraction find nothing.";
+
+const PDF_ANONYMIZE_NOTE =
+  "ANONYMIZE deletes the original glyphs and writes the replacement in their " +
+  "place - the same invented names and placeholders as the Word files - so " +
+  "the page still reads as a statement, to a person or to a language model. " +
+  "The file's properties say it is an anonymized copy; the pages do not. " +
+  "Scanned pages and images are still blacked out.";
 
 const OPTION_LABELS = [
   ["metadata", "Document metadata (author, company, timestamps, custom properties)"],
@@ -33,7 +40,7 @@ const OPTION_LABELS = [
 ];
 
 const DEFAULT_OPTIONS = {
-  docx_mode: "anonymize", metadata: true, comments: true, embedded: true,
+  docx_mode: "anonymize", pdf_mode: "redact", metadata: true, comments: true, embedded: true,
   filenames: true, images: true, ocr: true, ner: true, labels: false,
   allowlist: "",
 };
@@ -116,7 +123,7 @@ function FilesStep({ state, set, actions }) {
           ${state.files.map((f, i) => html`<li key=${i}>
             <span class="kind">${(f.kind || "?").toUpperCase()}</span>
             <span class="name">${f.name}</span>
-            <span class="hint">${f.kind === "docx" ? "anonymize or redact" : "redact"}</span>
+            <span class="hint">anonymize or redact</span>
             <button onClick=${() => actions.removeFile(i)}>Remove</button>
           </li>`)}
         </ul>
@@ -132,7 +139,17 @@ function FilesStep({ state, set, actions }) {
             onChange=${() => set.option("docx_mode", "redact")} /> Redact (black bars, nothing invented)</label>
           <p class=${state.options.docx_mode === "anonymize" ? "warn" : "hint"}>
             ${state.options.docx_mode === "anonymize" ? ANONYMIZE_NOTE : REDACT_NOTE}</p>
-          <p class="hint">${PDF_NOTE}</p>
+        </div>
+        <div class="card">
+          <h2>What to do with PDF files</h2>
+          <label class="check"><input type="radio" name="pdfmode"
+            checked=${state.options.pdf_mode === "redact"}
+            onChange=${() => set.option("pdf_mode", "redact")} /> Redact (black boxes, nothing invented)</label>
+          <label class="check"><input type="radio" name="pdfmode"
+            checked=${state.options.pdf_mode === "anonymize"}
+            onChange=${() => set.option("pdf_mode", "anonymize")} /> Anonymize (replacement text in place)</label>
+          <p class=${state.options.pdf_mode === "anonymize" ? "warn" : "hint"}>
+            ${state.options.pdf_mode === "anonymize" ? PDF_ANONYMIZE_NOTE : PDF_REDACT_NOTE}</p>
         </div>
         <div class="card">
           <h2>Also scrub</h2>
@@ -368,7 +385,7 @@ function RunStep({ state, actions, meta }) {
     <div class="card">
       <h2>Run</h2>
       <p>${state.files.length} document(s), ${active} item(s) will be replaced.
-         DOCX: ${state.options.docx_mode}. PDF: redact (always).</p>
+         DOCX: ${state.options.docx_mode}. PDF: ${state.options.pdf_mode}.</p>
       <div class="bar">
         <button class="primary" disabled=${state.busy.active}
                 onClick=${actions.run}>Run</button>

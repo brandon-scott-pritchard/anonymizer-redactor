@@ -48,6 +48,9 @@ _ORG_MARKERS = frozenset({
     "casualty", "mutual", "assurance", "indemnity", "underwriters", "surety",
     "reinsurance", "annuity", "fidelity", "utilities", "utility", "energy",
     "logistics", "freight", "servicing",
+    # how a credit union and a savings bank abbreviate themselves on a
+    # statement's letterhead: "OQUIRRH MOUNTAIN FCU" was proposed as a person
+    "fcu", "cu", "fsb", "bancorp", "n.a.",
 })
 
 # Ordinary words the model keeps offering as people and organizations. One real
@@ -104,6 +107,9 @@ _TRANSACTION_WORDS = frozenset({
     "credit", "withdrawal", "deposit", "purchase", "refund", "fee", "charge",
     "debits", "credits", "withdrawals", "deposits", "purchases", "refunds",
     "fees", "charges", "payments", "transfers",
+    # a payment app's status and type columns
+    "merchant", "transacti", "transaction", "complete", "completed", "declined",
+    "canceled", "cancelled",
 })
 
 # The last word of a street. A candidate ending in one is a street, whatever
@@ -296,24 +302,29 @@ def suggest(documents: dict[str, str], protected: dict[str, list[tuple[int, int]
             except Exception:                     # pragma: no cover - defensive
                 continue
             for ent in doc.ents:
-                category = LABEL_MAP.get(ent.label_)
-                if not category:
-                    continue
-                value = " ".join(ent.text.split()).strip(" .,;:'\"")
-                value = re.sub(r"['\u2019]s$", "", value).strip()   # drop possessives
-                category = refine_category(value, category)
-                if not _plausible(value, category):
+                label_category = LABEL_MAP.get(ent.label_)
+                if not label_category:
                     continue
                 start = chunk_start + ent.start_char
                 end = chunk_start + ent.end_char
                 if any(start < e and s < end for s, e in guard):
                     continue
-                key = f"{category}:{value.casefold()}"
-                item = merged.get(key)
-                if item is None:
-                    merged[key] = item = Suggestion(value, category, 0)
-                item.count += 1
-                item.documents.add(label)
+                # A line break inside an entity is two cells the model read
+                # as one: a payment ledger prints its payer and payee on
+                # consecutive lines, and "Elizabeth Kimball Jenna Harrington"
+                # came back as one person. Each line is its own candidate.
+                for line in ent.text.split("\n"):
+                    value = " ".join(line.split()).strip(" .,;:'\"+-–—*#")
+                    value = re.sub(r"['\u2019]s$", "", value).strip()   # drop possessives
+                    category = refine_category(value, label_category)
+                    if not _plausible(value, category):
+                        continue
+                    key = f"{category}:{value.casefold()}"
+                    item = merged.get(key)
+                    if item is None:
+                        merged[key] = item = Suggestion(value, category, 0)
+                    item.count += 1
+                    item.documents.add(label)
 
     return sorted(merged.values(), key=lambda s: (s.category, -s.count, s.text.casefold()))
 
@@ -364,6 +375,9 @@ def _plausible(value: str, category: str) -> bool:
     if len(tokens) > MAX_NAME_TOKENS:
         return False
     if _ALL_MASK.match(value) or _ID_FRAGMENT.search(value):
+        return False
+    # a card processor's star - "Uber *Eats", "SQ *BLUE MOON" - marks a merchant
+    if "*" in value:
         return False
     # A spaced dash is a memo separator, never part of a name: a cheque
     # register writes "Shawna Kirkendall - childcare", and the model offered

@@ -37,6 +37,9 @@ class OcrWord:
     block: int = 0
     line: int = 0
     word: int = 0
+    # 0-100. What OCR makes of handwriting is a low-confidence guess, and the
+    # PDF path treats anything not read confidently as unread ink.
+    confidence: float = 100.0
 
 
 # --------------------------------------------------------------------------
@@ -280,7 +283,7 @@ class TesseractEngine:
             width, height = data["width"][i], data["height"][i]
             words.append(OcrWord(left, top, left + width, top + height, text,
                                  data["block_num"][i], data["line_num"][i],
-                                 data["word_num"][i]))
+                                 data["word_num"][i], confidence))
         return words
 
 
@@ -307,7 +310,13 @@ class RapidOcrEngine:
                 return False, f"RapidOCR is not installed ({exc})"
         try:
             if self._engine is None:
-                self._engine = RapidOCR()
+                # onnxruntime takes every core unless told otherwise, which is
+                # right for the app and wrong for a pool of worker processes;
+                # the corpus harness sets this to 1
+                threads = os.environ.get("REDACTOR_OCR_THREADS")
+                options = ({"intra_op_num_threads": int(threads),
+                            "inter_op_num_threads": int(threads)} if threads else {})
+                self._engine = RapidOCR(**options)
         except Exception as exc:                    # pragma: no cover - env dependent
             return False, f"RapidOCR would not start ({exc})"
         return True, "RapidOCR (bundled models)"
@@ -331,6 +340,10 @@ class RapidOcrEngine:
                 box, text = detection[0], detection[1]
             except (TypeError, IndexError):
                 continue
+            try:
+                score = float(detection[2]) * 100.0
+            except (TypeError, ValueError, IndexError):
+                score = 100.0
             text = (text or "").strip()
             if not text:
                 continue
@@ -356,6 +369,7 @@ class RapidOcrEngine:
                     block=0,
                     line=line_index,
                     word=word_index,
+                    confidence=score,
                 ))
         return words
 
@@ -376,6 +390,17 @@ def select_engine():
             return engine, note
         notes.append(f"{engine.name}: {note}")
     return None, "; ".join(notes)
+
+
+def usable_engines() -> list:
+    """Every engine that can run here, preferred first.
+
+    A scanned page is read by all of them. Each misreads differently -
+    Tesseract returned the mask in "***8697" as a quotation mark and missed
+    "***1711" on the same statement; RapidOCR read both and glued the words
+    either side onto them - so the union catches what either alone misses.
+    """
+    return [engine for engine in _ENGINES if engine.available()[0]]
 
 
 def describe() -> tuple[bool, str]:

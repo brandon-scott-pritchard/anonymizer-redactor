@@ -49,6 +49,26 @@ def tables_in(path: Path) -> list:
     return []
 
 
+def column_texts(tables) -> list[str]:
+    """Every table column read top to bottom, one string per column.
+
+    A letterhead laid out as a two-column table - the holder's name and address
+    on the left, "INQUIRIES / Call: 800-555-0247" on the right - reads row by
+    row as name, INQUIRIES, street, Call, city: the address block is never
+    contiguous, and nothing that looks for a name over a street finds it. Read
+    down the column, it is three lines in a row again.
+    """
+    out: list[str] = []
+    for rows in tables:
+        width = max((len(row) for row in rows), default=0)
+        for column in range(width):
+            cells = [row[column].strip() for row in rows
+                     if column < len(row) and row[column].strip()]
+            if len(cells) >= 2:
+                out.append("\n".join(cells))
+    return out
+
+
 # --------------------------------------------------------------------------
 # phase 1 - what the caption already tells us
 # --------------------------------------------------------------------------
@@ -146,7 +166,12 @@ def collect_officials(files: Sequence[Path],
 # --------------------------------------------------------------------------
 
 
-def document_texts(files: Sequence[Path], progress: Progress = _noop) -> dict[str, str]:
+def document_texts(files: Sequence[Path], progress: Progress = _noop,
+                   readings: bool = True) -> dict[str, str]:
+    """Each file's text, joined. ``readings=False`` leaves out the PDF reader's
+    extra readings - the visual rows and the second OCR engine - which the
+    rules want and the language model does not: it reads "Jenna Harrington
+    <column gap> Colton Hughes" as one person."""
     texts: dict[str, str] = {}
     total = max(len(files), 1)
     for index, path in enumerate(files):
@@ -162,6 +187,9 @@ def document_texts(files: Sequence[Path], progress: Progress = _noop) -> dict[st
                 continue
         except Exception:
             continue
+        if not readings:
+            parts = {label: text for label, text in parts.items()
+                     if not label.endswith("(rows)") and "(ocr " not in label}
         joined = "\n".join(text for text in parts.values() if text.strip())
         if joined.strip():
             texts[path.name] = joined
@@ -219,9 +247,11 @@ def collect_suggestions(
         path = Path(raw_path)
         if path.name in texts:
             tables[path.name] = tables_in(path)
+    columns = {name: "\n".join([texts[name], *column_texts(found_tables)])
+               for name, found_tables in tables.items()}
     rules_found += [
         ner.Suggestion(party.name, party.category, 1, {party.source})
-        for party in transactions.harvest_documents(texts, tables, frozenset(known))
+        for party in transactions.harvest_documents(columns, tables, frozenset(known))
     ]
 
     if not settings.use_ner:
@@ -232,7 +262,18 @@ def collect_suggestions(
         return rules_found, [note]
 
     progress("Reviewing documents for additional names", 0.6)
-    raw = ner.suggest(texts, protected)
+    plain = document_texts(files, readings=False)
+    raw = ner.suggest(plain, {label: patterns.allowlist_spans(text, settings.do_not_change)
+                              for label, text in plain.items()})
+
+    # On a statement, a bill or a pay stub the rules already propose the two
+    # organizations that identify the client - the employer and their own
+    # business - and every other organization is a merchant, which must be
+    # left for the reader to look up. The model's organizations are kept only
+    # where some non-financial document named them too.
+    financial = {name for name, text in plain.items() if _is_financial(text)}
+    raw = [s for s in raw
+           if s.category != "organization" or not s.documents <= financial]
 
     seen = {item.key for item in rules_found}
     filtered = rules_found + [s for s in raw
@@ -256,6 +297,15 @@ def collect_suggestions(
 
     notes.append(note)
     return filtered, notes
+
+
+_FIGURE = re.compile(r"(?<![\d,.])\$?\d{1,3}(?:,\d{3})*\.\d{2}(?!\d)")
+# a pleading quotes a few figures; a statement, a bill or a stub is made of them
+FINANCIAL_FIGURES = 12
+
+
+def _is_financial(text: str) -> bool:
+    return len(_FIGURE.findall(text)) >= FINANCIAL_FIGURES
 
 
 # A column heading is a few words. Anything longer is prose that happened to
@@ -325,6 +375,68 @@ def register_table_context(files: Sequence[Path], store: MappingStore,
     return found
 
 
+# The last line of a mailing address: a state and a ZIP, and nothing after.
+_CITY_LINE = re.compile(r"\b[A-Z]{2}\.?[^\S\n]+\d{5}(?:-\d{4})?[^\S\n]*$", re.IGNORECASE)
+_MONEY = re.compile(r"\d[\d,]*\.\d{2}")
+# the same lockbox and institution tests the PDF path's geometric cover uses
+_LOCKBOX = pdf_processor._LOCKBOX
+_INSTITUTION = pdf_processor._INSTITUTION_LINE
+ADDRESS_BLOCK_LINES = 3
+ADDRESS_LINE_CHARS = pdf_processor.ADDRESS_LINE_CHARS
+
+
+def register_address_blocks(files: Sequence[Path], store: MappingStore,
+                            settings: Settings, progress: Progress = _noop) -> int:
+    """Register the lines of every mailing-address block, as text.
+
+    The PDF path covers an address block by its geometry - the line ending in
+    a state and a ZIP and the short lines above it - which is the only
+    reliable way to take a coupon's address whole. A Word document has no
+    geometry to read, and the same block typed into one came out with its
+    city, state and ZIP+4 intact under a redacted street. This is the same
+    rule applied to text: the city line and the street lines above it become
+    known values, which the literal pass then finds wherever they are - in a
+    paragraph, a table cell, or a text box. A lockbox and the institution that
+    owns it are left alone, as they are on the PDF path.
+    """
+    if not settings.category_enabled("street_address"):
+        return 0
+    found = 0
+    for raw_path in files:
+        path = Path(raw_path)
+        kind = classify(path)
+        try:
+            if kind == "docx":
+                parts = docx_processor.extract_text(path)
+            elif kind == "pdf":
+                parts = pdf_processor.extract_text(path)
+            else:
+                continue
+        except Exception:
+            continue
+        for text in [*parts.values(), *column_texts(tables_in(path))]:
+            lines = [" ".join(line.split()) for line in text.splitlines()]
+            for index, line in enumerate(lines):
+                if (not _CITY_LINE.search(line) or _MONEY.search(line)
+                        or len(line) > ADDRESS_LINE_CHARS or _LOCKBOX.search(line)):
+                    continue
+                block = [line]
+                for above in range(index - 1, max(index - 1 - ADDRESS_BLOCK_LINES, -1), -1):
+                    candidate = lines[above]
+                    if (not candidate or len(candidate) > ADDRESS_LINE_CHARS
+                            or _MONEY.search(candidate) or _INSTITUTION.search(candidate)
+                            or _LOCKBOX.search(candidate) or not caption.is_address(candidate)):
+                        break
+                    block.append(candidate)
+                if len(block) < 2:
+                    continue            # a city line with no street is not a block
+                for value in block:
+                    if store.get("street_address", value) is None:
+                        store.add_value("street_address", value, source="address block")
+                        found += 1
+    return found
+
+
 def prescan(
     files: Sequence[Path],
     store: MappingStore,
@@ -341,6 +453,7 @@ def prescan(
     # Tables first: a label/value pair split across two cells has to be a known
     # value before the paragraph walk reaches the cell holding the bare number.
     found = register_table_context(files, store, settings, progress)
+    found += register_address_blocks(files, store, settings, progress)
     for index, raw_path in enumerate(files):
         path = Path(raw_path)
         kind = classify(path)
@@ -616,7 +729,8 @@ def write_report(result: RunResult, store: MappingStore, settings: Settings,
     if result.finished:
         add(f"Finished (UTC):     {result.finished.isoformat(timespec='seconds')}")
     add(f"DOCX mode:          {settings.docx_mode}")
-    add("PDF mode:           redact (always)")
+    add(f"PDF mode:           {settings.pdf_mode}"
+        + ("  (scanned pages and images still redacted)" if settings.pdf_mode == "anonymize" else ""))
     add(f"Filenames:          {'anonymized' if settings.anonymize_filenames else 'unchanged'}")
     add(f"Metadata scrubbed:  {settings.scrub_metadata}")
     add(f"Comments/revisions: {settings.scrub_comments}")

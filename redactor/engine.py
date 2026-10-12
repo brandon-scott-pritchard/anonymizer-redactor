@@ -20,6 +20,13 @@ PERSON_BASE_PRIORITY = 68
 PERSON_TOKEN_BONUS = 4
 # typo forms of a name rank below every exact written form
 FUZZY_PRIORITY = 66
+# A single word salvaged out of a longer written form - see EntityMatcher.find.
+# Below every whole written form, so it only ever fills a gap one of them left.
+PERSON_PART_PRIORITY = 67
+# "Harrington, Emma" is the rarer reading of the same two words than
+# "Luke Harrington" is, so on an exact tie the plain layout wins.
+COMMA_LAYOUT_PENALTY = 1
+_WORD_IN_NAME = re.compile(r"[^\s,]+")
 # only tokens this long get typo-matched; short names would collide with
 # ordinary words
 MIN_FUZZY_LENGTH = 4
@@ -44,6 +51,9 @@ class Settings:
     """Everything the operator chose in the GUI."""
 
     docx_mode: str = "anonymize"                 # "anonymize" | "redact"
+    # PDFs redact by default. "anonymize" writes the replacement text where the
+    # original was, on text-layer pages; scans and images are still redacted.
+    pdf_mode: str = "redact"                     # "anonymize" | "redact"
     enabled_categories: set[str] = field(default_factory=lambda: {c.key for c in categories.CATEGORIES})
     include_single_token_names: bool = True
     use_ner: bool = True
@@ -136,6 +146,8 @@ class EntityMatcher:
                 if variant.risky and not settings.include_single_token_names:
                     continue
                 priority = PERSON_BASE_PRIORITY + PERSON_TOKEN_BONUS * variant.token_count
+                if variant.layout == "comma":
+                    priority -= COMMA_LAYOUT_PENALTY
                 usable.append((variant, priority))
             if not usable:
                 continue
@@ -209,11 +221,19 @@ class EntityMatcher:
             body = r"\s+".join(_names.escape_token(tok) for tok in text.split())
             # same underscore reasoning as the person boundary, plus the
             # address characters that must not abut a matched value
+            # and never the start or the end of a decimal figure: whatever got
+            # registered, "100" is not to be found inside "100.00"
+            money_left = r"(?<!\d[.,])" if text[:1].isdigit() else ""
+            money_right = r"(?![.,]\d)" if text[-1:].isdigit() else ""
             rules.append((
-                re.compile(rf"(?<![^\W_])(?<![@.\-]){body}(?![^\W_])(?![@\-])",
+                re.compile(rf"(?<![^\W_])(?<![@.\-]){money_left}{body}"
+                           rf"(?![^\W_])(?![@\-]){money_right}",
                            re.IGNORECASE),
                 entity,
             ))
+            flexible = _digits_any_separator(text)
+            if flexible is not None:
+                rules.append((flexible, entity))
         rules.sort(key=lambda rule: -len(rule[1].canonical))
         self._value_rules = rules
         self._value_version = self._state_fingerprint()
@@ -252,8 +272,39 @@ class EntityMatcher:
                     Hit(start, end, m.group(0), entity.category, replacement,
                         entity.key, priority)
                 )
+                if variant.token_count > 1:
+                    hits.extend(self._parts(m, entity, lookup, redact))
         hits.extend(self._find_typos(text, protected, redact))
         return hits
+
+    @staticmethod
+    def _parts(m: re.Match, entity: Entity, lookup, redact: bool) -> list[Hit]:
+        """The single words inside a multi-word match, as fallback hits.
+
+        Two people written side by side share a word: in "Luke Harrington,
+        Emma Harrington" Luke's "Luke Harrington" and Emma's "Harrington, Emma"
+        both claim the first "Harrington". Overlap resolution keeps one whole
+        hit and drops the other whole - and the dropped one took "Luke" with
+        it, because a regex that consumed "Luke Harrington" never tries "Luke"
+        alone. The dependents line of a 1040 shipped the child's first name
+        that way. Each word is offered again at a priority below every whole
+        form, so it lands only where the whole form lost.
+        """
+        out: list[Hit] = []
+        for word in _WORD_IN_NAME.finditer(m.group(0)):
+            found = lookup.get(word.group(0).replace("’", "'").casefold())
+            if found is None or found[0].token_count != 1:
+                continue
+            part = found[0]
+            if redact:
+                replacement = REDACTION_TEXT
+            else:
+                replacement = _names.match_case(
+                    word.group(0), _names.render(part, entity.surrogate))
+            out.append(Hit(m.start() + word.start(), m.start() + word.end(),
+                           word.group(0), entity.category, replacement,
+                           entity.key, PERSON_PART_PRIORITY))
+        return out
 
     def _find_typos(self, text: str, protected, redact: bool) -> list[Hit]:
         """Words one inserted letter or one adjacent swap away from a name."""
@@ -289,6 +340,30 @@ class EntityMatcher:
             hits.append(Hit(m.start(), m.end(), word, entity.category,
                             replacement, entity.key, FUZZY_PRIORITY))
         return hits
+
+
+# A number is the same number however it is punctuated. A W-2 prints the EIN
+# as "00-8749107" in box b and again as "UT 008749107" in the state-ID box; a
+# statement prints "3357 3537 2072" in its header and "335735372072" on the
+# coupon. The literal pass matched only the first spelling, so the second
+# shipped beside a redacted first.
+MIN_FLEXIBLE_DIGITS = 7
+_ONLY_DIGITS_AND_SEPARATORS = re.compile(r"^[\d\s\-]+$")
+
+
+def _digits_any_separator(value: str) -> re.Pattern | None:
+    """The value's digits with any single space or hyphen between them.
+
+    Not a dot or a comma: those are how money is punctuated, and a seven-digit
+    account number must never be found inside "1,234,567.00".
+    """
+    if not _ONLY_DIGITS_AND_SEPARATORS.match(value):
+        return None
+    digits = re.sub(r"\D", "", value)
+    if len(digits) < MIN_FLEXIBLE_DIGITS:
+        return None
+    body = r"[ \-]?".join(digits)
+    return re.compile(rf"(?<![\d.,])(?<!\d[ \-]){body}(?![ \-]?\d)(?![.,]\d)")
 
 
 def _overlaps(start: int, end: int, spans) -> bool:
@@ -363,7 +438,23 @@ def scan_text(
     return _resolve(hits)
 
 
+_PEOPLE = {"person", "minor"}
+
+
 def _resolve(hits: list[Hit]) -> list[Hit]:
+    # A person hit lying wholly inside a longer person hit is the same name,
+    # read in part. OCR glued a middle initial to a surname - "CHLOE
+    # ABARRETT-WHITFIELD" - and the exact "WHITFIELD" out-ranked the typo match
+    # on the whole word, so "ABARRETT-" shipped beside a redacted surname.
+    # Only a typo match does this: it is always one whole word, so a hit
+    # inside it is part of that word. Any wider rule would also swallow the
+    # single words salvaged out of two overlapping names (see _parts).
+    words = [h for h in hits if h.category in _PEOPLE and h.priority == FUZZY_PRIORITY]
+    if words:
+        inside = {id(h) for h in hits if h.category in _PEOPLE for g in words
+                  if g is not h and g.start <= h.start and h.end <= g.end
+                  and g.length > h.length}
+        hits = [h for h in hits if id(h) not in inside]
     ordered = sorted(hits, key=lambda h: (-h.priority, -h.length, h.start))
     kept: list[Hit] = []
     taken: list[tuple[int, int]] = []
