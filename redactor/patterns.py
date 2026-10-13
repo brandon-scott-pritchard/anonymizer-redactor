@@ -983,8 +983,13 @@ def _value_is_junk(value: str) -> bool:
 # the corpus prints every debit, and without the trailing minus in this shape
 # each one registered as an account number and was boxed out of the column -
 # 345 figures across a single household's checking statements.
+# OCR reads a comma as a period about as often as not: a scanned loan
+# ledger's balance column came back "13.861.19", and the payment-handle rule
+# beside its "Zelle" column took eight balances as handles and boxed them.
+# A thousands group with either mark is still money.
 _CURRENCY_SHAPE = re.compile(
-    r"^[-+(]?\$?[-+]?(?:\d{1,3}(?:,\d{3})*|\d+)\.\d{2}(?:-|\)|\s?(?:CR|DR))?$",
+    r"^[-+(]?\$?[-+]?(?:(?:\d{1,3}(?:,\d{3})*|\d+)\.\d{2}|\d{1,3}(?:[,.]\d{3})+[.,]\d{2})"
+    r"(?:-|\)|\s?(?:CR|DR))?$",
     re.IGNORECASE)
 
 # Stated as an exception list rather than as a list of financial categories,
@@ -1022,6 +1027,18 @@ _YEAR_REJECTING = frozenset({"investment_account", "bank_account", "loan_number"
 _IDENTIFIER_CUE = re.compile(
     r"(?:\bending(?:\s+in)?|\blast\s*(?:four|4)?\s*digits?|\blast\s*(?:four|4)|\bnos?\.?|\bnum(?:ber)?|#)"
     r"\s*[:\-–—=#]?\s*$", re.IGNORECASE)
+
+
+def _handle_from_another_row(value: str, label: str) -> bool:
+    """A word on a later line than the rail's name, with nothing marking it a handle.
+
+    A ledger's Method column prints "Zelle" on every row, and the separator
+    after a label crosses line breaks so a form's "Venmo:" can sit over its
+    value. Read across rows, "Zelle" took the next row's first word - "Page",
+    "See", an OCR fragment - as the payer's handle. A handle printed on its own
+    line under its label carries its "@" or "$".
+    """
+    return "\n" in label and not value.startswith(("@", "$"))
 
 
 def _wrong_shape(category: str, value: str, label: str = "") -> bool:
@@ -1174,6 +1191,9 @@ def scan(
             if not value.strip() or _value_is_junk(value):
                 continue
             if _wrong_shape(det.category, value, text[m.start():start]):
+                continue
+            if det.category == "payment_handle" and _handle_from_another_row(
+                    value, text[m.start():start]):
                 continue
             if det.category not in _DECIMAL_NATIVE and _cut_from_a_number(text, start, end):
                 continue

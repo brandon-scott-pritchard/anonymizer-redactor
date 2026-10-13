@@ -157,3 +157,27 @@ def test_an_itin_found_hyphenated_is_also_taken_bare():
 ])
 def test_a_card_label_missing_a_letter_still_introduces_its_tail(line, expected):
     assert [f for f in _found(line) if f[0] == "credit_card"] == expected
+
+
+def test_a_balance_ocr_wrote_with_periods_is_money_not_a_handle():
+    """A scanned loan ledger's balances came back "13.861.19" beside its
+    Method column's "Zelle", and eight balances were boxed as handles."""
+    text = ("12/01/2024   276.25   14,090.47 Zelle\n"
+            "01/01/2025   276.25   13.861.19 Zelle\n"
+            "02/01/2025   276.25   1.483.01 Zelie\n")
+    assert not [m for m in patterns.scan(text) if m.category == "payment_handle"]
+
+
+@pytest.mark.parametrize("text", ["Zelle\nPage 1 of 1", "Paid by Zelle\nSee reverse", "Venmo\nwins #"])
+def test_the_word_on_the_next_row_is_not_a_handle(text):
+    assert not [m for m in patterns.scan(text) if m.category == "payment_handle"]
+
+
+@pytest.mark.parametrize("text, handle", [
+    ("Venmo: @jane-doe-7", "@jane-doe-7"),
+    ("Venmo\n@jane-doe-7", "@jane-doe-7"),
+    ("Cash App\n$JaneD", "$JaneD"),
+    ("Paid via Zelle janedoe22", "janedoe22"),
+])
+def test_a_handle_is_still_a_handle(text, handle):
+    assert handle in {m.text for m in patterns.scan(text) if m.category == "payment_handle"}
