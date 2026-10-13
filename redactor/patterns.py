@@ -164,6 +164,11 @@ V_DATE = (
 )
 
 
+# The fifty states and DC by postal code, for the address rules.
+_US_STATE = (r"A[LKZR]|C[AOT]|D[EC]|FL|GA|HI|I[DLNA]|K[SY]|LA|M[EDAINSOT]|N[EVHJMYCD]|"
+             r"O[HKR]|PA|RI|S[CD]|T[NX]|UT|V[TA]|W[AVIY]")
+
+
 def labeled(labels: Sequence[str], value: str = V_ANY_ID) -> str:
     """Build a ``label + separator + (value)`` regex with the value in group 1.
 
@@ -201,12 +206,22 @@ def luhn_valid(value: str) -> bool:
     return checksum % 10 == 0
 
 
+# An area of 9XX is never an SSN, but it is an ITIN when the middle group is
+# one the IRS issues: 50-65, 70-88, 90-92 or 94-99. An ITIN sits in the SSN box
+# of a W-2 and on the first line of a 1040 for a filer without a Social
+# Security number, and it identifies that filer just as surely. Rejecting
+# every 9XX shipped "922-74-1631" from the employee box of a photographed W-2.
+_ITIN_GROUP = re.compile(r"5\d|6[0-5]|7\d|8[0-8]|9[0-24-9]")
+
+
 def valid_ssn(value: str) -> bool:
     digits = "".join(c for c in value if c.isdigit())
     if len(digits) != 9:
         return False
     area, group, serial = digits[:3], digits[3:5], digits[5:]
-    if area in {"000", "666"} or area.startswith("9"):
+    if area.startswith("9"):
+        return bool(_ITIN_GROUP.fullmatch(group)) and serial != "0000"
+    if area in {"000", "666"}:
         return False
     return group != "00" and serial != "0000"
 
@@ -457,9 +472,11 @@ DETECTORS: tuple[Detector, ...] = (
     # -------------------------------------------------------- government ID --
     _d("ssn", r"(?<!\d)\d{3}-\d{2}-\d{4}(?!\d)", validator=valid_ssn, priority=95,
        digit=True),
-    _d("ssn", labeled(("s\\.?s\\.?n\\.?", "social\\s+security", "soc\\.?\\s*sec\\.?"),
+    # an ITIN is labelled as one on a 1040 and on an IRS notice
+    _d("ssn", labeled(("s\\.?s\\.?n\\.?", "social\\s+security", "soc\\.?\\s*sec\\.?",
+                       "i\\.?t\\.?i\\.?n\\.?", "individual\\s+taxpayer\\s+identification"),
                       r"(?:\d{3}[-\s]?\d{2}[-\s]?\d{4}|" + V_MASKED + r")"), group=1, priority=96,
-       digit=True, kw=("soc", "ssn", "s.s", "ss.")),
+       digit=True, kw=("soc", "ssn", "s.s", "ss.", "itin", "i.t", "individual")),
     _d("ein", labeled(("e\\.?i\\.?n\\.?", "f\\.?e\\.?i\\.?n\\.?", "employer\\s+identification",
                        "tax\\s*(?:payer)?\\s*i\\.?d\\.?", "t\\.?i\\.?n\\.?", "federal\\s+tax\\s*id",
                        # a state employer account, a business registration and a
@@ -560,8 +577,26 @@ DETECTORS: tuple[Detector, ...] = (
                               rf"\d{{1,2}}-\d{{4,5}}(?![\d\-]))"),
        group=1, priority=92,
        digit=True, kw=("card", "visa", "amex", "american", "discover")),
+    # A bank's card purchase ends "S427993066734279 Card 1848" - the network's
+    # transaction reference, then the card - and OCR of a photographed
+    # statement closes both gaps: "S420126815924201Card1848". The label above
+    # cannot start after a digit, so the tail shipped. Capitalised "Card" (or
+    # "CARD") directly after a digit and directly before exactly four is that
+    # glued line and nothing else: "4CARD" in a product code is not followed
+    # by a bare four-digit run.
+    _d("credit_card", r"(?<=\d)(?-i:Card|CARD)[^\S\n]?(\d{4})(?!\d)(?![\-/.,]\d)",
+       group=1, priority=92, digit=True, kw=("card",)),
     _d("routing_number", labeled(("routing", "aba", "rtn", "transit")), group=1, priority=91,
        digit=True, kw=("routing", "aba", "rtn", "transit")),
+    # The same label as OCR returns it from a photograph: "Routing Number
+    # (RTNj:229240574" - the closing parenthesis read as a "j" - or
+    # "ROUTINGMUMIA (RTM) 229240574", the label glued to garbage. Neither
+    # fits the separator above, and the bare rule below wants the checksum,
+    # which one misread digit breaks. A word that starts with "routing" and,
+    # within a short stretch of the same line with no digit in it, exactly
+    # nine digits: nothing else follows that word. Labelled, so no checksum.
+    _d("routing_number", r"\brouting[^\d\n]{0,30}?(?<!\d)(\d{9})(?![\d\-])(?![.,]\d)",
+       group=1, priority=91, digit=True, kw=("routing",)),
     # A bare nine-digit run that passes the ABA checksum. This wires up
     # valid_routing, which had been written and then never referenced, and it
     # covers the MICR line at the foot of a cheque and the wire-instruction
@@ -681,6 +716,37 @@ DETECTORS: tuple[Detector, ...] = (
        r"[\"“”'‘’*•·+«»~^°]{1,4}[^\S\n]?(\d{4})(?![\d.,])",
        group=1, priority=71, digit=True,
        kw=("bank", "acct", "account", "card", "ending", "visa", "mastercard", "amex", "discover")),
+    # The same misread with no label to lean on. A photographed receipt
+    # prints "DEBIT ****2628" and OCR returns 'DEBIT ***"2628', 'EBIT **""7710'
+    # or 'EBIT *7710' - a stray quote inside the run, or the run shrunk to one
+    # star, and the label clipped or one the list above has no word for. A
+    # star or a bullet directly against exactly four digits is a mask in any
+    # document: nothing else writes a figure that way. At least one real star
+    # or bullet, so a quoted "2024" or a store's "#1236" is left alone.
+    #
+    # Not money: never after "$" or a digit, never four digits running on
+    # into a longer number or a decimal ("*1234.56" is a check-protected
+    # amount). And not a year behind a lone star - "*2024 figures are
+    # estimates" is a footnote, and a registered "2024" would black out the
+    # year in every date of the batch. Two real marks make it a mask again.
+    _d("masked_account",
+       r"(?<![\w\-$*•\"“”'‘’+«»~^°#])"
+       r"(?=[\"“”'‘’+«»~^°#]*[*•])"
+       r"(?!(?:[*•][\"“”'‘’+«»~^°#]*|[\"“”'‘’+«»~^°#]+[*•][\"“”'‘’+«»~^°#]*)"
+       r"(?:19[5-9]\d|20[0-4]\d)(?![\d.,]))"
+       r"[*•\"“”'‘’+«»~^°#]{1,6}(\d{4})(?![\d\-])(?![.,]\d)",
+       group=1, priority=70, digit=True, kw=("*", "•")),
+    # A transfer line that names the bank and not the account: an exchange or
+    # a payment app prints "Withdrawal to BANK ***3233", and on a scan the
+    # mask is often lost altogether - "Withdrawal to BANK 3233". "Bank" alone
+    # is not a label (bank_account wants "bank account"), but after "to" or
+    # "from" it is the far end of a transfer, and four digits there are that
+    # account's tail. A year is left alone ("Transfer from bank 2024 bonus"),
+    # and so is the start of a date or a decimal figure.
+    _d("bank_account",
+       r"\b(?:to|from)[^\S\n]+(?:(?:my|your|the|linked|external|[A-Z][\w&'\-]*)[^\S\n]+)?bank"
+       r"[^\S\n]*[:#]?[^\S\n]*(?!(?:19[5-9]\d|20[0-4]\d)(?!\d))(\d{4})(?!\d)(?![\-/.,]\d)",
+       group=1, priority=70, digit=True, kw=("bank",)),
     # The OCR scanline across the foot of a remittance coupon. It encodes the
     # account number and the amount due, and nothing else in a document is
     # twenty unbroken digits, so it needs no label.
@@ -736,6 +802,25 @@ DETECTORS: tuple[Detector, ...] = (
        r"(?:\s*,?\s*[A-Z][\w'\-]*(?:\s+[A-Z][\w'\-]*){0,2}\s*,?\s*"
        r"(?:[A-Z]{2}|Utah|Idaho|Nevada|Arizona|Wyoming|Colorado)\.?\s*\d{5}(?:-\d{4})?)?",
        priority=76, digit=True),
+    # A street line that the rules above cannot read because OCR mangled it:
+    # a photographed pay stub's "4417 W Sagebrush Ln, South Jordan, UT 84009"
+    # came back as "4417 W Sagebrush in, ..." from one engine and as
+    # "4417WSagebrushn,Southordan,UT84009" from the other - the suffix misread
+    # (in for Ln, 5t for St, Or for Dr) and the spaces gone. The suffix is
+    # what the rules above key on, so neither reading was an address. What
+    # survives both is the shape of the tail: a comma, a capitalised town, a
+    # comma, a state's two capitals and a five-digit ZIP. With that tail, a
+    # house number and a capitalised street name in front of it on the same
+    # line are an address whatever the suffix came back as.
+    #
+    # Case-sensitive, so the state is two capitals and not "in" or "or", and
+    # the number cannot be the tail of a figure, a date or a store's "#".
+    _d("street_address",
+       r"(?<![\w.,/\-#$:])(?!0)\d{1,6}[A-Z]?[^\S\n]{0,2}(?:[NSEW]\.?[^\S\n]{0,2})?"
+       r"[A-Z][A-Za-z'\-]+(?:[^\S\n]{1,2}[A-Za-z0-9][\w'\-]*\.?){0,4}"
+       r"[^\S\n]*,[^\S\n]*[A-Z][A-Za-z'\-]*(?:[^\S\n]{1,2}[A-Z][A-Za-z'\-]*){0,2}[^\S\n]*,?[^\S\n]*"
+       rf"(?:{_US_STATE})\.?[^\S\n]*\d{{5}}(?:-\d{{4}})?(?!\d)",
+       priority=74, flags=0, digit=True),
     # A ZIP+4 names a delivery point - a block face or a single building - and
     # it turns up away from its address block: in a running header, in an OCR
     # line whose state came back as "it", in a Word table cell of its own.
