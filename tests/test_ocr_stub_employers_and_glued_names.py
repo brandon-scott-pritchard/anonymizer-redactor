@@ -152,3 +152,39 @@ def test_a_name_glued_after_a_merchants_digits_takes_only_its_share_of_the_word(
     store, _ = review.build_store([("Nathan C Blackburn", "person")])
     word = (10.0, 20.0, 110.0, 32.0, "BLACKBURNLAW", 1, 1, 1, 90.0)
     assert [h.text for h, _r in pdf_processor._glued_names([word], store, s)] == ["BLACKBURNLAW"]
+
+
+def test_a_ticked_employer_glued_into_an_ocr_word_is_replaced_and_covered():
+    """A scanned payroll line read as one word: the employer, ticked and
+    replaced everywhere else, matched nothing in it without its spaces."""
+    s = _anon()
+    store, _ = review.build_store([("Owen D Whitlock", "person"),
+                                   ("Juniper Ridge Outfitters", "employer")])
+    tag = store.get("employer", "Juniper Ridge Outfitters").replacement
+    text = "JuniperRidgeOutfittersPayroll2305319913065380OWENDWHITLOCK"
+    said = pdf_processor._no_glued_names("[CARD-1] " + text, store, s)
+    assert "juniper" not in said.casefold() and tag in said and "Payroll" in said
+    word = (116.0, 480.0, 345.0, 491.0, text, 1, 1, 1, 90.0)
+    found = {hit.text: rect for hit, rect in pdf_processor._glued_names([word], store, s)}
+    assert "JuniperRidgeOutfitters" in found
+    assert found["JuniperRidgeOutfitters"].x1 < 116.0 + 229.0 * 0.6
+    # a two-word employer is looked for run together, never spaced in prose
+    store, _ = review.build_store([("Granite Peaks", "employer")])
+    assert pdf_processor._no_glued_names("granite peaks are high", store, s) == "granite peaks are high"
+    assert "GranitePeaks" not in pdf_processor._no_glued_names("GranitePeaksPayroll", store, s)
+
+
+def test_a_surname_misread_as_well_as_glued_on_is_still_found():
+    """"...4904228163HARRNGTON": the surname after the company ID's digits, one
+    letter lost - neither an exact glued name nor a misread word alone."""
+    s = _anon()
+    store, _ = review.build_store([("Owen D Pemberton", "person")])
+    word = (114.0, 595.0, 312.0, 606.0, "IntuPymSolnTransfer2011234904228163PEMBERTN", 1, 1, 1, 90.0)
+    found = pdf_processor._glued_names([word], store, s)
+    assert [hit.text for hit, _r in found] == ["PEMBERTN"]
+    assert found[0][1].x0 > 114.0 + 198.0 * 0.6
+    said = pdf_processor._no_glued_names("IntuPymSolnTransfer[CARD-1]PEMBERTN ENTERPRISES", store, s)
+    assert "PEMBERTN" not in said and said.startswith("IntuPymSolnTransfer[CARD-1]")
+    # the descriptor's own words are not names misread
+    word = (114.0, 595.0, 312.0, 606.0, "IntuPymSolnTransfer2011234904228163", 1, 1, 1, 90.0)
+    assert pdf_processor._glued_names([word], store, s) == []

@@ -1136,6 +1136,45 @@ def _people_parts(store: MappingStore, settings: Settings) -> list:
     return people
 
 
+# An organization's name OCR ran together has to be this long to be looked for
+# inside other text - shorter, and two ordinary words could spell it.
+GLUED_ORG_MIN = 8
+
+
+def _glued_orgs(store: MappingStore, settings: Settings) -> list:
+    """(entity, pattern) for each ticked employer or organization of two words
+    or more, its words allowed to run together as OCR runs them.
+
+    A scanned payroll line came back as one word - "RedCanyonLandsPayroll
+    2305319913065380CODYBASHWORTH" - and the employer, ticked and replaced
+    everywhere else, matched nothing in it: a name's words need the spaces
+    between them. Only the store's own entities: a merchant nobody ticked
+    is left for the reader.
+    """
+    out = []
+    suffix = engine._COMPANY_SUFFIX.replace(r"\.?", "")
+    for entity in store.entities.values():
+        if entity.category not in engine._ORG_CATEGORIES or not entity.enabled:
+            continue
+        if not settings.category_enabled(entity.category):
+            continue
+        forms = {entity.canonical, *(v.text for v in entity.variants)}
+        for form in forms:
+            words = re.findall(r"[A-Za-z0-9]+", form.replace("&", " "))
+            core = [w for w in words
+                    if not re.fullmatch(suffix, w, re.IGNORECASE) and w.casefold() != "the"]
+            if len(core) < 2 or sum(len(w) for w in core) < GLUED_ORG_MIN:
+                continue
+            # two words with a space between are ordinary prose as often as a
+            # name - "the home depot" - and the engine matches them spaced
+            # already; three are this company
+            gap = r"[\s,.&\-]*" if len(core) > 2 else r"[,.&\-]*"
+            body = gap.join(re.escape(w) for w in core)
+            out.append((entity, re.compile(
+                rf"(?i){body}(?:[\s,.]*{engine._COMPANY_SUFFIX}(?![a-z]))?")))
+    return out
+
+
 def _no_glued_names(say: str, store: MappingStore, settings: Settings) -> str:
     """A rewritten OCR word with any name still glued inside it replaced too.
 
@@ -1171,6 +1210,19 @@ def _no_glued_names(say: str, store: MappingStore, settings: Settings) -> str:
             # middle, with letters on both sides.
             say = _case_joined(bit).sub(
                 lambda m, stand_in=stand_in: _names.match_case(m.group(0), stand_in), say)
+        # misread as well as glued on - "4904228163HARRNGTON" - as _name_inside
+        def misread(m, bits=bits, entity=entity):
+            if m.group(0) == say:
+                return m.group(0)
+            letters = m.group(0).casefold()
+            bit = next((b for b in bits if len(b) >= GLUED_NAME_MIN and letters != b
+                        and _misread_name(m.group(0), letters, b)), None)
+            if bit is None:
+                return m.group(0)
+            return _names.match_case(m.group(0), _stand_in_part(entity, bit) or engine.REDACTION_TEXT)
+        say = re.sub(r"(?<![A-Za-z\s])[A-Za-z]+|[A-Za-z]+(?![A-Za-z\s]|$)", misread, say)
+    for entity, pattern in _glued_orgs(store, settings):
+        say = pattern.sub(lambda m, e=entity: e.replacement or engine.REDACTION_TEXT, say)
     return say
 
 
@@ -1180,12 +1232,22 @@ def _case_joined(bit: str) -> re.Pattern:
 
 
 def _glued_names(words, store: MappingStore, settings: Settings):
-    """(hit, rect) for every OCR token that carries a person's name glued in."""
+    """(hit, rect) for every OCR token that carries a person's name, or a
+    ticked organization's, glued in."""
     people = _people_parts(store, settings)
-    if not people:
+    orgs = _glued_orgs(store, settings)
+    if not people and not orgs:
         return []
     out = []
     for x0, y0, x1, y1, text, *_rest in words:
+        for entity, pattern in orgs:
+            for match in pattern.finditer(text):
+                out.append((Hit(match.start(), match.end(), match.group(0), entity.category,
+                                entity.replacement or engine.REDACTION_TEXT, entity.key,
+                                engine.FUZZY_PRIORITY),
+                            _share_rect(x0, y0, x1, y1, text, match.start(), match.end())))
+        if not people:
+            continue
         letters = re.sub(r"[^a-z]", "", text.casefold())
         # "REBECCALBLACKBURN" carries two Blackburns' surname; the one whose
         # other names are in it too is the one it is
@@ -1312,9 +1374,28 @@ def _name_inside(x0, y0, x1, y1, text: str, people) -> list:
             for match in matches:
                 if any(lo <= match.start() < hi for lo, hi in whole_spans):
                     continue
+                whole_spans.append((match.start(), match.end()))
                 stand_in = _stand_in_part(entity, bit)
                 cover(match.start(), match.end(), match.group(0), entity,
                       _names.match_case(match.group(0), stand_in) if stand_in else "")
+        # The surname misread as well as glued on: "…4904228163HARRNGTON",
+        # one letter lost after the company ID's digits. A run of letters
+        # that a digit or a mark cuts out of the word is held to the same
+        # test as a misread word standing alone.
+        for run in re.finditer(r"[A-Za-z]+", text):
+            if (run.start(), run.end()) == (0, len(text)):
+                continue
+            if any(lo < run.end() and run.start() < hi for lo, hi in whole_spans):
+                continue
+            letters = run.group(0).casefold()
+            bit = next((b for b in bits if len(b) >= GLUED_NAME_MIN and letters != b
+                        and _misread_name(run.group(0), letters, b)), None)
+            if bit is None:
+                continue
+            whole_spans.append((run.start(), run.end()))
+            stand_in = _stand_in_part(entity, bit)
+            cover(run.start(), run.end(), run.group(0), entity,
+                  _names.match_case(run.group(0), stand_in) if stand_in else "")
     return out
 
 
