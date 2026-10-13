@@ -27,6 +27,7 @@ import re
 from dataclasses import dataclass
 
 from . import caption, ner, patterns
+from . import names as _names
 
 # The payment rails and the generic banking verbs. Every one of these except the
 # verbs is already hardcoded in the payment_handle detector in patterns.py, so
@@ -108,9 +109,25 @@ PROCESSOR_PAYMENT = re.compile(
 # The name itself may wrap - "User Payment - Brian" / "Gomez ID: OYLV..." - and
 # with the transaction ID anchoring its end, one line break inside it is safe.
 _NAME_WRAPPED = rf"{_TOKEN}(?:(?:{_SP}|[^\S\n]*\n[^\S\n]*)(?:{_TOKEN}|{_INITIAL})){{0,3}}"
-PAYMENT_WITH_ID = re.compile(
-    rf"(?i:\bpayment)[^\S\n]*[-–][^\S\n]*({_NAME_WRAPPED})(?:[^\S\n]+|[^\S\n]*\n[^\S\n]*)"
-    r"(?:(?i:id|transaction\s+id)\b[:#]?|(?:USD|EUR|GBP|CAD|MXN|AUD)\b)")
+# A scanned or photographed report reads none of it cleanly, and every one of
+# these shipped the customer's name off a scanned PayPal-style statement:
+#   WebsitePayment-Madison Long ID:        the type glued to "Payment"
+#   Website Paymént- Kevin Anderson ID:    an accent out of a speck
+#   PaymentRelund-Tyler Pratt ID:          a second word, misread, glued on
+#   Website Payment : Kimberly Price ID    the dash read as a colon
+#   Website Payment Joshua Turner iD uso   the dash lost; "USD" read "uso"
+#   Website Payment - Tyler Brooks !D      "ID" read "!D", "I:", "ID;"
+#   Website Payment-Rachel BellID:         the field glued to the surname
+# The ID field is still what anchors the name's end, so these widen what the
+# line around the name may look like, not what a name may be.
+_PAYMENT_CUE = r"(?:\b|(?<=[a-z]))(?i:paym[eéèë]nt)"
+_PAYMENT_SEP = r"(?:[^\S\n]*(?:[A-Za-z]{3,10}[^\S\n]*)?[-–—:~=]+[^\S\n]*|[^\S\n]+)"
+_ID_FIELD = (r"(?:(?:[^\S\n]+|[^\S\n]*\n[^\S\n]*)"
+             r"(?:(?i:transaction[^\S\n]+)?[iIl1!|][dD]\b|I[:;]|(?i:us[dop]|eur|gbp|cad|mxn|aud)\b)"
+             # glued on, only with a capital D: "Harold" ends in "ld" too, but
+             # "GarcialD:" is "Garcia" and the field with its I read as an l
+             r"|(?<=[a-z])[Il1|]D\b)")
+PAYMENT_WITH_ID = re.compile(rf"{_PAYMENT_CUE}{_PAYMENT_SEP}({_NAME_WRAPPED}){_ID_FIELD}")
 # what a processor's merchant line ends in, where a person's never does
 _CORPORATE = frozenset({
     "technologies", "technology", "games", "entertainment", "software", "systems",
@@ -214,6 +231,12 @@ PAY_DEPOSIT_LINES = (
     re.compile(rf"(?i)\btype:[^\S\n]*{_PAY_CUE}[^\n]*?\bco:[^\S\n]*({_EMP})"),
 )
 PAY_DEPOSIT_LINES += (
+    # The same ACH record off a phone photo, every space lost and the labels
+    # misread: "DePOSACHOVERSTOCLCOMTIPE:DiRDOPD:2214822131CO:OVERSTOCK.COM".
+    # The fields keep their colons, and that is what this anchors on - no
+    # word boundary, since the digits and the label run together.
+    re.compile(rf"(?i)t[yi]pe:[^\S\n]*(?:{_PAY_CUE}|d[i1l]r[^\S\n]?d[eo]p)[^\n]*?"
+               rf"(?<![a-z])co:[^\S\n]*({_EMP})"),
     re.compile(rf"(?i)\bdirect[^\S\n]+deposit[^\S\n]+from[^\S\n]+({_EMP})"),
     # an HSA or a 401(k) statement: "PAYROLL CONTRIBUTION NU SKIN ENTERPRISE"
     # - and the word whole: "Employer Contributions" over a figure proposed "s"
@@ -431,6 +454,11 @@ def harvest(text: str, source: str = "") -> list[Party]:
                            (P2P_COMPANY, 2), (PROCESSOR_PAYMENT, 2), (PAYMENT_WITH_ID, 2)):
         for match in pattern.finditer(text):
             tokens = " ".join(match.group(1).split()).strip(" ,.").split()
+            # only in a processor's payment line, whose slot holds a customer:
+            # elsewhere a join is a brand's own as often as OCR's - DoorDash,
+            # GoDaddy, PayPal
+            tokens = (_unglued(tokens) if pattern in (PROCESSOR_PAYMENT, PAYMENT_WITH_ID)
+                      else [_GLUED_ID.sub("", t) or t for t in tokens])
             if len(tokens) == 1:
                 tokens += _surname_across_double_space(text, match.end(1), tokens[0])
             # cut at the first of the descriptor's own words, not just trailing
@@ -450,6 +478,35 @@ def harvest(text: str, source: str = "") -> list[Party]:
                 continue
             found.setdefault(name.casefold(), Party(name, source))
     return list(found.values())
+
+
+# OCR loses the space inside a name as often as it doubles one: a scanned
+# processor report read "WebsitePayment-KimberlyPrice ID:" and "Whitney
+# MorganID:", and the name came back as one token, or with the field on it -
+# its I read as an l as often as not: "Aubrey GarcialD:".
+_GLUED_ID = re.compile(r"(?<=[a-z])[Il1|]D$")
+_CASE_JOIN = re.compile(r"(?<=[a-z])(?=[A-Z])")
+
+
+def _unglued(tokens: list[str]) -> list[str]:
+    """``KimberlyPrice`` as two tokens, ``MorganID`` without its field.
+
+    Only a capital straight after a small letter is a join. A surname that
+    carries one of its own - McKenzie, DeShawn, LaToya, MacDonald, VanBuren -
+    keeps it: a piece of two letters or fewer, or a name particle, is the
+    front of the next piece, not a name of its own.
+    """
+    out: list[str] = []
+    for token in tokens:
+        token = _GLUED_ID.sub("", token) or token
+        pieces: list[str] = []
+        for piece in _CASE_JOIN.split(token):
+            if pieces and (len(pieces[-1]) <= 2 or pieces[-1].casefold() in _names.PARTICLES):
+                pieces[-1] += piece
+            else:
+                pieces.append(piece)
+        out.extend(pieces)
+    return out
 
 
 # OCR doubles a space inside a name as often as it doubles one anywhere:
@@ -600,9 +657,14 @@ def employers(text: str, source: str = "") -> list[Party]:
     W-2 and declaration names outright.
     """
     found: dict[str, Party] = {}
-    for pattern in (EMPLOYER_FIELD, EMPLOYER_BLOCK, PAYROLL_DEPOSIT,
-                    *PAY_DEPOSIT_LINES, PLAN_SPONSOR):
-        for match in pattern.finditer(text):
+    readings = [(pattern, text) for pattern in (EMPLOYER_FIELD, EMPLOYER_BLOCK, PAYROLL_DEPOSIT,
+                                                *PAY_DEPOSIT_LINES, PLAN_SPONSOR)]
+    # a pay line OCR glued shut is read again with its joins opened
+    opened = _opened_pay_lines(text)
+    if opened:
+        readings.append((PAY_DEPOSIT_LINES[0], opened))
+    for pattern, reading in readings:
+        for match in pattern.finditer(reading):
             name = _trim_employer(match.group(1))
             if not name or _EMPLOYER_JUNK.match(name):
                 continue
@@ -610,12 +672,33 @@ def employers(text: str, source: str = "") -> list[Party]:
                 continue
             if any(t.strip(".,").casefold() in _ACCOUNT_WORDS for t in name.split()):
                 continue
-            if pattern is PAY_DEPOSIT_LINES[0] and _earnings_row(text, match, name):
+            if pattern is PAY_DEPOSIT_LINES[0] and _earnings_row(reading, match, name):
                 continue
             found.setdefault(name.casefold(), Party(name, source, "employer"))
     for name in pay_stub_employers(text):
         found.setdefault(name.casefold(), Party(name, source, "employer"))
     return [party for party in found.values() if not _paid_by_the_account(text, party.name)]
+
+
+# A scanned statement's pay line with every space lost to OCR -
+# "5/31   RedCanyonLandsPayroll2305319913065380CODYBASHWORTH" - is one word,
+# and a scan of one may never read the row any other way. The cue glued to
+# the name behind it is what marks one: a small letter, then "Payroll".
+_GLUED_PAY_CUE = re.compile(r"[a-z](?:Payroll|PAYROLL|Payrll)")
+_DIGIT_JOIN = re.compile(r"(?<=[A-Za-z])(?=\d)|(?<=\d)(?=[A-Za-z])")
+
+
+def _opened_pay_lines(text: str) -> str:
+    """The glued pay lines alone, each join opened: "Red Canyon Lands Payroll
+    2305319913065380 CODYBASHWORTH". Empty when there are none."""
+    lines = []
+    for line in text.splitlines():
+        if not _GLUED_PAY_CUE.search(line):
+            continue
+        words = [" ".join(_unglued(_DIGIT_JOIN.split(word))) if _GLUED_PAY_CUE.search(word)
+                 else word for word in line.split(" ")]
+        lines.append(" ".join(words))
+    return "\n".join(lines)
 
 
 # what marks a line as the bank's record of a deposit rather than a stub's row
@@ -1069,9 +1152,15 @@ def _feed_person(name: str, merchants: set[str]) -> bool:
 
 # A business wallet prints the date before the payment's kind - "Jun 8 -
 # Website Payment" - and OCR turns the dash into "+" or ":" ("Jun 6+:").
+# A screenshot separates them with a middle dot ("May 8·General Payment"),
+# and OCR reads an 8 as "&" ("May & - General Payment") - either way the
+# payer above it shipped.
 _FEED_DATE = re.compile(
-    r"(?i)^(?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?[^\S\n]*\d{1,2}"
-    r"|\d{1,2}/\d{1,2}(?:/\d{2,4})?)[^\S\n]*[-–—+:,.]*[^\S\n]*")
+    r"(?i)^(?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?[^\S\n]*[\d&]{1,2}"
+    r"|\d{1,2}/\d{1,2}(?:/\d{2,4})?)[^\S\n]*[-–—+:,.·•]*[^\S\n]*")
+# A wallet draws each row's avatar as the payer's initial, and a screenshot's
+# row reading puts it in front of the name: "B   Brynlee Long   +$226.00".
+_AVATAR = re.compile(r"^([A-Z])\s+(?=\1[a-z])")
 _ONLY_AMOUNT = re.compile(r"^[+\-−]?\s?\$\s?\d[\d,]*(?:\.\d{2})?$")
 
 
@@ -1092,7 +1181,7 @@ def activity_feed(text: str, source: str = "") -> list[Party]:
         return []
     lines = [" ".join(line.split()) for line in text.splitlines()]
     # the name's own cell: a row reading carries the amount beside it
-    cells = [_SIGNED_AMOUNT.split(line)[0].strip() for line in lines]
+    cells = [_AVATAR.sub("", _SIGNED_AMOUNT.split(line)[0].strip()) for line in lines]
     merchants = {cells[i].casefold() for i in range(len(lines) - 1)
                  if _FEED_PURCHASE.match(lines[i + 1])}
     # an entry whose kind is its own name is the app's own line - "Daily Cash"
@@ -1120,6 +1209,80 @@ def activity_feed(text: str, source: str = "") -> list[Party]:
     return list(found.values())
 
 
+# A payment app's statement is a ledger with a From and a To column, one end
+# of every row the account holder and the other the person paid. A scanned
+# one loses its table - no column comes back as a column, so the payee
+# heading never applies - and each row is read across instead:
+#   ID   Datetime   Type   Status   Note   From   To   Amount
+#   9008223054395262090   Leilani Fonoti   Anthony Garcia   +$138.50
+#   Payment   Complete   utilities split   Leilani Fonoti   Jennifer Hernandez
+# Under that heading, two person-shaped cells side by side are the two ends
+# of a transfer. Side by side, not one alone: a merchant is a single cell
+# beside the amount - "Leilani Fonoti   Etsy.Com- Vintagefinds" - and a store
+# with a two-word name would pass a lone-cell test.
+_LEDGER_HEAD = re.compile(r"(?im)(?:^|[^\S\n]{2,})from[^\S\n]{2,}to(?:[^\S\n]{2,}|[^\S\n]*$)")
+_CELL_GAP = re.compile(r"[^\S\n]{2,}")
+# what a scan leaves at a cell's edges: a stray quote, a rule read as "~~"
+_CELL_JUNK = " \t\"'“”‘’~_=—–-|"
+
+
+def ledger_parties(text: str, source: str = "") -> list[Party]:
+    """Both ends of each row of a From / To ledger read across - see above."""
+    if not _LEDGER_HEAD.search(text):
+        return []
+    found: dict[str, Party] = {}
+    for line in text.splitlines():
+        cells = [_SIGNED_AMOUNT.split(cell)[0].strip(_CELL_JUNK)
+                 for cell in _CELL_GAP.split(line.strip())]
+        # the Type column's own words sit beside the From column too:
+        # "Standard Transfer   Emily Thompson"
+        people = [bool(_FEED_NAME.match(cell)) and _feed_person(cell, set())
+                  and not {t.casefold() for t in cell.split()} & _TRAILING
+                  for cell in cells]
+        for at in range(len(cells) - 1):
+            if people[at] and people[at + 1]:
+                for name in cells[at:at + 2]:
+                    found.setdefault(name.casefold(), Party(name, source, "person"))
+    return list(found.values())
+
+
+# A bank's Zelle activity prints the direction as a cell of its own and the
+# other party in the next one: "06/20/2025   Received   KELSEY AOKI
+# (801)555-0110   babysitting   Completed   $58.54". There is no "from" for
+# the descriptor patterns to anchor on. OCR misreads the verb ("Recewed") and,
+# off a phone photo, loses the space inside an all-capitals name -
+# "KELSEYAOKI" - where no rule can tell the given name from the surname. The
+# run is proposed as printed: ticked, it is the word on the page, which is
+# what gets covered.
+_P2P_DIRECTION = re.compile(
+    r"(?i)^(?:sent|rec[eiaow]{1,3}[vwu]?e?d|request(?:ed)?|paid|you\s+(?:sent|received))$")
+GLUED_NAME_LETTERS = 8
+_MONEY = re.compile(r"\$[^\S\n]?\d")
+
+
+def direction_rows(text: str, source: str = "") -> list[Party]:
+    """The party in the cell after a Sent / Received cell - see above."""
+    found: dict[str, Party] = {}
+    for line in text.splitlines():
+        if not _MONEY.search(line):
+            continue
+        cells = [cell.strip(_CELL_JUNK) for cell in _CELL_GAP.split(line.strip())]
+        for at in range(len(cells) - 1):
+            if not _P2P_DIRECTION.match(cells[at]):
+                continue
+            name = cells[at + 1]
+            tokens = _unglued(name.split())
+            if re.fullmatch(_NAME, name) and _person_shaped(tokens):
+                name = " ".join(tokens)
+            elif not (name.isalpha() and name.isupper() and len(name) >= GLUED_NAME_LETTERS):
+                continue
+            bare = {t.casefold() for t in name.split()}
+            if not _acceptable(name) or bare & (_TRAILING | _FORM_WORDS | ner._NEVER_IN_A_NAME):
+                continue
+            found.setdefault(name.casefold(), Party(name, source, "person"))
+    return list(found.values())
+
+
 def harvest_documents(regions: dict[str, str],
                       tables: dict[str, list] | None = None,
                       avoid: frozenset[str] = frozenset(),
@@ -1133,6 +1296,7 @@ def harvest_documents(regions: dict[str, str],
     tables = tables or {}
     merged: dict[str, Party] = {}
     for source, text in regions.items():
+        page = feeds.get(source, "") if feeds is not None else text
         for party in [*harvest(text, source),
                       *from_tables(tables.get(source, ()), source),
                       *employers_from_tables(tables.get(source, ()), source),
@@ -1140,8 +1304,9 @@ def harvest_documents(regions: dict[str, str],
                       *account_holders(text, source),
                       *receivers(text, source),
                       *labelled_people(text, source),
-                      *activity_feed(feeds.get(source, "") if feeds is not None else text,
-                                     source),
+                      *activity_feed(page, source),
+                      *ledger_parties(page, source),
+                      *direction_rows(page, source),
                       *businesses(text, source)]:
             if party.key in avoid:
                 continue
