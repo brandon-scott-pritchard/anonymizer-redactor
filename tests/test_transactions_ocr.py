@@ -113,6 +113,16 @@ def test_both_ends_of_a_scanned_ledger_row_are_proposed():
         "Leilani Fonoti", "Anthony Garcia", "Jennifer Hernandez"}
 
 
+def test_a_holder_glued_shut_in_one_cell_still_pairs_with_the_payee():
+    """OCR read "Anthony Walker   AlyssaValdez"; with the holder's cell one
+    word, the row had one person-shaped cell and the payee shipped."""
+    text = ("Statement for Alyssa Valdez\n"
+            "Status    Note            From          To\n"
+            "movie            Anthony Walker      AlyssaValdez            +$79.33\n"
+            "groceries        AlyssaValdez        DoorDash                -$41.10\n")
+    assert _names(transactions.ledger_parties(text)) == {"Anthony Walker", "Alyssa Valdez"}
+
+
 def test_a_page_without_a_from_to_heading_is_not_a_ledger():
     text = "\n".join(LEDGER.splitlines()[1:])
     assert transactions.ledger_parties(text) == []

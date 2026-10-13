@@ -234,6 +234,23 @@ def valid_routing(value: str) -> bool:
     return sum(int(d) * w for d, w in zip(digits, weights)) % 10 == 0
 
 
+# A legacy wallet address is base58 noise: about one letter in six a vowel,
+# and no words. OCR's run-together descriptors are words - "12CarrefourMarket
+# ParisFrCard22", "311AembershipRewardsPoints" off scanned card statements -
+# and were boxed as wallets with the figures beside them.
+_VOWELS = frozenset("aeiouAEIOU")
+WALLET_VOWEL_SHARE = 0.3
+
+
+def _not_words(value: str) -> bool:
+    if value.startswith("bc1"):
+        return True
+    letters = [ch for ch in value if ch.isalpha()]
+    if not letters or not re.search(r"[a-z]{4}", value):
+        return True
+    return sum(ch in _VOWELS for ch in letters) / len(letters) < WALLET_VOWEL_SHARE
+
+
 def valid_vin(value: str) -> bool:
     v = value.upper()
     return len(v) == 17 and not any(c in v for c in "IOQ") and any(c.isdigit() for c in v)
@@ -616,7 +633,7 @@ DETECTORS: tuple[Detector, ...] = (
     _d("swift", labeled(("swift", "bic", "swift\\s*/\\s*bic"), r"[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?"), group=1, priority=90,
        kw=("swift", "bic")),
     _d("crypto_wallet", r"\b(?:bc1[a-z0-9]{25,62}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})\b", priority=90, flags=0,
-       digit=True),
+       validator=_not_words, digit=True),
     _d("crypto_wallet", r"\b0x[a-fA-F0-9]{40}\b", priority=90,
        digit=True),
     # The transaction id on a payment-app line, which is not a handle: it
@@ -713,13 +730,14 @@ DETECTORS: tuple[Detector, ...] = (
     # every labelled financial detector, so a labelled hit still wins.
     _d("masked_account", rf"(?<![\w\-]){V_MASKED}(?![\w\-])", priority=72, digit=True),
     # OCR reads a run of asterisks as almost any other mark - a quotation mark,
-    # an apostrophe, "+*", "«*" - "Added cash from Bank "8697", "Visa +*8779".
+    # an apostrophe, "+*", "«*", a period - "Added cash from Bank "8697", "Visa
+    # +*8779", "Visa*.8779", "Visa·.8779" down a photographed wallet's rows.
     # Only after a word that introduces an account or a card, so a quoted year
     # in prose is left alone.
     _d("masked_account",
        r"(?i:\b(?:bank|acct|account|card|ending(?:[^\S\n]+in)?|visa|mastercard|amex|discover))"
        r"[^\S\n]*[:#]?[^\S\n]*"
-       r"[\"“”'‘’*•·+«»~^°]{1,4}[^\S\n]?(\d{4})(?![\d.,])",
+       r"[\"“”'‘’*•·▪.+«»~^°]{1,4}[^\S\n]?(\d{4})(?![\d.,])",
        group=1, priority=71, digit=True,
        kw=("bank", "acct", "account", "card", "ending", "visa", "mastercard", "amex", "discover")),
     # The same misread with no label to lean on. A photographed receipt
@@ -742,6 +760,14 @@ DETECTORS: tuple[Detector, ...] = (
        r"(?:19[5-9]\d|20[0-4]\d)(?![\d.,]))"
        r"[*•\"“”'‘’+«»~^°#]{1,6}(\d{4})(?![\d\-])(?![.,]\d)",
        group=1, priority=70, digit=True, kw=("*", "•")),
+    # A long mask OCR glued to its label, one mark misread as a letter:
+    # "Cardaccountxxoxxxxxxxxxx3957" off a photographed statement. No boundary
+    # is asked for in front - the label runs straight into it - so the run
+    # must be long: six marks or more, at most one of them read as an "o" or
+    # a zero. Nothing spelled in English has six x's in a row.
+    _d("masked_account",
+       r"(?=[Xx*•]{3})(?:[Xx*•]|(?<=[Xx*•])[oO0](?=[Xx*•])){6,}[\- ]?(\d{2,6})(?!\d)(?![.,]\d)",
+       group=1, priority=70, digit=True),
     # A transfer line that names the bank and not the account: an exchange or
     # a payment app prints "Withdrawal to BANK ***3233", and on a scan the
     # mask is often lost altogether - "Withdrawal to BANK 3233". "Bank" alone
@@ -983,12 +1009,14 @@ def _value_is_junk(value: str) -> bool:
 # the corpus prints every debit, and without the trailing minus in this shape
 # each one registered as an account number and was boxed out of the column -
 # 345 figures across a single household's checking statements.
-# OCR reads a comma as a period about as often as not: a scanned loan
+# OCR reads a dollar sign as an S ("S496.07", "s0.00" taken as a loan and an
+# account number off scanned statements, and boxed) and a comma as a period
+# about as often as not: a scanned loan
 # ledger's balance column came back "13.861.19", and the payment-handle rule
 # beside its "Zelle" column took eight balances as handles and boxed them.
 # A thousands group with either mark is still money.
 _CURRENCY_SHAPE = re.compile(
-    r"^[-+(]?\$?[-+]?(?:(?:\d{1,3}(?:,\d{3})*|\d+)\.\d{2}|\d{1,3}(?:[,.]\d{3})+[.,]\d{2})"
+    r"^[-+(]?[$S]?[-+]?(?:(?:\d{1,3}(?:,\d{3})*|\d+)\.\d{2}|\d{1,3}(?:[,.]\d{3})+[.,]\d{2})"
     r"(?:-|\)|\s?(?:CR|DR))?$",
     re.IGNORECASE)
 
@@ -1006,9 +1034,16 @@ _DECIMAL_NATIVE = frozenset({"diagnosis_code", "gps"})
 
 # A cheque number is never a date, and neither is a case number. "Transaction
 # 04/12/2026 posted" registered the date as a case number and blacked it out.
-_DATE_ONLY = re.compile(rf"^{V_DATE}$|^\d{{1,2}}[/\-]\d{{4}}$")
+# A date, with OCR's run-together label in front of it if it has one: a
+# scanned mortgage coupon read "Due By 02/01/2020" as "DueBy02/01/2020", and
+# the loan-number rule boxed it and the amount due beside it. "06/13", a
+# month and a day, is a date to a loan number too.
+_DATE_ONLY = re.compile(rf"^(?:[A-Za-z]{{2,12}})?(?:{V_DATE})$|^\d{{1,2}}[/\-]\d{{4}}$")
+_MONTH_DAY = re.compile(r"^(?:0?[1-9]|1[0-2])/(?:0?[1-9]|[12]\d|3[01])$")
 _DATE_REJECTING = frozenset({"check_number", "case_number", "case_designator", "order_number",
-                             "tracking_number", "prescription"})
+                             "tracking_number", "prescription", "loan_number"})
+# "Lot size 0.21ac" - an area, not the parcel's number
+_ACREAGE = re.compile(r"(?i)^\d*\.\d+[^\S\n]?(?:ac|acres?)\.?$")
 # A bare year is the commonest number after a financial label - "Roth IRA 2024
 # contribution", "401(k) 2023 limit", "Loan 2019 refinance" - and no account,
 # loan or policy number is four digits that happen to be a recent year. Once
@@ -1052,7 +1087,9 @@ def _wrong_shape(category: str, value: str, label: str = "") -> bool:
     if (category in _YEAR_REJECTING and _YEAR_ONLY.match(cleaned)
             and not _IDENTIFIER_CUE.search(label)):
         return True
-    if category in _DATE_REJECTING and _DATE_ONLY.match(cleaned):
+    if category in _DATE_REJECTING and (_DATE_ONLY.match(cleaned) or _MONTH_DAY.match(cleaned)):
+        return True
+    if category == "parcel_number" and _ACREAGE.match(cleaned):
         return True
     return False
 

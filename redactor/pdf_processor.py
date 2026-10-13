@@ -37,6 +37,33 @@ BOX_PADDING = 1.0            # points of slack around an exact text box
 # still intersects every character on it, and nothing on its neighbours.
 TEXT_BOX_INSET = 0.25
 OCR_BOX_PADDING = 3.0        # OCR boxes are approximate, so they get more
+# Up and down, an OCR box gets at most this share of its own height. Small type
+# sits in lines a few points apart - a statement's 6-point rows touched - and
+# three points above and below a town on a merchant line took the tops and
+# bottoms off the balances on the rows either side. OCR's boxes are close
+# around the ink up and down; the slack they need is along the line.
+OCR_PAD_SHARE = 0.15
+# A hit that fills less of one recognised word than this is boxed by its own
+# share of the word's characters - see :func:`_rects_for_hit`.
+WORD_SHARE_WHOLE = 0.6
+
+
+def _pad_ocr(rect: pymupdf.Rect, padding: float = OCR_BOX_PADDING) -> pymupdf.Rect:
+    """An OCR box with its slack: ``padding`` along the line, less across it."""
+    rect = pymupdf.Rect(rect)
+    up = min(padding, rect.height * OCR_PAD_SHARE)
+    return pymupdf.Rect(rect.x0 - padding, rect.y0 - up, rect.x1 + padding, rect.y1 + up)
+
+
+def _unpad_ocr(rect: pymupdf.Rect, padding: float = OCR_BOX_PADDING) -> pymupdf.Rect:
+    """The box :func:`_pad_ocr` was given, from the box it returned."""
+    rect = pymupdf.Rect(rect)
+    padded = rect.height
+    # padded = h + 2 * min(padding, h * share), whichever term is the smaller
+    height = (padded - 2 * padding if padded - 2 * padding >= padding / OCR_PAD_SHARE
+              else padded / (1 + 2 * OCR_PAD_SHARE))
+    up = (padded - height) / 2
+    return pymupdf.Rect(rect.x0 + padding, rect.y0 + up, rect.x1 - padding, rect.y1 - up)
 
 
 @dataclass
@@ -274,6 +301,8 @@ def _rects_for_hit(hit: Hit, spans, padding: float = BOX_PADDING,
     for start, end, rect in spans:
         if end <= hit.start or start >= hit.end:
             continue
+        if ocr:
+            rect = _share_of_word(rect, start, end, hit.start, hit.end)
         direction = ACROSS if ocr else _direction_at(turned, rect)
         axis = _axis(direction)
         placed = False
@@ -298,8 +327,28 @@ def _rects_for_hit(hit: Hit, spans, padding: float = BOX_PADDING,
         if not placed:
             lines.append((pymupdf.Rect(rect), direction))
     if ocr:
-        return [r + (-padding, -padding, padding, padding) for r, _d in lines]
+        return [_pad_ocr(r, padding) for r, _d in lines]
     return [_box(r, padding, direction) for r, direction in lines]
+
+
+def _share_of_word(rect: pymupdf.Rect, start: int, end: int, lo: int, hi: int) -> pymupdf.Rect:
+    """The part of one recognised word that characters ``lo:hi`` take up.
+
+    OCR glues a scanned row into one "word" as often as it splits it - a
+    16-digit reference, the posting date and the balance beside it came back
+    as one run 320 points wide - and the box for a hit in it was the whole
+    run, which blacked out every figure on the row. Where the hit is most of
+    the word, the word is boxed whole as before; otherwise the hit's share of
+    the characters, a character's slack either side.
+    """
+    length = max(end - start, 1)
+    inside = min(end, hi) - max(start, lo)
+    if inside >= WORD_SHARE_WHOLE * length:
+        return pymupdf.Rect(rect)
+    width = rect.width / length
+    cut = pymupdf.Rect(rect.x0 + width * (max(start, lo) - start - 1), rect.y0,
+                       rect.x0 + width * (min(end, hi) - start + 1), rect.y1)
+    return cut & rect
 
 
 # --------------------------------------------------------------------------
@@ -434,6 +483,12 @@ def iter_text_units(path: Path):
 # a statement ends. A merchant line says "ASIAN MARKET PROVO UT 13.99": a state,
 # then money, and no ZIP.
 _ZIP_LINE = re.compile(r"\b[A-Z]{2}\.?[ \t]+\d{5}(?:-\d{4})?[ \t]*$")
+# OCR runs the last line of an address together - "595SBLUFFST.STGEORGEUT84770"
+# off a scanned pay stub, "LEHIUT 84043-3317" off a photographed statement -
+# and the space the line above needs is gone. On a scan only, a state's own
+# code glued to the town before it still ends an address.
+_GLUED_ZIP_LINE = re.compile(
+    rf"(?<=[A-Za-z.,])(?:{patterns._US_STATE})[ \t]*\d{{5}}(?:-\d{{4}})?[ \t]*$")
 # a figure with cents, or a dollar sign on whole dollars: an appraisal's
 # "2024 / $3,146" taxes line sat above a city line and was boxed as address
 _MONEY_ON_LINE = re.compile(r"\d[\d,]*\.\d{2}|\$\s?\d")
@@ -509,7 +564,8 @@ def address_blocks(words, ocr: bool = False) -> list[pymupdf.Rect]:
     segments = _segments(words)
     blocks: list[pymupdf.Rect] = []
     for text, rect in segments:
-        if not _ZIP_LINE.search(text) or _MONEY_ON_LINE.search(text):
+        if (not (_ZIP_LINE.search(text) or (ocr and _GLUED_ZIP_LINE.search(text)))
+                or _MONEY_ON_LINE.search(text)):
             continue
         # "Redfield Retail Bank, PO Box 669804, Dallas, TX 75266-0781" is where
         # the payment goes, on one line with the issuer's name; the PO box
@@ -1033,8 +1089,7 @@ def _ocr_near_misses(words, store: MappingStore, settings: Settings):
             replacement = match.replacement if match is not None else ""
         if match is None:
             continue
-        rect = pymupdf.Rect(x0, y0, x1, y1) + (-OCR_BOX_PADDING, -OCR_BOX_PADDING,
-                                                OCR_BOX_PADDING, OCR_BOX_PADDING)
+        rect = _pad_ocr(pymupdf.Rect(x0, y0, x1, y1))
         out.append((Hit(0, len(text), text, match.category, replacement or engine.REDACTION_TEXT,
                         match.key, engine.FUZZY_PRIORITY), rect))
     return out
@@ -1273,8 +1328,7 @@ def _glued_names(words, store: MappingStore, settings: Settings):
             # as inside a word, or every description on the page went white.
             out.extend(_slice_hit(x0, y0, x1, y1, text, start, end, best, edge[1]))
             continue
-        rect = pymupdf.Rect(x0, y0, x1, y1) + (-OCR_BOX_PADDING, -OCR_BOX_PADDING,
-                                                OCR_BOX_PADDING, OCR_BOX_PADDING)
+        rect = _pad_ocr(pymupdf.Rect(x0, y0, x1, y1))
         replacement = _names.match_case(text, best.replacement) if best.replacement else ""
         out.append((Hit(0, len(text), text, best.category, replacement or engine.REDACTION_TEXT,
                         best.key, engine.FUZZY_PRIORITY), rect))
@@ -1314,8 +1368,7 @@ def _share_rect(x0, y0, x1, y1, text: str, start: int, end: int) -> pymupdf.Rect
     characters, a character's slack either side."""
     width = (x1 - x0) / max(len(text), 1)
     rect = pymupdf.Rect(x0 + width * (start - 1), y0, x0 + width * (end + 1), y1)
-    return (rect & pymupdf.Rect(x0, y0, x1, y1)) + (
-        -OCR_BOX_PADDING, -OCR_BOX_PADDING, OCR_BOX_PADDING, OCR_BOX_PADDING)
+    return _pad_ocr(rect & pymupdf.Rect(x0, y0, x1, y1))
 
 
 def _slice_hit(x0, y0, x1, y1, text: str, start: int, end: int, entity, bits) -> list:
@@ -1557,7 +1610,7 @@ def _plan_edits(word_sets: list[list], store, anon_settings, matcher, settings,
         if ocr:
             for hit, rect in [*_glued_names(words, store, settings),
                               *_ocr_near_misses(words, store, settings)]:
-                rect = rect + (OCR_BOX_PADDING, OCR_BOX_PADDING, -OCR_BOX_PADDING, -OCR_BOX_PADDING)
+                rect = _unpad_ocr(rect)
                 if claim([rect]):
                     edits.append(_Edit([rect], hit.replacement, hit))
                     counted.append(hit)
@@ -1685,8 +1738,7 @@ def _ocr_layer(word_sets: list[list], edits: list[_Edit],
     is drawn visibly, on the white patch where the original was. A word any
     edit touched is never laid down, whichever engine read it.
     """
-    pad = (-OCR_BOX_PADDING, -OCR_BOX_PADDING, OCR_BOX_PADDING, OCR_BOX_PADDING)
-    covers = [_union(edit.words) + pad for edit in edits]
+    covers = [_pad_ocr(_union(edit.words)) for edit in edits]
     pieces: list[tuple] = []          # (rect, text, visible)
     for x0, y0, x1, y1, word, *rest in (word_sets[0] if word_sets else []):
         rect = pymupdf.Rect(x0, y0, x1, y1)
@@ -1748,8 +1800,7 @@ def _white_out(page, region, word_sets, edits, report: PageReport,
     sits over an image. ``read`` is ink already accounted for - the image under
     a page's own text layer - which is never mistaken for handwriting.
     """
-    pad = (-OCR_BOX_PADDING, -OCR_BOX_PADDING, OCR_BOX_PADDING, OCR_BOX_PADDING)
-    cleared = [_union(edit.words) + pad for edit in edits] + list(extra)
+    cleared = [_pad_ocr(_union(edit.words)) for edit in edits] + list(extra)
     marks = _unread_ink(page, region, word_sets, cleared + list(read))
     for rect in cleared:
         page.add_redact_annot(rect, fill=(1, 1, 1), cross_out=False)
@@ -1824,7 +1875,6 @@ def _anonymize_images(page, store, anon_settings, matcher, settings, report: Pag
     word must not take a neighbouring line of it with it.
     """
     live_words = [pymupdf.Rect(w[:4]) for w in live_words]
-    pad = (-OCR_BOX_PADDING, -OCR_BOX_PADDING, OCR_BOX_PADDING, OCR_BOX_PADDING)
     queued = report.boxes
     engines = ocr.usable_engines() if settings.ocr_scanned_pdfs else []
     plan: list[tuple] = []
@@ -1857,11 +1907,11 @@ def _anonymize_images(page, store, anon_settings, matcher, settings, report: Pag
             fresh = [[w for w in words
                       if _covered(pymupdf.Rect(w[:4]), live_here) < LIVE_COVER]
                      for words in sets]
-            edited = [e + pad for e in live_edits if e.intersects(rect)]
+            edited = [_pad_ocr(e) for e in live_edits if e.intersects(rect)]
             # the picture of an edited word, wherever the OCR boxed it - but
             # only a word mostly inside the edit: one engine boxes a whole
             # line as one "word", and whiting that out took the figures too
-            edited += [pymupdf.Rect(w[:4]) + pad for words in sets for w in words
+            edited += [_pad_ocr(pymupdf.Rect(w[:4])) for words in sets for w in words
                        if w[4].strip() and _covered(pymupdf.Rect(w[:4]), edited) >= LIVE_COVER]
             edited = [(e & rect) for e in edited]
             edits = _plan_edits(fresh, store, anon_settings, matcher, settings, result,

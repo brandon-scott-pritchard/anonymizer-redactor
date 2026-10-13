@@ -1279,8 +1279,21 @@ def ledger_parties(text: str, source: str = "") -> list[Party]:
     if not _LEDGER_HEAD.search(text):
         return []
     found: dict[str, Party] = {}
+    folded = " ".join(text.split()).casefold()
+
+    def opened(cell: str) -> str:
+        # OCR glues the holder's name shut in one cell as often as not -
+        # "Anthony Walker   AlyssaValdez" - and the pair was lost with it. A
+        # glued cell is read apart only when the page prints the same name
+        # with its space somewhere else, which the holder's always is; a
+        # brand written as one word ("DoorDash") never is.
+        if " " in cell:
+            return cell
+        apart = " ".join(_unglued([cell]))
+        return apart if apart != cell and apart.casefold() in folded else cell
+
     for line in text.splitlines():
-        cells = [_SIGNED_AMOUNT.split(cell)[0].strip(_CELL_JUNK)
+        cells = [opened(_SIGNED_AMOUNT.split(cell)[0].strip(_CELL_JUNK))
                  for cell in _CELL_GAP.split(line.strip())]
         # the Type column's own words sit beside the From column too:
         # "Standard Transfer   Emily Thompson"
