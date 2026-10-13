@@ -51,8 +51,8 @@ def main(argv=None) -> int:
     original_rects = pdf_processor._rects_for_hit
     original_blocks = pdf_processor.address_blocks
 
-    def rects_for_hit(hit, spans, padding=pdf_processor.BOX_PADDING, ocr=False):
-        out = original_rects(hit, spans, padding, ocr=ocr)
+    def rects_for_hit(hit, spans, padding=pdf_processor.BOX_PADDING, **options):
+        out = original_rects(hit, spans, padding, **options)
         entity = store.entities.get(hit.entity_key)
         for rect in out:
             causes[tuple(round(v, 1) for v in rect)] = (

@@ -63,11 +63,18 @@ def case_of(path: Path, root: Path) -> str:
 
 
 def discover(root: Path, limit_batches: int | None = None,
-             match: str | None = None) -> tuple[dict, dict]:
-    """``{case: [pdf,...]}`` and ``{batch_id: [pdf,...]}``."""
+             match: str | None = None, photos: bool = False) -> tuple[dict, dict]:
+    """``{case: [pdf,...]}`` and ``{batch_id: [pdf,...]}``.
+
+    ``photos`` adds the corpus's phone photos and screenshots, which the app
+    makes into PDFs on the way in.
+    """
+    from redactor import photo
     cases: dict[str, list[Path]] = {}
     batches: dict[str, list[Path]] = {}
-    for pdf in sorted(root.rglob("*.pdf")):
+    found = [p for p in root.rglob("*") if p.is_file() and (
+        p.suffix.lower() == ".pdf" or (photos and photo.is_photo(p)))]
+    for pdf in sorted(found):
         # secrets pool over the whole case even when only part of it is run
         cases.setdefault(case_of(pdf, root), []).append(pdf)
         if match and not re.search(match, str(pdf.relative_to(root))):
@@ -109,7 +116,7 @@ def build_case(case: str, pdfs: list[Path], root: Path) -> tuple[str, truth.Secr
         except Exception:
             continue
         truth.collect_text(text, secrets)
-    truth.finalize(secrets)
+    truth.finalize(secrets, merchants)
     return case, secrets, merchants
 
 
@@ -206,9 +213,14 @@ def _doc_type(label: dict | None, pdf: Path) -> str:
     return "unlabelled"
 
 
+def pipeline_classify(path: Path) -> str | None:
+    from redactor import pipeline
+    return pipeline.classify(path)
+
+
 def run_batch(batch_id: str, pdfs: list[str], root: str, out: str, mode: str,
               secrets_path: str, docx: bool, docx_mode: str, use_ner: bool,
-              keep_outputs: bool, pdf_mode: str = "redact") -> dict:
+              keep_outputs: bool, pdf_mode: str = "redact", scan_money: bool = False) -> dict:
     root_p, out_p = Path(root), Path(out)
     files = [Path(p) for p in pdfs]
     with open(secrets_path, "rb") as handle:
@@ -222,6 +234,10 @@ def run_batch(batch_id: str, pdfs: list[str], root: str, out: str, mode: str,
     work = Path(tempfile.mkdtemp(prefix="corpus-", dir=out_p / "_tmp"))
     try:
         inputs = files
+        if any(pipeline_classify(p) == "image" for p in files):
+            # as the app does on the way in: each photo becomes a PDF
+            from redactor import pipeline
+            inputs = [pipeline.as_document(p, work / "photos") for p in files]
         if docx:
             from eval import to_docx
             inputs = []
@@ -236,6 +252,7 @@ def run_batch(batch_id: str, pdfs: list[str], root: str, out: str, mode: str,
         record.update({k: flow[k] for k in ("captions", "suggestions", "entities", "timings")})
         archive = zipfile.ZipFile(result.archive) if result.archive else None
         by_source = {o.source.stem: o for o in result.outcomes}
+        given = {Path(p).stem: Path(p) for p in inputs}
         for pdf in files:
             label = truth.load_label(pdf)
             source_text, scanned = _source_text(pdf)
@@ -266,6 +283,13 @@ def run_batch(batch_id: str, pdfs: list[str], root: str, out: str, mode: str,
                 if not scanned:
                     entry["destroyed_money"] = dict(truth.destroyed_money(source_text, text))
                     entry["lost_merchants"] = truth.lost_merchants(source_text, text, merchants, secrets)
+                elif scan_money and not docx and pdf.stem in given:
+                    # A scan or photo has no text to compare against, so the
+                    # page as the app received it is OCR'd too. OCR misreads
+                    # on either side make this noisy: it is kept apart from
+                    # the exact count, as a signal of figures boxed off a scan.
+                    before = _output_text(given[pdf.stem].read_bytes(), ".pdf", ocr_it=True)
+                    entry["destroyed_money_ocr"] = dict(truth.destroyed_money(before, text))
             record["files"].append(entry)
     except Exception as exc:
         record["error"] = f"{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=6)}"
@@ -325,6 +349,10 @@ def main(argv=None) -> int:
     parser.add_argument("--pdf-mode", choices=["redact", "anonymize"], default="redact")
     parser.add_argument("--ner", action="store_true", help="ask the spaCy model too")
     parser.add_argument("--keep-outputs", action="store_true")
+    parser.add_argument("--scan-money", action="store_true",
+                        help="also OCR each scan or photo as received, to count figures lost on it")
+    parser.add_argument("--photos", action="store_true",
+                        help="also run the phone photos and screenshots (made into PDFs)")
     args = parser.parse_args(argv)
 
     root = args.root.resolve()
@@ -338,7 +366,7 @@ def main(argv=None) -> int:
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "_tmp").mkdir(exist_ok=True)
     _snapshot_code(args.out)
-    cases, batches = discover(root, args.limit, args.match)
+    cases, batches = discover(root, args.limit, args.match, photos=args.photos)
     print(f"{sum(len(v) for v in batches.values())} PDFs in {len(batches)} batches, "
           f"{len(cases)} cases", flush=True)
 
@@ -363,7 +391,8 @@ def main(argv=None) -> int:
 
     modes = ["auto", "operator"] if args.mode == "both" else [args.mode]
     jobs = [(b, [str(p) for p in pdfs], str(root), str(args.out), mode, str(secrets_path),
-             args.docx, args.docx_mode, args.ner, args.keep_outputs, args.pdf_mode)
+             args.docx, args.docx_mode, args.ner, args.keep_outputs, args.pdf_mode,
+             args.scan_money)
             for mode in modes for b, pdfs in batches.items()]
     done = 0
     t0 = time.time()

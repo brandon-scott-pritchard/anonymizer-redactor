@@ -13,6 +13,7 @@ Run with ``python -m redactor.webapp``.
 
 from __future__ import annotations
 
+import atexit
 import os
 import re
 import secrets
@@ -67,6 +68,9 @@ class Session:
 
     def __init__(self) -> None:
         self.workdir = Path(tempfile.mkdtemp(prefix="anonymizer-web-"))
+        # the uploads are the client's documents, unredacted: gone when the
+        # app is, not left in the temp folder
+        atexit.register(shutil.rmtree, self.workdir, True)
         self.uploads = self.workdir / "uploads"
         self.output = self.workdir / "output"
         self.uploads.mkdir()
@@ -282,7 +286,10 @@ def state():
 
 
 def _files_payload() -> dict:
-    return {"files": [{"name": SESSION.relative.get(p, p.name), "kind": pipeline.classify(p)}
+    def kind(path: Path) -> str | None:
+        shown = SESSION.relative.get(path, path.name)
+        return "photo" if pipeline.classify(Path(shown)) == "image" else pipeline.classify(path)
+    return {"files": [{"name": SESSION.relative.get(p, p.name), "kind": kind(p)}
                       for p in SESSION.files],
             "skipped": list(SESSION.skipped)}
 
@@ -301,16 +308,35 @@ def _safe_relative(raw: str) -> str | None:
     return "/".join(parts)
 
 
-def _keep(relative: str, write) -> Path:
-    """Store one document under its relative path; ``write(target)`` fills it."""
+def _keep(relative: str, write) -> Path | None:
+    """Store one document under its relative path; ``write(target)`` fills it.
+
+    A photo is made into a PDF here, once, so every later step reads it as a
+    scan; the name shown and reported stays the one it came in with.
+    """
     target = SESSION.uploads.joinpath(*relative.split("/"))
     counter = 1
     while target.exists():
         stem, suffix = Path(relative).stem, Path(relative).suffix
         target = target.with_name(f"{stem}-{counter}{suffix}")
         counter += 1
-    target.parent.mkdir(parents=True, exist_ok=True)
-    write(target)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        write(target)
+    except OSError as exc:
+        # "Case/Report.docx/b.docx" after a file "Case/Report.docx": the
+        # one document is reported, the rest of the batch still goes in
+        SESSION.skipped.append(f"{relative} (could not be stored: {exc.strerror or exc})")
+        return None
+    if pipeline.classify(target) == "image":
+        try:
+            converted = pipeline.as_document(target, target.parent)
+        except Exception:
+            SESSION.skipped.append(f"{relative} (could not be read as an image)")
+            return None
+        finally:
+            target.unlink(missing_ok=True)
+        target = converted
     SESSION.files.append(target)
     SESSION.relative[target] = relative
     return target
@@ -323,8 +349,8 @@ async def upload(files: list[UploadFile] = File(default=[]),
     """Documents, each with its place in a dropped folder when it came in one.
 
     ``paths[i]`` is ``files[i]``'s path inside what was dropped; ``skipped``
-    names the files the page did not send because they are not PDF or Word,
-    so the report can list them.
+    names the files the page did not send because they are not documents or
+    photos, so the report can list them.
     """
     added = 0
     for index, item in enumerate(files):
@@ -337,8 +363,8 @@ async def upload(files: list[UploadFile] = File(default=[]),
             SESSION.skipped.append(relative)
             continue
         data = await item.read()
-        _keep(relative, lambda target: target.write_bytes(data))
-        added += 1
+        if _keep(relative, lambda target: target.write_bytes(data)) is not None:
+            added += 1
     for name in skipped:
         relative = _safe_relative(name)
         if relative and not pipeline._housekeeping(relative.rsplit("/", 1)[-1]):
@@ -352,10 +378,12 @@ def add_paths(paths: list[str | Path]) -> dict:
     The documents are copied into the session; the originals are not touched.
     """
     gathered = pipeline.gather([Path(p) for p in paths])
+    added = 0
     for source, relative in gathered.files:
-        _keep(relative, lambda target, source=source: shutil.copyfile(source, target))
+        if _keep(relative, lambda target, source=source: shutil.copyfile(source, target)):
+            added += 1
     SESSION.skipped.extend(gathered.skipped)
-    return {"added": len(gathered.files), **_files_payload()}
+    return {"added": added, **_files_payload()}
 
 
 @app.delete("/api/files/{index}")

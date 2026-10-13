@@ -106,11 +106,15 @@ function Progress({ busy }) {
 // was dropped ("Case/2024/statement.pdf"). The entries are taken from the
 // event before the first await: the browser empties dataTransfer once the
 // handler returns.
-async function readDrop(dataTransfer) {
+function takeDrop(dataTransfer) {
   const entries = [...(dataTransfer.items || [])]
     .map((item) => (item.webkitGetAsEntry ? item.webkitGetAsEntry() : null))
     .filter(Boolean);
-  if (!entries.length) return [...dataTransfer.files].map((file) => ({ file, path: file.name }));
+  return { entries, files: [...dataTransfer.files] };
+}
+
+async function readDrop({ entries, files }) {
+  if (!entries.length) return files.map((file) => ({ file, path: file.name }));
   const out = [];
   const walk = async (entry, prefix) => {
     if (entry.isFile) {
@@ -134,6 +138,11 @@ function folderCount(files) {
     .size;
 }
 
+// What the app reads: Word, PDF, and photos or screenshots of documents
+// (made into PDFs on the way in). Kept in step with redactor/photo.py.
+const PHOTO_TYPES = ["avif", "bmp", "dib", "gif", "heic", "heif", "hif", "j2k", "jfif", "jp2", "jpe", "jpeg", "jpf", "jpg", "jpx", "png", "tif", "tiff", "webp"];
+const READABLE = new RegExp(`\\.(pdf|docx|${PHOTO_TYPES.join("|")})$`, "i");
+
 function FilesStep({ state, set, actions }) {
   const [over, setOver] = useState(false);
   const pick = () => document.getElementById("filepick").click();
@@ -143,16 +152,18 @@ function FilesStep({ state, set, actions }) {
   return html`
     <div class="columns">
       <div class="card">
-        <h2>Documents (.docx and .pdf)</h2>
+        <h2>Documents (Word, PDF, photos)</h2>
         <div class=${"dropzone" + (over ? " over" : "")}
              onClick=${pick}
              onDragOver=${(e) => { e.preventDefault(); setOver(true); }}
              onDragLeave=${() => setOver(false)}
-             onDrop=${async (e) => { e.preventDefault(); setOver(false);
-                                     onPicked(await readDrop(e.dataTransfer)); }}>
-          Drop documents or whole folders here, or click to choose files.
-          Folders keep their layout in the results. Everything stays on this computer.
-          <input id="filepick" type="file" multiple accept=".docx,.pdf" hidden
+             onDrop=${(e) => { e.preventDefault(); setOver(false);
+                               actions.dropped(takeDrop(e.dataTransfer)); }}>
+          Drop documents, photos of documents or whole folders here, or click to
+          choose files. A photo comes back as a PDF, straightened and cropped to the
+          page. Folders keep their layout. Everything stays on this computer.
+          <input id="filepick" type="file" multiple hidden
+                 accept=${[".docx", ".pdf", ...PHOTO_TYPES.map((t) => "." + t)].join(",")}
                  onChange=${(e) => { onPicked(asItems(e.target.files)); e.target.value = ""; }} />
           <input id="folderpick" type="file" multiple hidden webkitdirectory=${true}
                  onChange=${(e) => { onPicked(asItems(e.target.files)); e.target.value = ""; }} />
@@ -165,7 +176,7 @@ function FilesStep({ state, set, actions }) {
           state.files.length === 1 ? "" : "s"}${folders > 1 || state.files.some((f) => f.name.includes("/"))
           ? ` in ${folders} folder${folders === 1 ? "" : "s"}` : ""}.</p>` : null}
         ${state.skipped.length ? html`<details class="skipped">
-          <summary class="warn">${`${state.skipped.length} other file${state.skipped.length === 1 ? "" : "s"} will be left out - not PDF or Word. They are listed in the run report and nothing from them is delivered.`}</summary>
+          <summary class="warn">${`${state.skipped.length} other file${state.skipped.length === 1 ? "" : "s"} will be left out - not documents or photos. They are listed in the run report and nothing from them is delivered.`}</summary>
           <ul>${state.skipped.map((name, i) => html`<li key=${i}>${name}</li>`)}</ul>
         </details>` : null}
         <ul class="files">
@@ -481,8 +492,7 @@ function RunStep({ state, actions, meta }) {
           ${result.failed
             ? `${result.failed} file(s) were refused or failed and are NOT in the archive.`
             : "Finished."}</p>
-        ${result.skipped ? html`<p class="hint">${result.skipped} other file(s) in the
-          folders were left out - not PDF or Word. The report lists them.</p>` : null}
+        ${result.skipped ? html`<p class="hint">${`${result.skipped} other file(s) in the folders were left out - not documents or photos. The report lists them.`}</p>` : null}
         <div class="downloads">
           ${result.archive ? html`<a href=${dl("archive")} download><button class="primary">Download archive</button></a>` : null}
           ${result.key ? html`<a href=${dl("key")} download><button>Download mapping key</button></a>` : null}
@@ -573,8 +583,8 @@ function App() {
         || ["thumbs.db", "desktop.ini"].includes(name.toLowerCase());
       const leaf = (path) => path.slice(path.lastIndexOf("/") + 1);
       const kept = items.filter((item) => !quiet(leaf(item.path)));
-      const docs = kept.filter((item) => /\.(pdf|docx)$/i.test(item.path));
-      const others = kept.filter((item) => !/\.(pdf|docx)$/i.test(item.path));
+      const docs = kept.filter((item) => READABLE.test(item.path));
+      const others = kept.filter((item) => !READABLE.test(item.path));
       let result = null;
       const BATCH = 20;
       for (let start = 0; start < Math.max(docs.length, 1); start += BATCH) {
@@ -590,6 +600,13 @@ function App() {
         result = await api.post("/api/files", form);
       }
       applyFiles(result);
+    }),
+
+    // a folder that cannot be read says so, like every other failure
+    dropped: (taken) => guarded(async () => {
+      track("Reading the folder", 0);
+      const items = await readDrop(taken);
+      if (items.length) await actions.upload(items);
     }),
 
     chooseFolder: () => guarded(async () => {

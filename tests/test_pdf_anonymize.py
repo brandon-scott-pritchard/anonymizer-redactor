@@ -307,3 +307,21 @@ def test_ocr_reads_a_run_of_asterisks_as_other_marks():
     found = [(m.text, m.category) for m in
              patterns.scan("Payment method Visa +*8779 Mastercard «*1741 Status")]
     assert ("8779", "masked_account") in found and ("1741", "masked_account") in found
+
+
+def test_an_anonymized_text_page_is_clean_to_the_eye_too(tmp_path):
+    """The text layer is not the whole page: a change that drew replacements
+    over glyphs it failed to remove would pass every get_text() check. OCR
+    reads what a person - or a vision model - would see."""
+    from PIL import Image
+    from redactor import ocr
+    engines = ocr.usable_engines()
+    if not engines:
+        pytest.skip("no OCR engine")
+    out, _result, _store = _run(tmp_path, _pdf(tmp_path, STATEMENT))
+    with pymupdf.open(out) as doc:
+        pix = doc[0].get_pixmap(dpi=200)
+    seen = " ".join(w.text for w in engines[0].read(
+        Image.frombytes("RGB", (pix.width, pix.height), pix.samples))).upper()
+    for gone in ("OAKLEY", "12469", "84042"):
+        assert gone not in seen, f"{gone} still visible on the page"

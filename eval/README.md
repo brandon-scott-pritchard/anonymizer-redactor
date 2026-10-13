@@ -105,6 +105,19 @@ the first three prompted and scored before any change for it - keep one layout
 like that in reserve whenever a new kind of record is added, because a set
 the rules were fitted to can only show that they fit it.
 
+## Photos and screenshots
+
+`--photos` adds the corpus's phone photos (`variants_phone_photos/`, about a
+thousand JPEGs) and payment-app screenshots (`payment_apps/*/screenshots/`,
+about five hundred PNGs). Each is made into a PDF exactly as the app does on
+the way in, then scored like a scan - its output OCR'd - so its leak count is a
+floor. A photographed page `…_p1.jpg` takes its document's label `….json`;
+the screenshots have no labels of their own and are scored against the
+household's pooled secrets.
+
+    ~/.venvs/anonymizer-redactor/bin/python -m eval.corpus_eval CORPUS --out RUN \
+        --photos --match "\.(jpg|png)$"
+
 ## Reading the report
 
 ```

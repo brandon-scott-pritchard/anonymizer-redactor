@@ -15,18 +15,36 @@ from typing import Callable, Iterable, Sequence
 from dataclasses import replace as _replace
 
 from . import (caption, categories, children, docx_processor, engine, grouping, mapping,
-               names, ner, officials, pdf_processor, places,
+               names, ner, officials, pdf_processor, photo, places,
                transactions)
 from .engine import PersonMatcher, Settings
 from .mapping import MappingStore
 
 Progress = Callable[[str, float], None]
 
-SUPPORTED = {".docx": "docx", ".pdf": "pdf"}
+SUPPORTED = {".docx": "docx", ".pdf": "pdf", **{suffix: "image" for suffix in photo.SUFFIXES}}
 
 
 def classify(path: Path) -> str | None:
     return SUPPORTED.get(Path(path).suffix.lower())
+
+
+def as_document(path: Path, folder: Path) -> Path:
+    """A photo or screenshot of a document, made into a PDF in ``folder``.
+
+    Every step after this one - captions, suggestions, the review scan, the
+    run - reads it as the scanned page it now is. Anything that is not an
+    image comes back as it was.
+    """
+    path = Path(path)
+    if classify(path) != "image":
+        return path
+    target = Path(folder) / f"{path.stem}.pdf"
+    counter = 1
+    while target.exists():
+        target = target.with_name(f"{path.stem}-{counter}.pdf")
+        counter += 1
+    return photo.to_pdf(path, target)
 
 
 def _noop(_message: str, _fraction: float) -> None:
@@ -249,11 +267,16 @@ def collect_suggestions(
         path = Path(raw_path)
         if path.name in texts:
             tables[path.name] = tables_in(path)
-    columns = {name: "\n".join([texts[name], *column_texts(found_tables)])
+    # a blank line between readings and between columns: joined line to line,
+    # the end of one column ran into the start of the next - "Daily Cash"
+    # (a description) over "Sent" (the type column's first cell) - and a rule
+    # reading a row's two lines took the app's cash-back line for a person
+    columns = {name: "\n\n".join([texts[name], *column_texts(found_tables)])
                for name, found_tables in tables.items()}
     rules_found += [
         ner.Suggestion(party.name, party.category, 1, {party.source})
-        for party in transactions.harvest_documents(columns, tables, frozenset(known))
+        for party in transactions.harvest_documents(columns, tables, frozenset(known),
+                                                    feeds=texts)
     ]
 
     if not settings.use_ner:
@@ -380,7 +403,7 @@ def register_table_context(files: Sequence[Path], store: MappingStore,
 
 # The last line of a mailing address: a state and a ZIP, and nothing after.
 _CITY_LINE = re.compile(r"\b[A-Z]{2}\.?[^\S\n]+\d{5}(?:-\d{4})?[^\S\n]*$", re.IGNORECASE)
-_MONEY = re.compile(r"\d[\d,]*\.\d{2}")
+_MONEY = re.compile(r"\d[\d,]*\.\d{2}|\$\s?\d")      # cents, or a $ on whole dollars
 # the same lockbox and institution tests the PDF path's geometric cover uses
 _LOCKBOX = pdf_processor._LOCKBOX
 _INSTITUTION = pdf_processor._INSTITUTION_LINE
@@ -684,9 +707,10 @@ def gather(paths: Sequence[Path]) -> Gathered:
     """Every PDF and Word file under ``paths``, with where each sat.
 
     A folder's own name is the first part of each relative path, so the tree
-    comes back out under the same top folder. Anything that is not a PDF or a
-    .docx is left out and listed, never delivered: a JPG of a cheque or a CSV
-    export would otherwise ship with its contents intact. Links are not
+    comes back out under the same top folder. A photo or screenshot is
+    gathered like a document, to be made into a PDF. Anything else is left out
+    and listed, never delivered: a CSV export or an old .doc would otherwise
+    ship with its contents intact. Links are not
     followed - a link inside a case folder can point anywhere on the disk.
     """
     out = Gathered()
@@ -775,6 +799,16 @@ def run_job(
                             original=original)
             )
             continue
+        if kind == "image":
+            # the front ends convert a photo when it is added; this is for a
+            # caller that hands one straight to the run
+            try:
+                path, kind = as_document(path, work_dir / "_photos"), "pdf"
+            except Exception as exc:
+                result.outcomes.append(FileOutcome(
+                    path, "image", "error", error=f"could not read the image: {exc}",
+                    original=original))
+                continue
 
         place = folders(tuple(PurePosixPath(original).parts[:-1]))
         delivered = "/".join(place + (_unique(
@@ -876,7 +910,7 @@ def write_report(result: RunResult, store: MappingStore, settings: Settings,
     add("")
 
     if result.skipped:
-        add("LEFT OUT - NOT PDF OR WORD, NOTHING FROM THESE WAS DELIVERED")
+        add("LEFT OUT - NOT A DOCUMENT OR PHOTO, NOTHING FROM THESE WAS DELIVERED")
         add("-" * 62)
         for name in result.skipped:
             add(f"  {name}")

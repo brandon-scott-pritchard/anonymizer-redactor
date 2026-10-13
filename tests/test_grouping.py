@@ -306,3 +306,102 @@ def test_a_street_mid_line_does_not_take_the_next_lines_town():
     block = "JONATHAN WHITFIELD\n2750 Aspen Springs Dr\nPark City, UT 84060-8757"
     assert "2750 Aspen Springs Dr\nPark City, UT 84060-8757" in [
         m.text for m in patterns.scan(block, enabled=["street_address"])]
+
+
+# ---------------------------------------------------------------------------
+# from the review of the grouping
+# ---------------------------------------------------------------------------
+
+
+def test_a_son_named_after_his_father_is_never_folded_into_him():
+    """Registered apart on purpose - a child roster - and then re-merged by
+    the grouping, father and son shared one pseudonym."""
+    store, _ = review.build_store([("Daniel R Holbrook", "person"), ("Daniel Holbrook", "person")],
+                                  roles={"daniel holbrook": "child"})
+    grouping.group(store)
+    son, father = _row(store, "Daniel Holbrook"), _row(store, "Daniel R Holbrook")
+    assert son.parent is None and son.replacement != father.replacement
+
+
+def _scanned(extra=()):
+    store, _ = review.build_store([])
+    for text, count in [("123 N Main St", 3), ("123 North Main Street", 1), *extra]:
+        store.add_value("street_address", text).occurrences = count
+    grouping.group(store)
+    store.grouped = True
+    return store
+
+
+def test_a_split_row_never_shares_its_old_heads_placeholder_after_a_rescan():
+    store = _scanned()
+    grouping.split(store, _row(store, "123 North Main Street"))
+    decided = review.snapshot_decisions(store)
+    fresh = _scanned(extra=[("9 Elm St", 1)])          # numbering shifts by one
+    review.carry_decisions(fresh, decided)
+    split, head = _row(fresh, "123 North Main Street"), _row(fresh, "123 N Main St")
+    assert split.parent is None and split.replacement != head.replacement
+
+
+def test_no_two_rows_ever_share_a_replacement():
+    store = _scanned(extra=[("9 Elm St", 1), ("77 Oak Ave", 2)])
+    heads = [e.replacement for e in store.entities.values() if e.parent is None]
+    assert len(heads) == len(set(heads))
+
+
+def test_east_and_west_on_a_grid_are_two_addresses():
+    """A form that dropped its direction chained "620 E 1200 S" to
+    "620 W 1200 S" - two houses, one placeholder."""
+    store = _store(values=[("street_address", "620 E 1200 S", 5),
+                           ("street_address", "620 W 1200 S", 4),
+                           ("street_address", "620 1200 S", 1)])
+    east, west, loose = (_row(store, t) for t in ("620 E 1200 S", "620 W 1200 S", "620 1200 S"))
+    assert east.replacement != west.replacement
+    assert loose.parent is None and len(loose.candidates) == 2
+    store = _store(values=[("street_address", "620 E 1200 S", 5),
+                           ("street_address", "620 1200 S", 1)])
+    assert _head(store, "620 1200 S") == "620 E 1200 S"
+
+
+def test_a_town_with_no_zip_is_the_same_town():
+    store = _store(values=[("street_address", "123 N Main St, Salt Lake City, UT 84105", 3),
+                           ("street_address", "123 N Main St, Salt Lake City, UT")])
+    assert _head(store, "123 N Main St, Salt Lake City, UT") == "123 N Main St, Salt Lake City, UT 84105"
+
+
+def test_a_five_digit_po_box_is_a_box_not_a_zip():
+    assert grouping.parse_address("PO Box 12345").box == "12345"
+
+
+def test_one_word_companies_a_letter_apart_are_two_companies():
+    store = _store(values=[("organization", "Vans", 2), ("organization", "Vons", 1)])
+    assert _row(store, "Vons").parent is None
+
+
+def test_retyping_a_head_onto_its_twin_keeps_its_forms_listed():
+    store = _store(values=[("organization", "Silicon Slopes Analytics, Inc.", 3),
+                           ("organization", "SILICON SLOPES ANALYTICS INC", 1),
+                           ("employer", "Silicon Slopes Analytics, Inc.", 1)])
+    store.grouped = True
+    head = next(e for e in store.entities.values()
+                if e.category == "organization" and e.canonical == "Silicon Slopes Analytics, Inc.")
+    review.retype_entity(store, head, "employer")
+    assert all(e.parent is None or e.parent in store.entities for e in store.entities.values())
+    assert _row(store, "SILICON SLOPES ANALYTICS INC").parent in store.entities
+
+
+def test_an_edited_replacement_follows_its_group_when_the_head_changes():
+    store = _scanned()
+    review.set_replacement(_row(store, "123 N Main St"), "[HOME]", store)
+    decided = review.snapshot_decisions(store)
+    fresh = _scanned(extra=[("123 North Main Street", 9)])   # the other form now leads
+    fresh.entities["street_address:123 north main street"].occurrences = 9
+    grouping.group(fresh)
+    review.carry_decisions(fresh, decided)
+    assert {e.replacement for e in fresh.entities.values() if "123" in e.canonical} == {"[HOME]"}
+
+
+def test_a_form_met_mid_run_stays_ticked_under_an_unticked_group():
+    store = _scanned()
+    grouping.set_enabled(store, _row(store, "123 N Main St"), False)
+    late = store.add_value("street_address", "123 N. Main Street")
+    assert late.parent and late.enabled

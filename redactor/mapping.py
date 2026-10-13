@@ -49,6 +49,9 @@ class Entity:
     # A form that fits more than one head is left on its own and names them.
     candidates: tuple[str, ...] = ()
     group_note: str = ""
+    # registered apart on purpose - a child named after a parent - and never
+    # folded into another person's group, however alike the names look
+    distinct: bool = False
 
     @property
     def is_person(self) -> bool:
@@ -139,6 +142,7 @@ class MappingStore:
             person=parsed,
             surrogate=surrogate,
             variants=_names.variants(parsed, include_single_tokens=include_single_tokens),
+            distinct=distinct,
         )
         self.entities[key] = entity
         self._used_replacements.add(surrogate.canonical.casefold())

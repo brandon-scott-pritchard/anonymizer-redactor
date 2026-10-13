@@ -454,10 +454,10 @@ def test_a_folder_is_added_with_its_layout_and_its_left_out_files(app, tmp_path)
     document = docx.Document()
     document.add_paragraph("x")
     document.save(root / "2024" / "a.docx")
-    (root / "2024" / "photo.jpg").write_bytes(b"\xff\xd8")
+    (root / "2024" / "ledger.xlsx").write_bytes(b"PK")
     app.add_folder(str(root))
     assert app.relative[app.files[0]] == "Case/2024/a.docx"
-    assert app.skipped == ["Case/2024/photo.jpg"]
+    assert app.skipped == ["Case/2024/ledger.xlsx"]
     assert app.file_list.get(0).startswith("Case/2024/a.docx")
     app.clear_files()
     assert not app.files and not app.relative and not app.skipped

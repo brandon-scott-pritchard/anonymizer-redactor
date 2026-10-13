@@ -292,11 +292,40 @@ def test_the_app_windows_folder_button_reads_the_folder_from_disk(client, tmp_pa
     root = tmp_path / "Case"
     (root / "2024").mkdir(parents=True)
     (root / "2024" / "a.docx").write_bytes(_docx_bytes("x"))
-    (root / "2024" / "photo.jpg").write_bytes(b"\xff\xd8")
+    (root / "2024" / "ledger.xlsx").write_bytes(b"PK")
     added = webapp.add_paths([root])
     assert added["added"] == 1
     assert [f["name"] for f in added["files"]] == ["Case/2024/a.docx"]
-    assert added["skipped"] == ["Case/2024/photo.jpg"]
+    assert added["skipped"] == ["Case/2024/ledger.xlsx"]
     # copied in: the original stays where it was, untouched
     assert (root / "2024" / "a.docx").exists()
     assert webapp.SESSION.uploads in webapp.SESSION.files[0].parents
+
+
+def test_a_photo_in_a_folder_comes_back_as_a_pdf_in_the_same_place(client):
+    import io
+    import zipfile
+    from PIL import Image
+    pymupdf = pytest.importorskip("pymupdf")
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((60, 90), "Receipt for Kyle D Harrington", fontsize=14)
+    pix = page.get_pixmap(dpi=120)
+    buffer = io.BytesIO()
+    Image.frombytes("RGB", (pix.width, pix.height), pix.samples).save(buffer, format="JPEG")
+    sent = client.post("/api/files", files=[
+        ("files", ("receipt.jpg", buffer.getvalue(), "image/jpeg")),
+        ("files", ("broken.png", b"not an image", "image/png"))],
+        data={"paths": ["Case/2024/receipt.jpg", "Case/broken.png"]}).json()
+    assert sent["added"] == 1
+    assert sent["files"] == [{"name": "Case/2024/receipt.jpg", "kind": "photo"}]
+    assert sent["skipped"] == ["Case/broken.png (could not be read as an image)"]
+    options = {"docx_mode": "anonymize", "pdf_mode": "anonymize", "ner": False, "ocr": True}
+    names = [{"name": "Kyle D Harrington", "category": "person"}]
+    wait_for(client, client.post("/api/review", json={"options": options, "names": names}).json()["job"])
+    result = wait_for(client, client.post("/api/run", json={"options": options, "password": "pw-123456"}).json()["job"])
+    assert result["failed"] == 0
+    with zipfile.ZipFile(io.BytesIO(client.get("/api/download/archive").content)) as archive:
+        assert archive.namelist() == ["Case/2024/receipt.pdf"]
+        delivered = pymupdf.open(stream=archive.read("Case/2024/receipt.pdf"))
+    assert "harrington" not in delivered[0].get_text().casefold()

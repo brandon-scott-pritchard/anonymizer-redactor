@@ -29,7 +29,7 @@ def case(tmp_path):
     _word(root / "Pleadings" / "Petition.docx", "Petitioner Kyle D Harrington")
     _word(root / "Pleadings" / "Harrington" / "Exhibit.docx", "Exhibit for Kyle D Harrington")
     _word(root / "Pleadings" / "Kyle Harrington" / "Exhibit.docx", "Second exhibit")
-    (root / "2024 Bank Statements" / "check_scan.jpg").write_bytes(b"\xff\xd8\xff")
+    (root / "2024 Bank Statements" / "ledger.xlsx").write_bytes(b"PK\x03\x04")
     (root / "Pleadings" / "notes.txt").write_text("Kyle Harrington called")
     (root / ".DS_Store").write_bytes(b"\0")
     (root / "Pleadings" / "~$tition.docx").write_bytes(b"lock")
@@ -60,7 +60,7 @@ def test_a_folder_is_gathered_with_its_own_name_at_the_top(case):
         "Harrington Divorce/Pleadings/Petition.docx",
     ]
     # other files are listed, never delivered; housekeeping is not even listed
-    assert sorted(gathered.skipped) == ["Harrington Divorce/2024 Bank Statements/check_scan.jpg",
+    assert sorted(gathered.skipped) == ["Harrington Divorce/2024 Bank Statements/ledger.xlsx",
                                         "Harrington Divorce/Pleadings/notes.txt"]
 
 
@@ -86,10 +86,10 @@ def test_two_folders_that_scrub_alike_are_not_merged(case, tmp_path):
 
 def test_what_was_left_out_is_in_the_report_and_not_the_archive(case, tmp_path):
     _gathered, result, names = _run([case], tmp_path)
-    assert not any(n.endswith((".jpg", ".txt")) for n in names)
+    assert not any(n.endswith((".xlsx", ".txt")) for n in names)
     report = result.report_path.read_text()
     assert "LEFT OUT" in report
-    assert "Harrington Divorce/2024 Bank Statements/check_scan.jpg" in report
+    assert "Harrington Divorce/2024 Bank Statements/ledger.xlsx" in report
 
 
 def test_loose_files_and_folders_can_be_dropped_together(case, tmp_path):

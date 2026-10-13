@@ -99,7 +99,7 @@ Windows machine with Tesseract installed. Skip it and RapidOCR covers you.
 
 ### 1. Documents & options
 
-Add DOCX and PDF files, or whole folders: drop a folder on the window, or use
+Add DOCX and PDF files, photos of documents, or whole folders: drop a folder on the window, or use
 **Choose folder…** (**Add folder…** in the Tk version). Every PDF and Word file
 inside it, at any depth, is processed as one batch, and the results come back
 in the same tree:
@@ -114,9 +114,23 @@ Harrington Divorce/                     Baird_Divorce/
 Folder names are scrubbed exactly like filenames (and left alone when that
 option is off); a name with nothing identifying in it comes back exactly as it
 was. Two folders that scrub to the same name stay separate. Anything in the
-folder that is not a PDF or Word file—a photo of a cheque, a spreadsheet, an
-old `.doc`—is left out, never delivered, and listed by its path in the run
-report. Hidden files and Word's `~$` lock files are ignored, and links are not
+folder that is not a document or a photo—a spreadsheet, an old `.doc`, a CSV
+export—is left out, never delivered, and listed by its path in the run
+report.
+
+**Photos and screenshots of documents** are taken too: JPEG, PNG, HEIC/HEIF
+(the iPhone's own format), AVIF, TIFF (every page of a multi-page fax or
+scan), WEBP, GIF, BMP and JPEG 2000. Each comes back as a PDF in the same
+place (`receipt.jpg` → `receipt.pdf`) and goes through the same OCR path as a
+scanned PDF, in either mode. On the way in the photo is turned upright by the
+orientation the camera recorded, cropped to the page and squared up when the
+page stands out from what it lies on (the desk, a hand or the next sheet never
+reaches the output), evenly lit so a shadow is not taken for handwriting, and
+a dark-mode screenshot is turned light. The PDF is rebuilt from the pixels
+alone, so the photo's EXIF block—GPS position, the phone's make and serial,
+when it was taken—is left behind. On a payment app's activity screen, the
+people paid and paid by are proposed from the layout itself: a name over a
+payment type or a note, beside a signed amount. Hidden files and Word's `~$` lock files are ignored, and links are not
 followed. In the app window the folder is read straight from disk; the
 originals are never changed.
 
@@ -129,7 +143,9 @@ Choose what happens to each kind - DOCX defaults to anonymize, PDF to redact:
 
 Either way, a PDF's original glyphs are physically deleted from the content
 stream with PyMuPDF redaction annotations. Copy, paste and text extraction find
-nothing of them.
+nothing of them. Text printed past the edge of the page—where no reader shows
+it, but a parser that ignores the page edge still finds it—is removed too, with
+a warning, and sideways text is boxed along its own direction.
 
 Anonymizing a PDF then writes the replacement where the original was. The
 invented names are kept short - three to five letters a part - because a PDF
@@ -623,7 +639,7 @@ the language model, and copy the result back into `dist/`.
 ~/.venvs/anonymizer-redactor/bin/python -m pytest tests/ -q
 ```
 
-690 tests covering detector accuracy, allowlist protection, judicial-officer
+901 tests covering detector accuracy, allowlist protection, judicial-officer
 harvesting in every layout a court prints, child rosters and custody clauses,
 name-variant expansion and merging, overlapping-name folding, typo matching,
 Word's own run and tab structure, surrogate determinism, image redaction,
@@ -656,6 +672,7 @@ redactor/
   ner.py              optional spaCy suggestions (proposals only)
   engine.py           scan, resolve overlaps, apply; typo matching
   review.py           name-list and review decisions, shared by both UIs
+  photo.py            photos and screenshots of documents, made into clean PDFs
   grouping.py         one review row per person, address or number, however written
   feedback.py         classification error reports and the mailto draft
   docx_processor.py   OOXML-level DOCX reading and rewriting

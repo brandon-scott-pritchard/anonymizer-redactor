@@ -35,6 +35,7 @@ def summarise(records: list[dict]) -> dict:
     status: Counter = Counter()
     money = 0
     money_files = 0
+    scan_money = scan_money_files = 0
     merchants: Counter = Counter()
     errors = [r["batch"] + ": " + r["error"].splitlines()[0] for r in records if r["error"]]
     for f in files:
@@ -52,6 +53,9 @@ def summarise(records: list[dict]) -> dict:
         lost = sum(f["destroyed_money"].values())
         money += lost
         money_files += bool(lost)
+        ocr_lost = sum(f.get("destroyed_money_ocr", {}).values())
+        scan_money += ocr_lost
+        scan_money_files += bool(ocr_lost)
         merchants.update(f["lost_merchants"])
     fallbacks = sum(1 for f in files for w in f.get("warnings", [])
                     if "added on top of the page" in w)
@@ -61,6 +65,8 @@ def summarise(records: list[dict]) -> dict:
             "by_cat": by_cat, "files_by_cat": files_by_cat, "values_by_cat": values_by_cat,
             "examples": examples, "by_type": by_type, "type_files": type_files,
             "money": money, "money_files": money_files, "merchants": merchants,
+            "scan_money": scan_money, "scan_money_files": scan_money_files,
+            "scan_money_measured": sum("destroyed_money_ocr" in f for f in files),
             "errors": errors, "fallbacks": fallbacks}
 
 
@@ -85,6 +91,9 @@ def main(argv=None) -> int:
           + delta(0, base and f"{base['hard']} in {base['leaky_files']}"))
     print(f"destroyed dollar figures {s['money']} in {s['money_files']} files"
           + delta(0, base and f"{base['money']} in {base['money_files']}"))
+    if s["scan_money_measured"]:
+        print(f"figures lost on scans/photos (OCR before vs after, noisy) {s['scan_money']} "
+              f"in {s['scan_money_files']} of {s['scan_money_measured']} files")
     if s["fallbacks"]:
         print(f"anonymized pages that fell back to appended text: {s['fallbacks']}")
     print(f"merchant names lost {sum(s['merchants'].values())} ({len(s['merchants'])} distinct)"

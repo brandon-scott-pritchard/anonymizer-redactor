@@ -31,6 +31,9 @@ def selftest() -> int:
     model_ok, model_note = ner.available()
     lines.append(f"language model:       {'OK  ' if model_ok else 'NONE'} {model_note}")
 
+    photos_ok, photos_note = _photo_formats()
+    lines.append(f"photo formats:        {'OK  ' if photos_ok else 'FAIL'} {photos_note}")
+
     report = "\n".join(lines)
     print(report)
     # the Windows build is windowed (console=False), so stdout goes nowhere;
@@ -44,7 +47,36 @@ def selftest() -> int:
         print(f"written to {target}")
         break
 
-    return 0 if ok and model_ok else 1
+    return 0 if ok and model_ok and photos_ok else 1
+
+
+def _photo_formats() -> tuple[bool, str]:
+    """Write and read back each format a phone or a scanner hands over.
+
+    The codecs are native libraries packaging can quietly swap or drop; a
+    round trip through each, in the bundle as built, is the only proof.
+    """
+    import io
+
+    from PIL import Image
+
+    from redactor import photo
+
+    photo._register_heif()
+    worked, failed = [], []
+    for fmt in ("JPEG", "PNG", "TIFF", "WEBP", "AVIF", "HEIF"):
+        try:
+            buffer = io.BytesIO()
+            Image.new("RGB", (64, 32), (200, 30, 30)).save(buffer, format=fmt)
+            buffer.seek(0)
+            with Image.open(buffer) as back:
+                back.load()
+                assert back.size == (64, 32)
+            worked.append(fmt)
+        except Exception as exc:
+            failed.append(f"{fmt} ({type(exc).__name__})")
+    note = ", ".join(worked) + (f"; FAILED: {', '.join(failed)}" if failed else "")
+    return not failed, note
 
 
 def _selftest_targets():

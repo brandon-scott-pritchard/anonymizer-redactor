@@ -64,6 +64,7 @@ def group(store: MappingStore) -> None:
     _group_values(store, EMAILS, _same_key_groups(_email_key))
     _address_notes(store)
     sync(store)
+    _one_replacement_per_head(store)
 
 
 def sync(store: MappingStore) -> None:
@@ -80,6 +81,30 @@ def sync(store: MappingStore) -> None:
                 entity.replacement = entity.surrogate.canonical
                 continue
         entity.replacement = head.replacement
+
+
+def _one_replacement_per_head(store: MappingStore) -> None:
+    """No two rows may share a replacement.
+
+    A row split out of its group kept, after a rescan, whatever placeholder
+    regrouping had synced onto it - its old head's - whenever the rescan
+    numbered one more value and the operator's own was no longer free. Two
+    things the operator called different then read as one.
+    """
+    seen: set[str] = set()
+    changed = False
+    for entity in sorted((e for e in store.entities.values() if e.parent is None),
+                         key=lambda e: (e.key in store.split_out, e.key)):
+        if entity.replacement and entity.replacement in seen:
+            if entity.is_person and entity.person is not None:
+                entity.surrogate = store._unique_person_surrogate(entity.person)
+                entity.replacement = entity.surrogate.canonical
+            else:
+                entity.replacement = store.fresh_placeholder(entity.category)
+            changed = True
+        seen.add(entity.replacement)
+    if changed:
+        sync(store)
 
 
 def attach(store: MappingStore, entity: Entity) -> None:
@@ -99,15 +124,37 @@ def attach(store: MappingStore, entity: Entity) -> None:
         if entity.category not in family:
             continue
         heads = [e for e in store.entities.values()
-                 if e.category in family and e.parent is None and e is not entity]
+                 if e.category in family and e.parent is None and e is not entity
+                 and _could_join(family, entity, e)]
         for members in finder(heads + [entity]):
             if entity in members and len(members) > 1:
                 head = next(e for e in members if e is not entity and e.parent is None)
+                # left ticked even under an unticked head: a form nobody has
+                # reviewed is redacted rather than shipped
                 entity.parent = head.key
-                entity.enabled = head.enabled
                 entity.replacement = head.replacement
                 return
         return
+
+
+def _could_join(family: set[str], entity: Entity, head: Entity) -> bool:
+    """A cheap first cut before the real comparison, for a value met mid-run.
+
+    Re-reading every row for each new value cost a second apiece at a few
+    thousand rows. Only the rows it could possibly join are compared: the same
+    house number, the same company-name bucket, the same last four digits.
+    """
+    if family is ADDRESSES:
+        mine = re.match(r"\s*(\d+)", entity.canonical)
+        theirs = re.match(r"\s*(\d+)", head.canonical)
+        return not mine or (theirs is not None and theirs.group(1) == mine.group(1))
+    if family is ORGS:
+        a, b = _org_key(entity.canonical), _org_key(head.canonical)
+        return bool(a and b) and len(a) == len(b) and a[0][:1] == b[0][:1]
+    digits = re.sub(r"\D", "", entity.canonical)[-4:]
+    if family is ACCOUNTS or family is PHONES:
+        return bool(digits) and re.sub(r"\D", "", head.canonical).endswith(digits)
+    return True
 
 
 def head_of(store: MappingStore, entity: Entity) -> Entity:
@@ -248,7 +295,7 @@ def _group_people(store: MappingStore) -> None:
     people.sort(key=lambda e: (-len(e.person.ordered), -len(e.canonical)))
     heads: list[Entity] = []
     for entity in people:
-        if entity.key in store.split_out:
+        if entity.key in store.split_out or entity.distinct:
             heads.append(entity)
             continue
         candidates = [h for h in heads
@@ -332,7 +379,16 @@ def _same_key_groups(key_of: Callable[[str], object], typo: bool = False):
         keyed = [(key_of(e.canonical), e) for e in pool]
         keyed = [(k, e) for k, e in keyed if k]
         if typo:
-            found = _clusters(keyed, lambda x, y: _words_alike(x[0], y[0]))
+            # a slipped letter only in a name of two words or more: "Vans"
+            # and "Vons" are two companies. Compared within buckets of one
+            # length and first letter, not every name against every other.
+            buckets: dict = defaultdict(list)
+            for k, e in keyed:
+                buckets[(len(k), k[0][:1])].append((k, e))
+            found = []
+            for bucket in buckets.values():
+                found.extend(_clusters(bucket, lambda x, y: x[0] == y[0] or (
+                    len(x[0]) >= 2 and _words_alike(x[0], y[0]))))
         else:
             by: dict = defaultdict(list)
             for k, e in keyed:
@@ -446,11 +502,15 @@ def parse_address(text: str) -> _Address | None:
     if not words:
         return None
     out = _Address(None)
-    # the ZIP and state at the end
-    if re.fullmatch(r"\d{5}(?:-\d{4})?", words[-1]):
+    # the ZIP and state at the end - but "PO Box 12345" is a box number
+    box_only = words[:2] in (["po", "box"], ["p", "o"]) and len(words) <= 4
+    if re.fullmatch(r"\d{5}(?:-\d{4})?", words[-1]) and not box_only:
         out.zip5 = words.pop()[:5]
         if words and words[-1] in _STATES:
             words.pop()
+    elif (len(words) > 2 and len(words[-1]) == 2 and words[-1] in _STATES
+          and words[-2] not in _SUFFIXES and not words[-2].isdigit()):
+        words.pop()                 # "Salt Lake City, UT" with no ZIP
     if words[:2] in (["po", "box"], ["p", "o"]):
         number = next((w for w in words[2:4] if w.isdigit()), "")
         out.box = number
@@ -508,6 +568,10 @@ def _same_street(a: _Address, b: _Address) -> bool:
     return _words_alike(x, y)
 
 
+def _has_direction(a: _Address) -> bool:
+    return bool(a.street) and a.street[0] in _DIRECTIONS.values()
+
+
 def _same_place(a: _Address, b: _Address) -> bool:
     """Not contradicted by the ZIP or the city, when both carry them."""
     if a.zip5 and b.zip5 and a.zip5 != b.zip5:
@@ -547,8 +611,27 @@ def _address_groups(pool: list[Entity]) -> list[list[Entity]]:
     # streets: same number, same street (letters may slip), same unit - then
     # split by place, so a form with no city cannot chain "2750 Aspen Springs
     # Dr, Park City" to "2750 Aspen Springs Dr, Twin Falls"
-    for cluster in _clusters(streets, lambda a, b: _same_street(a, b) and a.unit == b.unit):
-        groups.extend(_by_place(cluster))
+    by_number: dict[str, list[_Address]] = defaultdict(list)
+    for a in streets:
+        by_number[a.number].append(a)
+    for bucket in by_number.values():
+        for cluster in _clusters(bucket, lambda a, b: _words_alike(a.street, b.street)
+                                 and a.unit == b.unit):
+            groups.extend(_by_place(cluster))
+    # A form that dropped its direction joins the one direction it could be.
+    # Matched loosely before, "620 1200 S" chained "620 E 1200 S" to
+    # "620 W 1200 S" - two houses on a Utah grid, one placeholder.
+    for loose in [g for g in groups if all(not _has_direction(a) for a in g)]:
+        homes = [g for g in groups if g is not loose and any(_has_direction(a) for a in g)
+                 and any(_same_street(a, b) and _same_place(a, b) and a.unit == b.unit
+                         for a in g for b in loose)]
+        if len(homes) == 1:
+            homes[0].extend(loose)
+            loose.clear()
+        elif len(homes) > 1:
+            for a in loose:
+                a.entity.candidates = tuple(g[0].entity.canonical for g in homes)
+    groups = [g for g in groups if g]
     # a form with no unit joins the one unit it could be, never one of two
     for loose in [g for g in groups if all(not a.unit for a in g)]:
         homes = [g for g in groups if g is not loose and any(a.unit for a in g)

@@ -956,3 +956,110 @@ def test_a_bare_first_name_beside_the_full_name_is_not_proposed_again():
     assert [(s.text, s.category) for s in found] == [
         ("DAVID PRATT", "person"), ("Natalie", "person"),
         ("Natalie Rasmussen", "person"), ("Pratt", "organization")]
+
+
+# ---------------------------------------------------------------------------
+# a payment app's activity screen, photographed or screenshotted
+# ---------------------------------------------------------------------------
+
+
+ORCHARD = """Orchard Cash
+Balance
+$136.40
+Activity
+Malia Fonoti
+Sent
+-$33.80
+Added from Debit Card ••44
+Add Money
++$74.91
+Target.com *
+Purchase
+-$11.64
+Daily Cash
+Daily Cash
++$41.69
+Uber Eats
+Purchase
+-$9.10
+Leilani Fonoti
+Received
++$16.39"""
+
+PINGO_ROWS = """Pingo
+Balance
+$22.91
+Leilani Fonoti            +$129.14
+coffee
+Tanner Jensen            -$92.76
+fantasy league
+Dallin Cox            -$19.00
+pizza"""
+
+
+WALLET = """FUNDING SOURCE ***5930       +$147.57
+Bank Deposit to PP Account
+Ashley Hansen            -$147.57
+Mobile Payment
+Uber Technologies
+-$147.34
+PreApproved Payment Bill   User
+Etsy, Inc.            -$171.22
+Mobile Payment
+DoorDash Inc            -$87.88
+Mobile Payment
+McKenzie Pratt            -$159.47
+General Payment"""
+
+
+@pytest.mark.parametrize("screen, people", [
+    (ORCHARD, {"Malia Fonoti", "Leilani Fonoti"}),
+    (PINGO_ROWS, {"Leilani Fonoti", "Tanner Jensen", "Dallin Cox"}),
+    (WALLET, {"Ashley Hansen", "McKenzie Pratt"}),
+])
+def test_the_people_on_an_activity_screen_are_proposed(screen, people):
+    """The screenshot names everyone the client paid, with no table and no
+    labels; a merchant row says Purchase and the app's own rows repeat their
+    own name, so neither is taken for a person."""
+    assert {p.name for p in transactions.activity_feed(screen)} == people
+
+
+def test_a_statement_without_signed_amounts_is_not_a_feed():
+    text = "Malia Fonoti\nsent you a note\nBalance $136.40"
+    assert transactions.activity_feed(text) == []
+
+
+def test_a_name_inside_a_glued_ocr_word_is_covered_at_its_boundary():
+    """A photographed ACH line came back from OCR as one word, the household
+    surname in the middle, after the company ID's digits."""
+    store, _ = review.build_store([("Nathan C Blackburn", "person")])
+    settings = Settings(use_ner=False)
+    word = (10.0, 20.0, 410.0, 32.0,
+            "RockyMountainPowerUtility2404039000000000BLACKBURNLAW.PLLC", 1, 1, 1, 90.0)
+    found = pdf_processor._glued_names([word], store, settings)
+    assert len(found) == 1
+    hit, rect = found[0]
+    assert hit.text == "BLACKBURN"
+    # only the name's share of the word: the merchant at the front stays
+    assert rect.x0 > 10.0 + 400.0 * 0.5
+    # never inside an unrelated longer word
+    word = (10.0, 20.0, 110.0, 32.0, "Blackburnian", 1, 1, 1, 90.0)
+    assert pdf_processor._name_inside(*word[:5], pdf_processor._people_parts(store, settings)) == []
+
+
+def test_a_rewritten_ocr_word_keeps_no_glued_name():
+    store, _ = review.build_store([("Nathan C Blackburn", "person")])
+    settings = Settings(use_ner=False, pdf_mode="anonymize")
+    stand_in = store.get("person", "Nathan C Blackburn").surrogate.last
+    said = pdf_processor._no_glued_names("Clover/Settlement[CARD-1]BLACKBURNLAW.PLLC", store, settings)
+    assert "BLACKBURN" not in said and stand_in.upper() in said
+
+
+def test_a_whole_dollar_figure_above_a_city_line_is_not_address(tmp_path):
+    """An appraisal prints "Tax year / R.E. taxes  2024 / $3,146" just above
+    "Heber City UT 84032"; the block cover walked up into the taxes."""
+    path = _placed(tmp_path, "appraisal.pdf", [
+        (420, 100, "Tax year / R.E. taxes"), (420, 112, "2024 / $3,146"),
+        (420, 124, "Heber City UT 84032")], width=612, height=792)
+    after, _store = _run_pdf(path, tmp_path)
+    assert "$3,146" in after

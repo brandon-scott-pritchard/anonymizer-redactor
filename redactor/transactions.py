@@ -53,8 +53,15 @@ _NAME = rf"{_TOKEN}(?:{_SP}(?:{_TOKEN}|{_INITIAL})){{0,3}}"
 # "ZELLE TO SHAWNA KIRKENDALL", "CHECK 1042 TO D. TORVIK", "PMT FROM P. TORVIK".
 # The cue is case-insensitive; the name after it is not, or the capitalised
 # token requirement stops meaning anything and the match runs into the sentence.
+#
+# A bank that prints only the first initial - "ZELLE TO J SMITH" - left no
+# token for the name to start on, and the payee shipped. Only after "to" or
+# "from", and never A or I, which open "Payment To A Vendor" as an article.
+# The payee follows "to" on its own line. A wallet's column reading ends a
+# cell "Bank Deposit to" and starts the next with "FUNDING SOURCE ***9268",
+# and reaching across the break proposed that label - and "Etsy" - as people.
 TO_FROM = re.compile(
-    rf"(?i:\b{_LEAD}\b)[^\n]{{0,20}}?(?i:\b(?:to|from|payee)\s+)({_NAME})"
+    rf"(?i:\b{_LEAD}\b)[^\n]{{0,20}}?(?i:\b(?:to|from|payee)[^\S\n]+)((?:[B-HJ-Z]{_SP})?{_NAME})"
 )
 
 # "PAYPAL *HOLLENBECK" - a person-to-person rail's prefix, a star, then who was
@@ -74,10 +81,14 @@ STAR = re.compile(
 #   ZELLE CREDIT JESSICA COOK        Zelle Debit Jennifer Lewis
 #   Venmo Credit Bryce Parker        ZELLE KENZIE LEWIS
 _RAIL = r"(?:zelle|venmo|pay\s?pal|cash\s?app|apple\s+cash|sqc|square\s+cash)"
-_RAIL_VERB = (r"(?:credit|debit|payment|pmt|instant|sent|received|p2p|transfer|xfer|"
-              r"cashout|cash\s?out|request|deposit|withdrawal|des|type|to|from|in|out)")
+_RAIL_VERB = (r"(?:credit|debit|payment|pmt|instant|inst|verifybank|sent|received|p2p|"
+              r"transfer|xfer|cashout|cash\s?out|request|deposit|withdrawal|des|type|to|"
+              r"from|in|out)")
+# PayPal's own descriptor runs two verbs and a YYMMDD date before the payee -
+# "PAYPAL INST XFER 240315 TANNER JENSEN WEB ID: PAYPALSI77" - and one verb
+# slot with no room for the date never reached the name.
 RAIL_NAME = re.compile(
-    rf"(?i:\b{_RAIL}\b)[^\S\n]+(?:(?i:{_RAIL_VERB})[^\S\n]+)?"
+    rf"(?i:\b{_RAIL}\b)[^\S\n]+(?:(?i:{_RAIL_VERB})[^\S\n]+){{0,2}}(?:\d{{6}}[^\S\n]+)?"
     rf"(?!(?i:{_RAIL_VERB})\b)({_NAME})")
 # "Deposit ACH VENMO TYPE: P2P CO: MADISON HARRIS" - the ACH record's
 # company-name field, which on a person-to-person transfer is the person.
@@ -138,6 +149,13 @@ _ACCOUNT_WORDS = frozenset({
     "autopay", "overdraft", "principal", "interest", "line", "loan", "mortgage",
     "card", "visa", "mastercard", "amex", "discover", "self", "myself",
 })
+# the parties to an account or a lease, named by their role rather than by name
+_ROLE_WORDS = frozenset({
+    "cardholder", "accountholder", "landlord", "tenant", "lessor", "lessee",
+    # "Deposits received from Other Financial Institutions"; "Zions
+    # Bancorporation" over its street - ner's marker is only "bancorp"
+    "financial", "institution", "institutions", "bancorporation",
+})
 
 
 # Where an employer is named outright. A column gap is a separator too - a
@@ -182,9 +200,15 @@ _EMP = rf"{_EMP_TOKEN}(?:[^\S\n]{_EMP_TOKEN}){{0,5}}"
 _PAY_CUE = r"(?:payroll|payrll|dir[^\S\n]+dep|direct[^\S\n]+dep(?:osit)?|salary|net[^\S\n]+pay)\b"
 _EMP_LEAD = (r"(?:(?:ach[^\S\n]+(?:deposit|credit|dep)|deposit[^\S\n]+ach|ach)"
              r"[^\S\n]+)?")
+# Where a cell starts: the line's start, a column gap, or a date's last digit.
+# Written as lookbehinds rather than consumed. "(?:^|[^\S\n]{2,})[^\S\n]*" can
+# split one run of spaces between its two quantifiers in every possible way, at
+# every starting offset, and a scanned page's 1,000-space blank row ("A", the
+# gap, "x") then took seconds per pattern - four patterns, every page.
+_COLUMN_START = r"(?:^[^\S\n]*|(?<=[^\S\n]{2})|(?<=\d[^\S\n]))"
 PAY_DEPOSIT_LINES = (
     # the employer immediately before the cue, the column start before it
-    re.compile(rf"(?i)(?:^|[^\S\n]{{2,}}|\d[^\S\n])[^\S\n]*{_EMP_LEAD}({_EMP})"
+    re.compile(rf"(?i){_COLUMN_START}{_EMP_LEAD}({_EMP})"
                rf"[^\S\n]+(?:des:[^\S\n]*|type:[^\S\n]*)?{_PAY_CUE}", re.MULTILINE),
     re.compile(rf"(?i)\bdirect[^\S\n]+deposit[^\S\n]*[-–:][^\S\n]*({_EMP})"),
     re.compile(rf"(?i)\btype:[^\S\n]*{_PAY_CUE}[^\n]*?\bco:[^\S\n]*({_EMP})"),
@@ -192,19 +216,23 @@ PAY_DEPOSIT_LINES = (
 PAY_DEPOSIT_LINES += (
     re.compile(rf"(?i)\bdirect[^\S\n]+deposit[^\S\n]+from[^\S\n]+({_EMP})"),
     # an HSA or a 401(k) statement: "PAYROLL CONTRIBUTION NU SKIN ENTERPRISE"
-    re.compile(rf"(?i)\b(?:payroll|employer)[^\S\n]+contribution[^\S\n]*[-–:]?[^\S\n]*({_EMP})"),
+    # - and the word whole: "Employer Contributions" over a figure proposed "s"
+    re.compile(rf"(?i)\b(?:payroll|employer)[^\S\n]+contributions?\b[^\S\n]*[-–:]?[^\S\n]*({_EMP})"),
 )
 # The plan is named for the employer that sponsors it:
 # "NORTHPOINT AEROSPACE SERVICES 401(K) SAVINGS PLAN".
 PLAN_SPONSOR = re.compile(
-    rf"(?im)(?:^|[^\S\n]{{2,}})[^\S\n]*({_EMP}(?:,[^\S\n](?:inc|llc|corp|co|ltd|llp|pllc|lp)\.?)?)[^\S\n]+"
+    rf"(?im)(?:^[^\S\n]*|(?<=[^\S\n]{{2}}))({_EMP}(?:,[^\S\n](?:inc|llc|corp|co|ltd|llp|pllc|lp)\.?)?)[^\S\n]+"
     r"(?:401[^\S\n]?\(?k\)?|403[^\S\n]?\(?b\)?|457[^\S\n]?\(?b\)?|profit[\s-]sharing|"
     r"retirement|pension|thrift|savings[^\S\n]+and[^\S\n]+investment)"
     r"(?:[^\S\n]+(?:savings|retirement|investment|incentive))?[^\S\n]+plan\b")
 
 # words a descriptor carries that are never part of the employer's name
 _EMP_NOISE = {"ach", "deposit", "credit", "debit", "dep", "direct", "dir", "type", "id",
-              "ppd", "ccd", "co", "des", "the", "from", "online", "mobile", "transfer"}
+              "ppd", "ccd", "co", "des", "the", "from", "online", "mobile", "transfer",
+              # a joiner at either end is the heading's, not a name's: Gusto's
+              # "Employer contributions & taxes"
+              "&"}
 # "For Direct Deposit use, give your employer..." is instructions, not a payer
 _EMP_NOT_A_NAME = {"for", "to", "your", "our", "use", "please", "by", "with", "via",
                    "and", "or", "set", "sign", "enroll", "enrol", "a", "an", "of",
@@ -218,6 +246,19 @@ _EMP_NOT_A_NAME = {"for", "to", "your", "our", "use", "please", "by", "with", "v
                    "void", "non-negotiable", "nonnegotiable", "sample", "copy",
                    # a stub's own column headings: "YTD NET PAY", "CURRENT NET PAY"
                    "ytd", "current", "total", "gross", "net", "amount", "this", "period"}
+# A pay stub's earnings rows and a form's empty answers, which have the same
+# shape as a bank's pay line: "Regular Salary  2,500.00" proposed "Regular" as
+# the employer, "Company Retirement Plan" proposed "Company", "Paid by  Check"
+# proposed "Check" and "Employer:" over "(none)" proposed "(none)". Rejected
+# only when the whole value is made of them, so "Check Into Cash" or "Base
+# Camp Outfitters" still reads as the employer it is.
+_EMP_GENERIC = {"regular", "base", "annual", "hourly", "rate", "salary", "salaried",
+                "wages", "wage", "pay", "earnings", "overtime", "bonus", "holiday",
+                "vacation", "sick", "pto", "commission", "retirement", "employee",
+                "employees", "employer", "company", "check", "cheque", "none", "n/a",
+                "na", "nil", "unemployed", "self-employed", "retired", "disabled",
+                "unknown", "not", "applicable", "student", "homemaker", "other", "taxes"}
+_DECIMAL = re.compile(r"\d\.\d")
 
 # The receiver's own name, which the ACH record carries in its individual-name
 # field: "INDN:TYSON J OKAFOR CO ID:..." and, printed plainly, after the trace
@@ -230,6 +271,10 @@ RECEIVER = (
     re.compile(rf"(?i:{_PAY_CUE})[^\S\n]+\d{{4,}}[^\S\n]+\d{{6,}}[^\S\n]+({_NAME})[^\S\n]*$",
                re.MULTILINE),
 )
+# Some banks fill the field surname first: "INDN:OKAFOR,TYSON CO ID:9876"
+RECEIVER_LAST_FIRST = re.compile(
+    r"\bINDN:[^\S\n]*([A-Z][A-Za-z'’\-]+),[^\S\n]?([A-Z][A-Za-z'’\-]+)(?:[^\S\n]([A-Z]))?"
+    r"(?=[^\S\n]+CO[^\S\n]+ID\b|[^\S\n]*$)", re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -259,6 +304,12 @@ def _acceptable(name: str) -> bool:
     bare = [t.strip(".,'’").casefold() for t in tokens]
     if any(t in ner._ORG_MARKERS or t in ner._NOT_A_NAME or t in _ACCOUNT_WORDS
            or t in _CORPORATE for t in bare):
+        return False
+    # a statement's or a form's role word in the slot a payee sits in: "Direct
+    # deposit from Employer", "Payment to Beneficiary", "Transfer to
+    # Cardholder", "Request to Change Address". The address-block and labelled
+    # paths already refuse these; every other path takes its answer from here.
+    if any(t in ner._NEVER_IN_A_NAME or t in _ROLE_WORDS for t in bare):
         return False
     # a lone short word is an abbreviation on a statement, not a surname
     if len(tokens) == 1 and len(tokens[0].strip(".")) < MIN_SOLO_LENGTH:
@@ -380,6 +431,8 @@ def harvest(text: str, source: str = "") -> list[Party]:
                            (P2P_COMPANY, 2), (PROCESSOR_PAYMENT, 2), (PAYMENT_WITH_ID, 2)):
         for match in pattern.finditer(text):
             tokens = " ".join(match.group(1).split()).strip(" ,.").split()
+            if len(tokens) == 1:
+                tokens += _surname_across_double_space(text, match.end(1), tokens[0])
             # cut at the first of the descriptor's own words, not just trailing
             # ones: "KENZIE LEWIS CHECKS PROCESSED"
             for at, token in enumerate(tokens):
@@ -399,11 +452,40 @@ def harvest(text: str, source: str = "") -> list[Party]:
     return list(found.values())
 
 
+# OCR doubles a space inside a name as often as it doubles one anywhere:
+# "ZELLE TO TANNER  JENSEN" proposed "TANNER" and left the surname. _NAME will
+# not cross two spaces - that is a column gap more often than not - so the
+# surname is taken here, and only when it ends its cell: the line ends, another
+# gap follows, or the descriptor's own words do ("JENSEN  CONF# 1234",
+# "JENSEN ON 10/03"). "Brynlee Nelson  Pay Friends" is a two-word capture and
+# never gets here.
+_DOUBLE_SPACED_TOKEN = re.compile(rf"[ \u00a0]{{2}}({_TOKEN})(?=[^\S\n]{{2,}}|[^\S\n]*$|[^\S\n]+(\S+))",
+                                  re.MULTILINE)
+
+
+def _surname_across_double_space(text: str, at: int, first: str) -> list[str]:
+    if first.strip(".:#").casefold() in _TRAILING:
+        return []
+    found = _DOUBLE_SPACED_TOKEN.match(text, at)
+    if not found or found.group(1).strip(".:#").casefold() in _TRAILING:
+        return []
+    after = found.group(2)
+    if after and after.strip(".:#").casefold() not in _TRAILING:
+        return []
+    # "TRANSFER TO KENZIE  SAVINGS" is the next column, and taking it would
+    # sink the name that was found
+    if not _acceptable(f"{first} {found.group(1)}"):
+        return []
+    return [found.group(1)]
+
+
 # The addressee block: a name on its own line with a street address under it.
 # This is how every statement, bill and remittance coupon prints the account
 # holder, and it is the only place a statement names them at all.
 _STREET_LINE = re.compile(r"^[^\S\n]*\d{1,6}[A-Za-z]?[^\S\n]+[A-Za-z0-9]")
 _TRAILING_ZIP = re.compile(r"\s*\b\d{5}(?:-\d{4})?\s*$")
+# a ZIP after a state is the address's own - "1234 MAPLE GROVE, LOGAN UT 84321"
+_STATE_ZIP = re.compile(r"\b[A-Z]{2}\.?,?[^\S\n]+\d{5}(?:-\d{4})?[^\S\n]*$")
 
 
 def _is_street(line: str) -> bool:
@@ -418,7 +500,9 @@ def _is_street(line: str) -> bool:
     # Ending in five digits does not make it one: "2 of: LEGO Classic Large
     # Creative Brick Box 10698" is an invoice's item and its set number, and
     # "Items Ordered" above it was proposed as the account holder.
-    if caption.is_address(_TRAILING_ZIP.sub("", line)):
+    # Unless a state comes before it: then the ZIP is the address's, and with
+    # it gone "1234 MAPLE GROVE, LOGAN UT" read as nothing at all.
+    if caption.is_address(line if _STATE_ZIP.search(line) else _TRAILING_ZIP.sub("", line)):
         return True
     return any(m.category == "street_address" and m.start <= len(line) - len(line.lstrip()) + 1
                for m in patterns.scan(line, enabled=["street_address"]))
@@ -439,7 +523,7 @@ FOR_ACCOUNT = re.compile(
 # business card every employee's card gets its own heading:
 # "New Charges  BRIAN ROBERTS Card Ending 2-3164".
 CARDHOLDER = re.compile(
-    rf"(?m)(?:^|[^\S\n]{{2,}})[^\S\n]*({_NAME})[^\S\n]+"
+    rf"(?m)(?:^[^\S\n]*|(?<=[^\S\n]{{2}}))({_NAME})[^\S\n]+"
     r"(?i:card|acct\.?|account)[^\S\n]+(?i:ending|no\.?|number|#)")
 
 # A PO box under a name is the payee's lockbox, not where anybody lives.
@@ -526,10 +610,35 @@ def employers(text: str, source: str = "") -> list[Party]:
                 continue
             if any(t.strip(".,").casefold() in _ACCOUNT_WORDS for t in name.split()):
                 continue
+            if pattern is PAY_DEPOSIT_LINES[0] and _earnings_row(text, match, name):
+                continue
             found.setdefault(name.casefold(), Party(name, source, "employer"))
     for name in pay_stub_employers(text):
         found.setdefault(name.casefold(), Party(name, source, "employer"))
     return [party for party in found.values() if not _paid_by_the_account(text, party.name)]
+
+
+# what marks a line as the bank's record of a deposit rather than a stub's row
+_BANK_LINE_HEAD = re.compile(r"(?i)\b(?:ach|deposit|dep|credit)\b|\d")
+
+
+def _earnings_row(text: str, match: re.Match, name: str) -> bool:
+    """A pay stub's "<kind> Salary" or "<kind> Net Pay" row, not a bank line.
+
+    A bank's descriptor carries the employer and the word salary too - but it
+    carries it after a posting date or an ACH lead, and an employer it names in
+    one word is rare. A stub's row is one word, the cue and the figure:
+    "Merit Salary  2,500.00", "Employee Net Pay  1,900.00". "Payroll" and
+    "Dir Dep" are never a stub's row heading, so only salary and net pay are
+    held to this.
+    """
+    cue = text[match.end(1):match.end()]
+    if not re.search(r"(?i)salary|net[^\S\n]+pay", cue):
+        return False
+    if len(name.split()) >= 2 or _is_org(name):
+        return False
+    head = text[text.rfind("\n", 0, match.start(1)) + 1:match.start(1)]
+    return not _BANK_LINE_HEAD.search(head)
 
 
 # a figure printed as money going out: "-$139.27", "-139.27", "139.27-"
@@ -543,11 +652,31 @@ def _paid_by_the_account(text: str, name: str) -> bool:
     own other account shows up as a "Direct deposit - Pingo" line and, on the
     same statement, as "Pingo - ACH  -$139.27" going the other way - money
     moving both directions is a transfer partner, not a payroll.
+
+    Only a transfer going out counts. A card purchase is not one: the client
+    who works at Home Depot also shops there, and "THE HOME DEPOT #4401 WEST
+    JORDAN UT  -$33.12" beside "ACH DEPOSIT HOME DEPOT PAYROLL" dropped the
+    employer - the worst thing this module can do.
     """
     folded = name.casefold()
     return any(folded in line.casefold() and _OUTGOING.search(line)
                and not _PAID_IN.search(line)
+               and _TRANSFER_OUT.search(line) and not _CARD_PURCHASE.search(line)
                for line in text.splitlines())
+
+
+# how a statement describes money it sent rather than spent
+# Funding a wallet is a transfer too: "ORCHARD CASH ADD MONEY  -$50.00" is
+# the client topping up an app, and without it the app went back to being
+# proposed as an employer from its own cash-out deposits.
+_TRANSFER_OUT = re.compile(
+    r"(?i)\b(?:ach|transfer|xfer|pmt|payment|p2p|withdrawal|cash[^\S\n]?out|to|"
+    r"add[^\S\n]+money|add[^\S\n]+funds|top[^\S\n-]?up|load(?:ed)?|funding)\b")
+# how it describes a card swipe: "CHECKCARD 1002", "POS PURCHASE", "DEBIT CARD
+# 4401". Not a "#1234" store number - a transfer's "REF # 12345678" is the same
+# shape, and the transfer word is already required above.
+_CARD_PURCHASE = re.compile(
+    r"(?i)\b(?:check[^\S\n]?card|pos|purchase|debit[^\S\n]+card|card[^\S\n]+\d{4})\b")
 
 
 # A line that says it is pay is money coming in, whatever its sign: a scanned
@@ -661,11 +790,16 @@ def _trim_employer(raw: str) -> str:
     while tokens and (tokens[-1].casefold().strip(":") in _EMP_NOISE
                       or tokens[-1].isdigit()):
         tokens.pop()
-    if not tokens or all(t.casefold().strip(".,") in _EMP_NOT_A_NAME for t in tokens):
+    if not tokens or all(t.casefold().strip(".,()") in _EMP_NOT_A_NAME | _EMP_GENERIC
+                         for t in tokens):
         return ""
     if tokens[0].casefold() in _EMP_NOT_A_NAME:
         return ""
     name = " ".join(tokens)
+    # "Hourly Rate 25.00 Salary" - a figure is not part of anybody's name, and a
+    # value with no letters at all is a column of them
+    if _DECIMAL.search(name) or len(re.findall(r"[A-Za-z]", name)) < 2:
+        return ""
     if _NOT_AN_EMPLOYER.match(name):
         return ""
     return name
@@ -679,12 +813,13 @@ _ENTITY_SUFFIX = re.compile(
     r"(?i)(?:,?\s+(?:llc|l\.l\.c\.|inc\.?|incorporated|corp\.?|corporation|co\.?|company"
     r"|pllc|p\.l\.l\.c\.|llp|lp|ltd\.?|pc|p\.c\.)|\s+enterprises|\s+&\s+sons)\s*$")
 _INSTITUTION = re.compile(
-    r"(?i)\b(?:bank|bancorp|credit\s+union|cu|fcu|federal|savings|trust|financial|mortgage"
+    r"(?i)\b(?:bank|bancorp(?:oration)?|credit\s+union|cu|fcu|federal|savings|trust|financial|mortgage"
     r"|servicing|lending|loans?|capital|insurance|assurance|mutual|brokerage|securities"
     r"|investments?|card|services|n\.a\.?)\b")
 # a P&L or a balance sheet is headed with the business it belongs to
 BOOKS_TITLE = re.compile(
-    r"(?im)^[^\S\n]*([^\n]{3,60}?)[^\S\n]*(?:\n[^\S\n]*|[^\S\n]+)"
+    # one whitespace quantifier per gap, not two side by side - see _COLUMN_START
+    r"(?im)^[^\S\n]*([^\n]{3,60}?)(?:[^\S\n]*\n[^\S\n]*|[^\S\n]+)"
     r"(?:profit\s*(?:&|and)\s*loss|income\s+statement|balance\s+sheet"
     r"|statement\s+of\s+(?:operations|cash\s+flows|income))\b")
 
@@ -787,6 +922,9 @@ _FORM_WORDS = frozenset({
     "distribution", "savings", "checking", "contributions", "employer", "income",
     "name", "names", "lending", "loan", "bank", "report", "statement",
     "lease", "rent", "deposit", "unit", "move", "start", "end",
+    # a label word opening an ordinary phrase: "Owner Occupied Property",
+    # "Lender Fees Paid", "Landlord Tenant Act", "Patient Portal Login"
+    "occupied", "property", "fees", "paid", "act", "portal", "login",
 })
 # "NAKAMURA, DEREK L" under a "NAME (LAST, FIRST, MI)" heading
 LAST_FIRST = re.compile(r"(?m)^[^\S\n]*([A-Z][A-Za-z'’\-]+),[ ]([A-Z][A-Za-z'’\-]+)(?:[ ]([A-Z])\.?)?[^\S\n]*$")
@@ -857,13 +995,141 @@ def receivers(text: str, source: str = "") -> list[Party]:
             name = " ".join(match.group(1).split()).strip(" ,.")
             if len(name.split()) >= 2 and _acceptable(name):
                 found.setdefault(name.casefold(), Party(name, source, "person"))
+    for match in RECEIVER_LAST_FIRST.finditer(text):
+        last, first, initial = match.groups()
+        name = f"{first} {initial} {last}" if initial else f"{first} {last}"
+        if _acceptable(name):
+            found.setdefault(name.casefold(), Party(name, source, "person"))
+    return list(found.values())
+
+
+# A payment app's activity screen, photographed or screenshotted: each row a
+# person, under them what the payment was - the app's word for it or the
+# payer's own note - and a signed amount at the right. No table, no labels, no
+# app name to key on (a real app's or an invented one's), so the shape is the
+# rule: a feed of signed amounts, and a person-shaped line whose next line is
+# a payment verb or a lowercase note. A merchant's row says "Purchase", the
+# app's own rows say "Add Money" or repeat their own name - neither passes.
+# The sign may be glued to the name - OCR read "Tanner Jensen  -$92.76" as
+# "Tanner Jensen-$92.76" - so only a digit or a dollar sign before it means it
+# is not a sign. A hyphenated name ("Anne-Marie") has no "$" after its hyphen.
+_SIGNED_AMOUNT = re.compile(r"(?<![\d$])[+\-−]\s?\$\s?\d[\d,]*\.?\d*")
+_FEED_VERB = re.compile(
+    r"(?i)^(?:sent|received|request(?:ed)?|paid(?:\s+you)?|you\s+paid|"
+    r"charged?|split|money\s+(?:sent|received))\b")
+# the payment's kind, as a wallet app prints it under the payee: "Mobile
+# Payment", "Express Checkout Payment", "PreApproved Payment Bill User"
+_FEED_KIND = re.compile(r"(?i)^(?:[A-Za-z]+\s+){0,3}payment\b")
+# a given name may carry one inner capital - McKenzie, DeShawn, LaToya - or be
+# two joined by a hyphen, Anne-Marie
+_FEED_PERSON = (r"[A-Z][a-z]{0,3}[A-Z]?[a-z'’\-]+(?:-[A-Z][a-z'’]+)?(?:\s+[A-Z]\.?)?"
+                r"(?:\s+[A-Z][A-Za-z'’\-]+){1,2}")
+_FEED_NAME = re.compile(rf"^{_FEED_PERSON}$")
+# Venmo's layout: who paid whom on the row itself, the note under it - "Tanner
+# Jensen paid You", "You paid Dallin Cox", "Rachel Pratt requested $20.00 from
+# You". The verb is on the name's own line, so the next-line test never fired.
+_FEED_PAIR = re.compile(
+    rf"^(You|{_FEED_PERSON})\s+(?:paid|charged|requested|sent)\s+"
+    rf"(?:\$[\d,]+(?:\.\d+)?\s+)?(?:(?:from|to)\s+)?(You|{_FEED_PERSON})\b")
+# A merchant row is the same shape as a person's on a wallet app - "Home Depot
+# -$147.57" over "Mobile Payment" is "Ashley Hansen -$147.57" over "Mobile
+# Payment" - so a trade's own vocabulary decides it. Generic words for what a
+# shop sells or is, never a brand, and none a common surname: "Baker", "Cook",
+# "Kitchen" and "Bell" are people often enough that they stay out.
+# Trade words only - never one that is also a surname a payee could carry
+# ("Garden", "Tree", "Baker", "Cook", "Bell" are left out): missing a person
+# costs more than proposing a merchant the operator can untick.
+_MERCHANT_WORDS = frozenset({
+    "depot", "food", "foods", "grocery", "groceries", "wholesale", "express",
+    "market", "mart", "supermarket", "outlet", "outlets", "pharmacy", "drug",
+    "drugs", "grill", "cafe", "café", "pizza", "pizzeria",
+    "taco", "tacos", "burger", "burgers", "coffee", "bakery", "dollar", "buy",
+    "supply", "supplies", "hardware", "auto", "automotive", "motors",
+    "fitness", "salon", "liquor", "pet", "pets", "furniture", "station", "gas",
+    "fuel", "pub", "diner", "restaurant", "deli", "sushi", "bbq", "steakhouse",
+    "cinema", "cinemas", "theater", "theatre", "toys", "sports", "wireless",
+    "warehouse", "boutique", "chicken", "donuts", "bagels", "cleaners", "laundry",
+    "parking", "airlines", "airline", "hotel", "hotels", "motel", "resort",
+    "tire", "tires", "nails", "spa", "beauty", "books", "bookstore", "electronics",
+})
+# what a feed prints under a merchant's row, which marks that name as one
+# wherever else on the screen it appears
+_FEED_PURCHASE = re.compile(r"(?i)^(?:card\s+)?(?:purchase|refund|return|pos)\b")
+FEED_MIN_SIGNED = 2
+
+
+def _feed_person(name: str, merchants: set[str]) -> bool:
+    if name.casefold() in merchants:
+        return False
+    # "Rewards Summary" over "earned this period" on a card statement
+    if any(t.strip(".,'’").casefold() in _MERCHANT_WORDS | _FORM_WORDS for t in name.split()):
+        return False
+    return _acceptable(name) and caption.plausible_name(name)
+
+
+# A business wallet prints the date before the payment's kind - "Jun 8 -
+# Website Payment" - and OCR turns the dash into "+" or ":" ("Jun 6+:").
+_FEED_DATE = re.compile(
+    r"(?i)^(?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?[^\S\n]*\d{1,2}"
+    r"|\d{1,2}/\d{1,2}(?:/\d{2,4})?)[^\S\n]*[-–—+:,.]*[^\S\n]*")
+_ONLY_AMOUNT = re.compile(r"^[+\-−]?\s?\$\s?\d[\d,]*(?:\.\d{2})?$")
+
+
+def _feed_below(lines: list[str], index: int) -> str:
+    """What the row says the payment was: the next line, past an amount that
+    wrapped onto a line of its own, and past a leading date."""
+    for below in lines[index + 1:index + 3]:
+        if not below:
+            return ""               # a blank line ends the row
+        if not _ONLY_AMOUNT.match(below):
+            return _FEED_DATE.sub("", below, count=1)
+    return ""
+
+
+def activity_feed(text: str, source: str = "") -> list[Party]:
+    """The people on a payment app's activity screen - see above."""
+    if len(_SIGNED_AMOUNT.findall(text)) < FEED_MIN_SIGNED:
+        return []
+    lines = [" ".join(line.split()) for line in text.splitlines()]
+    # the name's own cell: a row reading carries the amount beside it
+    cells = [_SIGNED_AMOUNT.split(line)[0].strip() for line in lines]
+    merchants = {cells[i].casefold() for i in range(len(lines) - 1)
+                 if _FEED_PURCHASE.match(lines[i + 1])}
+    # an entry whose kind is its own name is the app's own line - "Daily Cash"
+    # over "Daily Cash", the cash-back row - never a person
+    merchants |= {cells[i].casefold() for i in range(len(lines) - 1)
+                  if cells[i] and cells[i] == lines[i + 1]}
+    found: dict[str, Party] = {}
+    for index, line in enumerate(lines):
+        pair = _FEED_PAIR.match(cells[index])
+        if pair:
+            for name in pair.groups():
+                if name != "You" and _feed_person(name, merchants):
+                    found.setdefault(name.casefold(), Party(name, source, "person"))
+            continue
+        if index + 1 >= len(lines):
+            continue
+        name = cells[index]
+        below = _feed_below(lines, index)
+        if not _FEED_NAME.match(name) or not below:
+            continue
+        if not (_FEED_VERB.match(below) or _FEED_KIND.match(below) or below[:1].islower()):
+            continue
+        if _feed_person(name, merchants):
+            found.setdefault(name.casefold(), Party(name, source, "person"))
     return list(found.values())
 
 
 def harvest_documents(regions: dict[str, str],
                       tables: dict[str, list] | None = None,
-                      avoid: frozenset[str] = frozenset()) -> list[Party]:
-    """Counterparties across the batch, minus anybody already spoken for."""
+                      avoid: frozenset[str] = frozenset(),
+                      feeds: dict[str, str] | None = None) -> list[Party]:
+    """Counterparties across the batch, minus anybody already spoken for.
+
+    ``feeds`` is the page's own readings, without the column readings: an
+    activity feed pairs a name with the line under it, and down a table column
+    the line under a cell is the next row's.
+    """
     tables = tables or {}
     merged: dict[str, Party] = {}
     for source, text in regions.items():
@@ -874,6 +1140,8 @@ def harvest_documents(regions: dict[str, str],
                       *account_holders(text, source),
                       *receivers(text, source),
                       *labelled_people(text, source),
+                      *activity_feed(feeds.get(source, "") if feeds is not None else text,
+                                     source),
                       *businesses(text, source)]:
             if party.key in avoid:
                 continue

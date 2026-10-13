@@ -31,8 +31,9 @@ for package in (
     hiddenimports += pkg_hidden
 
 # The OCR fallback ships its models inside the package, so collect_all carries
-# both the code and the .onnx files.
-for package in ("rapidocr_onnxruntime", "onnxruntime", "rapidocr"):
+# both the code and the .onnx files. pillow_heif carries libheif and its
+# codecs for iPhone photos; --selftest decodes a HEIC to prove they survived.
+for package in ("rapidocr_onnxruntime", "onnxruntime", "rapidocr", "pillow_heif"):
     try:
         pkg_datas, pkg_binaries, pkg_hidden = collect_all(package)
     except Exception:

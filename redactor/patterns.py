@@ -80,8 +80,16 @@ V_DIGITS = r"\d[\d\-\s]{2,25}\d"
 #
 # "(?!\d)" as well: without it the digits backtrack to dodge the money guard,
 # and a pay stub's check-protected "**832.81" registered "**83".
-V_MASKED = (r"(?:(?:[Xx*•#]{2,}|\.{2,4})[\- ]?)+\d{2,6}(?!\d)(?![.,]\d)"
-            r"|(?<![\d.,$])\d{2,6}(?:[\- ]?(?:[Xx*•#]{2,}|\.{2,4}))+")
+#
+# Between two runs the separator is mandatory. With it optional, a run of N
+# stars could be cut into runs in 2^N ways, and the engine tried every one of
+# them before giving up on a line that does not end in a mask's digits: a
+# check-protected amount line, "PAY " and 36 asterisks before "832.81",
+# took ten seconds, and each further asterisk nearly doubled it. A run is
+# already as long as it likes, so nothing it used to match is lost.
+_MASK_RUN = r"(?:[Xx*•#]{2,}|\.{2,4})"
+V_MASKED = (rf"{_MASK_RUN}(?:[\- ]{_MASK_RUN})*[\- ]?\d{{2,6}}(?!\d)(?![.,]\d)"
+            rf"|(?<![\d.,$])\d{{2,6}}[\- ]?{_MASK_RUN}(?:[\- ]{_MASK_RUN})*")
 # Digits printed in groups, which is how utility, cable and wireless accounts
 # are written: "8102 4477 9301". V_ALNUM forbids the space, so only the first
 # group was captured and "Account Number: [ACCOUNT-14] 4477 9301" shipped
@@ -91,7 +99,12 @@ V_MASKED = (r"(?:(?:[Xx*•#]{2,}|\.{2,4})[\- ]?)+\d{2,6}(?!\d)(?![.,]\d)"
 # One space or a hyphen between groups, never a line break: "Transfer From
 # Checking 6323" over a "100.00" on the next line registered "6323\n100" as the
 # account, and the literal pass then boxed the "100" out of the figure.
-V_GROUPED = r"\d{3,6}(?:[\- ]\d{3,6}){1,4}(?![.,]\d)"
+#
+# "(?!\d)" for the same reason as in V_MASKED: without it the last group
+# gives back digits until the money guard is satisfied, and "Checking 4417
+# 1500.00" registered the account "4417 150" - and the literal pass then took
+# "150" out of the balance.
+V_GROUPED = r"\d{3,6}(?:[\- ]\d{3,6}){1,4}(?!\d)(?![.,]\d)"
 V_ANY_ID = rf"(?:{V_MASKED}|{V_ALNUM})"
 # What the financial detectors accept: the grouped form as well.
 V_ACCOUNT_ID = rf"(?:{V_MASKED}|{V_GROUPED}|{V_ALNUM})"
@@ -107,8 +120,14 @@ V_CARD = (r"(?:\d{13,19}|\d{4}(?P<cg>[ \-])\d{4}(?P=cg)\d{4}(?P=cg)\d{1,7}"
 # of them - "Share Certificate (CD) number 44-8821-0033",
 # "Account number (see instructions) HCS-0044-2211" - and without it the same
 # line without its parenthesis matched while the real one did not.
+#
+# Each run of whitespace belongs to exactly one "\s*": the word, slash or
+# aside eats the gap after it. With a "\s*" in front of every repetition and
+# two more around the closing punctuation, a long gap after a label - a
+# padded column in a fixed-width export - was split every possible way at
+# every label, and the time grew with the square of the gap.
 _SEP = (
-    r"(?:\s*(?:num(?:ber)?|no\.?|nos\.?|#|id(?:entif(?:ication|ying))?|acct\.?|"
+    r"\s*(?:(?:(?:num(?:ber)?|no\.?|nos\.?|#|id(?:entif(?:ication|ying))?|acct\.?|"
     r"account|ending(?:\s+in)?|handle|profile|user\s?name|username|login|tag|"
     r"cash\s?tag|is|are|was|were|of|for|at|with|"
     # A transaction line puts a verb between the rail and the reference:
@@ -120,11 +139,17 @@ _SEP = (
     r"payment|pmt|transfer|transaction|ref|reference|posted|"
     # a label qualifies itself before it gets to the value: "Student ID at
     # school of record:", "Loan number of record:"
-    r"school|record|primary|current|assigned)"
+    r"school|record|primary|current|assigned|"
+    # How a card's tail is introduced when "ending in" is not used: Amazon's
+    # invoice prints "Visa | Last digits: 4053", others "last 4 digits" and
+    # "last four". Never a bare "last", which is prose: "the last 2024 filing".
+    r"last\s*(?:4|four)?\s*digits?|last\s*(?:4|four)|"
+    # a pipe between a label and its value is a table's cell border
+    r"\|)"
     # a column heading writes its alternatives with a slash - "Account /
     # identifying number" is the heading on the Utah asset schedule, and
     # without the slash the whole column read as unlabelled
-    r"|\s*/|\s*\([^)\n]{1,30}\)|\s*\)){0,6}\s*[:\-–—=#]?\s*"
+    r"|/|\([^)\n]{1,30}\)|\))\s*){0,6}(?:[:\-–—=#]\s*)?"
 )
 
 _MONTHS = (
@@ -146,9 +171,15 @@ def labeled(labels: Sequence[str], value: str = V_ANY_ID) -> str:
     code "GPBSDLHG5" read as a driver's licence label, and "HG5" was boxed.
     Nor after a digit: "RX" closing the UPS number "1Z59T2L3YUS96VY4RX" read
     as a prescription label and took the order date in the next cell.
+
+    The one exception is a camel-cased join, a lower-case letter followed by
+    a capital: an export's field names glue their words - "PatientDOB:",
+    "ChkAcct", "CustomerAcct#" - and each of those shipped its value. The
+    test is case-sensitive whatever the detector's flags, so an all-capitals
+    code like "GPBSDLHG5" still has no label inside it.
     """
     alt = "|".join(labels)
-    return rf"(?<![A-Za-z0-9])(?:{alt}){_SEP}({value})"
+    return rf"(?:(?<![A-Za-z0-9])|(?-i:(?<=[a-z])(?=[A-Z])))(?:{alt}){_SEP}({value})"
 
 
 # --------------------------------------------------------------------------
@@ -367,18 +398,6 @@ def _d(category, pattern, group=0, validator=None, priority=50, flags=_I,
                     needs_digit=digit, keywords=tuple(kw))
 
 
-# What follows a number when the number opens a street: "1734 W GENTILE ST",
-# "620 E 1200 S", "2750 ASPEN SPRINGS DR". Used to keep a bare four-digit card
-# tail off a house number. Nothing leaks by it: a number that opens a street is
-# taken by the street-address rule instead.
-_NOT_A_STREET = (
-    r"(?![^\S\n]{1,2}(?:North|South|East|West|[NSEW]\.?)[^\S\n]{1,2}[A-Z0-9])"
-    r"(?![^\S\n]{1,2}(?:[A-Z0-9][\w'\-]*\.?[^\S\n]{1,2}){1,4}"
-    r"(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Circle|Cir|"
-    r"Way|Place|Pl|Terrace|Ter|Parkway|Pkwy|Highway|Hwy|Trail|Trl|Loop)\b)"
-)
-
-
 DETECTORS: tuple[Detector, ...] = (
     # ------------------------------------------------------------- contact --
     _d("email", r"\b[\w!#$%&'*+/=?^`{|}~.-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+\b", priority=90,
@@ -403,12 +422,17 @@ DETECTORS: tuple[Detector, ...] = (
        r"(?<![\w:])(?:[0-9A-Fa-f]{1,4}:){1,6}:(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,5})?(?![\w:])",
        priority=85, kw=("::",)),
     _d("mac_address", r"\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b", priority=85),
-    _d("gps", r"[-+]?\d{1,3}\.\d{4,}\s*[,\s]\s*[-+]?\d{1,3}\.\d{4,}", priority=85,
+    # Each run of whitespace is consumed by exactly one "\s*" in these two.
+    # Three optional runs side by side split a long gap every possible way
+    # before failing - cubic in its length - and "facebook" followed by a
+    # page's worth of padding took seconds.
+    _d("gps", r"[-+]?\d{1,3}\.\d{4,}(?:\s*,\s*|\s+)[-+]?\d{1,3}\.\d{4,}", priority=85,
        digit=True),
     _d("social_handle",
        rf"\b(?:facebook|fb|instagram|insta|ig|twitter|x\.com|tiktok|snapchat|snap|linkedin|"
        rf"reddit|discord|telegram|whatsapp|youtube|onlyfans|tinder|bumble|hinge)\b\s*"
-       rf"(?:profile|account|handle|user\s?name|username|id)?\s*(?:is|:|=|@|-)?\s*(@?[A-Za-z0-9._\-]{{3,30}})",
+       rf"(?:(?:profile|account|handle|user\s?name|username|id)\s*)?(?:(?:is|:|=|@|-)\s*)?"
+       rf"(@?[A-Za-z0-9._\-]{{3,30}})",
        group=1, priority=84,
        kw=("facebook", "fb", "insta", "ig", "twitter", "x.com", "tiktok", "snap",
            "linkedin", "reddit", "discord", "telegram", "whatsapp", "youtube",
@@ -419,7 +443,12 @@ DETECTORS: tuple[Detector, ...] = (
     # money. A Cash App statement prints "$JennaHar727" in its header and says
     # "Cash App" nowhere near it. An all-capitals run of five or fewer is left
     # alone - "$USD", "$AAPL" are a currency and a ticker, not a person.
-    _d("payment_handle", r"(?<![\w$])\$(?![A-Z]{1,5}\b)[A-Za-z][A-Za-z0-9_]{2,19}\b",
+    # And it must look like a handle, not a word: a digit, an underscore or a
+    # capital after the first letter. A register that writes "$million" or a
+    # heading "$Total" is talking about money; "$JennaHar727" is a person. A
+    # handle in plain lower case is still caught where the app is named.
+    _d("payment_handle", r"(?<![\w$])\$(?![A-Z]{1,5}\b)(?=[A-Za-z][a-z]*[A-Z0-9_])"
+                         r"[A-Za-z][A-Za-z0-9_]{2,19}\b",
        priority=61, flags=0, kw=("$",)),
     _d("username", labeled(("user\\s?name", "user\\s?id", "login(?:\\s?name|\\s?id)?", "screen\\s?name", "display\\s?name"),
                            r"[A-Za-z0-9._@\-]{3,40}"), group=1, priority=70,
@@ -522,11 +551,13 @@ DETECTORS: tuple[Detector, ...] = (
                               # a charge card prints its tail after a prefix digit
                               # The tail is never the start of a date or of a
                               # longer number - "Memory Card" wrapped above an
-                              # order date "2023-10-25" - nor a house number:
-                              # "Memory Card   1734 W GENTILE ST" in an order
-                              # export's row is the title's end and the address.
-                              rf"(?:{V_MASKED}|{V_CARD}|(?<!\d)\d{{4}}(?!\d|[-/.]\d){_NOT_A_STREET}"
-                              rf"|(?<![\d\-])\d{{1,2}}-\d{{4,5}}(?![\d\-]))"),
+                              # order date "2023-10-25" - nor a house number,
+                              # which scan() settles against the street rule.
+                              # The prefixed tail is never a two-digit month
+                              # and a year: "Card 12-2024" is an expiry.
+                              rf"(?:{V_MASKED}|{V_CARD}|(?<!\d)\d{{4}}(?!\d|[-/.]\d)"
+                              rf"|(?<![\d\-])(?!(?:0[1-9]|1[0-2])-(?:19|20)\d\d(?![\d\-]))"
+                              rf"\d{{1,2}}-\d{{4,5}}(?![\d\-]))"),
        group=1, priority=92,
        digit=True, kw=("card", "visa", "amex", "american", "discover")),
     _d("routing_number", labeled(("routing", "aba", "rtn", "transit")), group=1, priority=91,
@@ -677,7 +708,11 @@ DETECTORS: tuple[Detector, ...] = (
        # A house number never opens with a zero, and a street always has a
        # name between its number and its type: "CHECKCARD 0328 SQ *BLUE MOON"
        # is a posting date and a card processor, not 0328 Square.
-       r"(?<![\d.,/\-#:])\b(?!0)\d{1,6}[A-Z]?[^\S\n]{1,2}(?:(?:North|South|East|West|N\.?|S\.?|E\.?|W\.?|NE|NW|SE|SW)[^\S\n]{1,2})?"
+       # A colon blocks the number only after a digit, where it is a time's;
+       # after a word it is a label's, and "Address:1734 W Gentile St" is
+       # the address. A "#" still blocks it: "#4417" is a store's number, a
+       # unit or a card, never a house.
+       r"(?<![\d.,/\-#])(?<!\d:)\b(?!0)\d{1,6}[A-Z]?[^\S\n]{1,2}(?:(?:North|South|East|West|N\.?|S\.?|E\.?|W\.?|NE|NW|SE|SW)[^\S\n]{1,2})?"
        r"(?:[A-Z0-9][\w'\-]*\.?[^\S\n]{1,2}){1,4}"
        r"(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Circle|Cir|Way|Wy|"
        r"Place|Pl|Terrace|Ter|Parkway|Pkwy|Highway|Hwy|Trail|Trl|Loop|Square|Sq|Plaza|Alley|Route|Rte|"
@@ -739,9 +774,14 @@ DETECTORS: tuple[Detector, ...] = (
     # "PLATE Y777MX" - a registration renewal heads the field with the bare
     # word. Case-sensitive and it must mix letters and digits, so "plate glass"
     # and "Plate Type" stay prose.
+    # The letter and the digit are both inside the plate itself, not in the
+    # words after it, and a plate split in two has three or more characters
+    # after the break: "Plate 1234 ST GEORGE" and "Plate 12 OZ" are a number
+    # and the word that follows it, and took "ST" and "OZ" with them.
     _d("license_plate", r"(?i:\bplate\b)[^\S\n]*[:#]?[^\S\n]*"
-                        r"((?=[A-Z0-9 \-]*\d)(?=[A-Z0-9 \-]*[A-Z])[A-Z0-9]{1,4}[\- ]?[A-Z0-9]{2,5})\b",
-       group=1, priority=87, flags=0, digit=True, kw=("plate",)),
+                        r"((?:[A-Z0-9]{1,4}[\- ][A-Z0-9]{3,5}|[A-Z0-9]{3,9})(?![\w\-]))",
+       group=1, priority=87, flags=0, digit=True, kw=("plate",),
+       validator=lambda v: any(c.isdigit() for c in v) and any(c.isalpha() for c in v)),
     _d("vehicle_title", labeled(("(?:vehicle\\s+|certificate\\s+of\\s+)?title\\s*(?:no\\.?|number|#)",
                                  "certificate\\s+of\\s+title"),
                                 r"[A-Z0-9][A-Z0-9\-]{4,17}"),
@@ -883,22 +923,43 @@ _YEAR_ONLY = re.compile(r"^(?:19[5-9]\d|20[0-4]\d)$")
 _YEAR_REJECTING = frozenset({"investment_account", "bank_account", "loan_number",
                              "policy_number", "claim_number", "check_number",
                              "employee_id", "order_number", "tracking_number"})
+# ...unless the label says outright that an identifier follows. "Checking
+# account ending in 2024", "Acct No. 2015", "Loan ending in 2019" are the
+# last four of a real account, and the year rule shipped every one of them.
+# The cue has to close the label, so "Account number for 2024" - a label
+# that wandered on into prose - is still a year.
+_IDENTIFIER_CUE = re.compile(
+    r"(?:\bending(?:\s+in)?|\blast\s*(?:four|4)?\s*digits?|\blast\s*(?:four|4)|\bnos?\.?|\bnum(?:ber)?|#)"
+    r"\s*[:\-–—=#]?\s*$", re.IGNORECASE)
 
 
-def _wrong_shape(category: str, value: str) -> bool:
-    """True when the value is money or a date and the category cannot be either."""
+def _wrong_shape(category: str, value: str, label: str = "") -> bool:
+    """True when the value is money or a date and the category cannot be either.
+
+    ``label`` is the text the detector matched in front of the value.
+    """
     cleaned = value.strip()
     if category not in _DECIMAL_NATIVE and _CURRENCY_SHAPE.match(cleaned):
         return True
-    if category in _YEAR_REJECTING and _YEAR_ONLY.match(cleaned):
+    if (category in _YEAR_REJECTING and _YEAR_ONLY.match(cleaned)
+            and not _IDENTIFIER_CUE.search(label)):
         return True
     if category in _DATE_REJECTING and _DATE_ONLY.match(cleaned):
         return True
     return False
 
 
-_NUMBER_GOES_ON = re.compile(r"[.,]\d")
-_NUMBER_CAME_BEFORE = re.compile(r"\d[.,]$")
+# A decimal fraction, or a thousands group: a comma, exactly three digits and
+# then no more. "44821903,44821904" is two account numbers glued by a comma,
+# and reading that comma as a thousands separator dropped both of them.
+_NUMBER_GOES_ON = re.compile(r"\.\d|,\d{3}(?!\d)")
+_NUMBER_CAME_BEFORE = re.compile(r"\d\.$")
+_AFTER_A_COMMA = re.compile(r"\d,$")
+_THOUSANDS_GROUP = re.compile(r"\d{3}(?!\d)")
+# A hyphen or a letter inside the value makes it an identifier: no figure is
+# written "123-45-6789" or "HCS0044", so "SSN 123-45-6789,234-56-7890" is two
+# numbers in a list, not one figure cut in half.
+_NOT_A_FIGURE = re.compile(r"[\-A-Za-z]")
 
 
 def _cut_from_a_number(text: str, start: int, end: int) -> bool:
@@ -910,10 +971,17 @@ def _cut_from_a_number(text: str, start: int, end: int) -> bool:
     a thousands separator or a decimal fraction running on from it; a figure
     always is.
     """
-    if text[start:end][-1:].isdigit() and _NUMBER_GOES_ON.match(text, end):
+    value = text[start:end]
+    if _NOT_A_FIGURE.search(value):
+        return False
+    if value[-1:].isdigit() and _NUMBER_GOES_ON.match(text, end):
         return True
-    if text[start:end][:1].isdigit() and _NUMBER_CAME_BEFORE.search(text[max(0, start - 2):start]):
-        return True
+    if value[:1].isdigit():
+        before = text[max(0, start - 2):start]
+        if _NUMBER_CAME_BEFORE.search(before):
+            return True
+        if _AFTER_A_COMMA.search(before) and _THOUSANDS_GROUP.match(value):
+            return True
     return False
 
 
@@ -933,11 +1001,49 @@ def _unwrap_a_cell(text: str, start: int, value: str) -> str:
     export's billing street took the shipping city under it, "2750 ASPEN
     SPRINGS DR / TWIN FALLS ID 83301", and the client's home was registered
     in a town the gift went to.
+
+    Two things say the street is an address block after all, and then its
+    town stays with it. A short label in front - "Address: 1734 W Gentile St"
+    over "Layton, UT 84041" - and the city line standing alone, with nothing
+    after the ZIP: the order export's next line held two towns side by side,
+    one per address column, and that is what gave the table away.
     """
     line_start = text.rfind("\n", 0, start) + 1
-    if text[line_start:start].strip():
-        return value.split("\n", 1)[0]
-    return value
+    before = text[line_start:start].strip()
+    if not before or _LABEL_BEFORE_STREET.fullmatch(before):
+        return value
+    tail_end = start + len(value)
+    line_end = text.find("\n", tail_end)
+    if not text[tail_end:len(text) if line_end < 0 else line_end].strip():
+        return value
+    return value.split("\n", 1)[0]
+
+
+# "Address:", "Home address:", "Mailing Addr.:" - up to three words and a colon.
+_LABEL_BEFORE_STREET = re.compile(r"(?:[A-Za-z][\w.'/\-]*\s+){0,2}[A-Za-z][\w.'/\-]*\s*:")
+
+
+# A card's bare last four, as the labelled card detector takes it.
+_CARD_TAIL = re.compile(r"\d{4}")
+
+
+def _street_starts(text: str) -> set[int]:
+    """Where the street-address rule would open a street in ``text``.
+
+    A bare four-digit card tail is dropped only when the street rule itself
+    begins at that very number: "Memory Card   1734 W GENTILE ST" in an order
+    export's row is a title's end and an address. A lookahead copy of the
+    street rule beside the card label drifted from the real one, and it
+    refused tails the street rule never took - "Card ending in 4417 N Ogden",
+    "VISA 4417 E ZPASS" - so they shipped as neither. Run regardless of the
+    enabled categories: whether a number is a house number does not depend on
+    which categories the operator ticked.
+    """
+    starts: set[int] = set()
+    for det in DETECTORS:
+        if det.category == "street_address":
+            starts.update(m.start(det.group) for m in det.regex.finditer(text))
+    return starts
 
 
 def scan(
@@ -976,7 +1082,7 @@ def scan(
             end = start + len(value)
             if not value.strip() or _value_is_junk(value):
                 continue
-            if _wrong_shape(det.category, value):
+            if _wrong_shape(det.category, value, text[m.start():start]):
                 continue
             if det.category not in _DECIMAL_NATIVE and _cut_from_a_number(text, start, end):
                 continue
@@ -986,6 +1092,11 @@ def scan(
                 continue
             found.append(Match(start, end, value, det.category, "pattern", det.priority))
 
+    if any(m.category == "credit_card" and _CARD_TAIL.fullmatch(m.text) for m in found):
+        streets = _street_starts(text)
+        found = [m for m in found
+                 if not (m.category == "credit_card" and _CARD_TAIL.fullmatch(m.text)
+                         and m.start in streets)]
     return resolve(found)
 
 

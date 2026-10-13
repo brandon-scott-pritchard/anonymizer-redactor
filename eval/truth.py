@@ -61,6 +61,7 @@ MERCHANT_KEYS = {"merchant", "store", "institution", "creditor", "lien", "seller
 _P2P_KINDS = {"p2p_in", "p2p_out"}
 _PAYROLL_SUBS = {"DIR DEP", "PAYROLL", "DIRECT DEP", "DIR DEP PAYROLL"}
 
+_SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
 _SPLIT_PEOPLE = re.compile(r"\s+(?:AND|and|&)\s+")
 _MASKED = re.compile(r"[xX*•#]{2,}\s?(\d{4})\b")
 _NOT_PERSON = re.compile(
@@ -70,7 +71,14 @@ _NOT_PERSON = re.compile(
     r"group|store|market|insurance|law|office|title|county|state|city|dept|"
     r"department|university|univ|school|district|plan|retirement|brokerage|"
     r"savings|checking|joint|individual|account|payroll|steam|ebay|etsy|"
-    r"doordash|uber|amazon|lyft|apple|google|paypal|venmo|zelle)\b")
+    r"doordash|uber|amazon|lyft|apple|google|paypal|venmo|zelle|spotify|netflix|"
+    r"technologies|technology|entertainment|networks|media|games|studios|wholesale|"
+    r"subscription|membership|premium|refund|resolved|favor|"
+    # a currency conversion's "To USD", "From EUR"
+    r"usd|eur|gbp|cad|mxn|jpy|aud)\b"
+    # a name never carries a lowercase joining word: "Nintendo of America",
+    # "Case resolved in seller favor"
+    r"|\s(?:of|in|to|from|for|at|the|and)\s")
 
 # The corpus conventions (README.txt of every set): SSNs never issued, EINs 00-.
 CORPUS_SSN = re.compile(r"\b9\d{2}-\d{2}-\d{4}\b")
@@ -109,6 +117,7 @@ class Secrets:
     orgs: dict[str, str] = field(default_factory=dict)          # name -> employer|business
     surnames: set[str] = field(default_factory=set)
     card_tails: set[str] = field(default_factory=set)           # last four of a card
+    txn_names: list[str] = field(default_factory=list)          # payment-app rows, unsorted
 
     def household_names(self) -> list[str]:
         return sorted(p.full for p in self.people.values() if p.household)
@@ -125,6 +134,9 @@ def _person(raw: str, household: bool) -> Person | None:
     if _NOT_PERSON.search(raw):
         return None
     tokens = [t for t in raw.replace(",", " ").split() if t]
+    # "MARCO A RUIZ JR": the surname is RUIZ, not JR
+    while len(tokens) > 2 and tokens[-1].strip(".").casefold() in _SUFFIXES:
+        tokens.pop()
     if len(tokens) < 2:
         return None
     first, last = tokens[0], tokens[-1]
@@ -184,8 +196,13 @@ def collect(label: dict, secrets: Secrets, merchants: set[str]) -> None:
             add_person(value, household=True)
         elif key in COUNTERPARTY_KEYS:
             add_person(value, household=False)
-        elif key == "name" and node.get("type") in {"Sent", "Received", "Request"}:
-            add_person(value, household=False)
+        elif key == "name" and node.get("type"):
+            # every payment-app row names its other end, whatever the app calls
+            # the row: "Sent", or a wallet's "Website Payment", "General
+            # Payment", "Payment Refund". Only Sent/Received/Request were read,
+            # and a whole wallet layout's 421 printed names went unscored. A
+            # merchant is dropped at finalize, against the case's merchants.
+            secrets.txn_names.append(value)
         elif key == "party":
             if kind in _P2P_KINDS:
                 add_person(value, household=False)
@@ -258,7 +275,15 @@ def collect_text(text: str, secrets: Secrets) -> None:
                 secrets.people.setdefault(person.full.casefold(), person)
 
 
-def finalize(secrets: Secrets) -> None:
+def finalize(secrets: Secrets, merchants: set[str] = frozenset()) -> None:
+    known_merchants = {_norm(m).casefold() for m in merchants}
+    for value in secrets.txn_names:
+        if _norm(value).casefold() in known_merchants:
+            continue
+        for part in _people(value):
+            person = _person(part, household=False)
+            if person is not None:
+                secrets.people.setdefault(person.full.casefold(), person)
     secrets.surnames = {p.last.casefold() for p in secrets.people.values() if p.household}
     # a counterparty who shares the household surname is family
     for person in secrets.people.values():
@@ -270,7 +295,10 @@ def finalize(secrets: Secrets) -> None:
 # scoring one output against the case
 # --------------------------------------------------------------------------
 
-MONEY = re.compile(r"(?<![\d,.])-?\$?\s?-?\d{1,3}(?:,\d{3})*\.\d{2}(?![\d])")
+MONEY = re.compile(
+    r"(?<![\d,.])-?\$?\s?-?(?:\d{1,3}(?:,\d{3})*|\d{4,})\.\d{2}(?![\d])"
+    # whole dollars, which a figure with a $ and thousands commas still is
+    r"|(?<![\d,.])-?\$\s?\d{1,3}(?:,\d{3})+(?![\d.,])")
 SSN_SHAPE = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
 MASKED_TAIL = re.compile(r"(?:[xX*•#]{2,}|\bending\s+(?:in\s+)?)[\s-]*\d{4}\b")
 INDN = re.compile(r"INDN:\s*([A-Z][A-Z .'-]{2,})")
@@ -327,16 +355,25 @@ def leaks(output: str, secrets: Secrets, *, ocr: bool = False,
         seen.add(key)
         found.append(Finding(category, value, _context(text, match.start(), match.end()), form))
 
+    reported_surnames: set[str] = set()
     for person in secrets.people.values():
         category = "household_name" if person.household else "counterparty"
         for form, label in person.forms:
             if label == "first" and (len(form) < 3 or form.casefold() in _COMMON_WORDS):
                 continue
+            if label == "surname" and form.casefold() in reported_surnames:
+                break               # one surviving PACKARD is one leak, not one per Packard
             match = _word(form).search(output)
             if match:
                 sub = category if label != "first" else "household_first_name"
                 add(sub, person.full, output, match, label)
+                if label == "surname":
+                    reported_surnames.add(form.casefold())
                 break
+        else:
+            glued = _glued(person.last, output) if person.household else None
+            if glued:
+                add("household_name_glued", person.full, output, glued, "glued")
 
     collapsed = _collapsed(output)
     for value, category in secrets.ids.items():
@@ -374,7 +411,8 @@ def leaks(output: str, secrets: Secrets, *, ocr: bool = False,
         # "Visa ending in 5546", "Mastercard - 5546": four digits are only a
         # card when the line says so
         match = re.search(rf"(?i)\b(?:visa|mastercard|master card|american express|amex|"
-                          rf"discover|card|ending(?: in)?)\b[^\n\d]{{0,6}}{tail}\b", output)
+                          rf"discover|card|ending(?: in)?|last (?:4 |four )?digits)\b"
+                          rf"[^\n\d]{{0,24}}{tail}\b", output)
         if match:
             add("card_tail", tail, output, match)
     for z in secrets.zip4:
@@ -399,10 +437,43 @@ def leaks(output: str, secrets: Secrets, *, ocr: bool = False,
     return found
 
 
+def _glued(surname: str, output: str) -> re.Match | None:
+    """A household surname run into its neighbours: "KYLEHARRINGTON",
+    "HarringtonStatement_Jan", "2403289000BLACKBURNLAW". Word boundaries never
+    see these, and a glued name is the leak class this project was built
+    around. Only where the gluing is plain from the case - capitals running
+    into capitals, a capital starting a new word, a digit - so "Cooperative"
+    is not a Cooper."""
+    if len(surname) < 5:
+        return None
+    for match in re.finditer(re.escape(surname), output, re.IGNORECASE):
+        written = match.group(0)
+        before = output[match.start() - 1] if match.start() else " "
+        after = output[match.end()] if match.end() < len(output) else " "
+        if not before.isalnum() and not after.isalnum():
+            continue                                   # a plain word: _word's business
+        caps = written.isupper()
+        before_glued = before.isdigit() or (caps and before.isupper()) or (
+            before.islower() and written[:1].isupper())
+        after_glued = after.isdigit() or (caps and after.isupper()) or (
+            not caps and after.isupper())
+        if (before_glued or not before.isalnum()) and (after_glued or not after.isalnum()):
+            return match
+    return None
+
+
 def _bounded(text: str, index: int, length: int) -> bool:
+    """Whether the value stands on its own: its neighbours are not of its kind.
+
+    A digit run wedged between letters - "EIN004049659WAGES" once the line is
+    collapsed - is a whole number; it was taken for part of a longer token.
+    """
     before = text[index - 1] if index else " "
     after = text[index + length] if index + length < len(text) else " "
-    return not (before.isalnum() and after.isalnum() and before.isdigit() == after.isdigit())
+    first, last = text[index], text[index + length - 1]
+    before_ok = not before.isalnum() or before.isdigit() != first.isdigit()
+    after_ok = not after.isalnum() or after.isdigit() != last.isdigit()
+    return before_ok and after_ok
 
 
 def _partial(collapsed: str, value: str) -> str:
@@ -440,6 +511,9 @@ def lost_merchants(source: str, output: str, merchants: set[str],
 
 def load_label(pdf: Path) -> dict | None:
     sidecar = pdf.with_suffix(".json")
+    if not sidecar.exists():
+        # a photographed document's pages share one label: "…_p1.jpg"
+        sidecar = pdf.with_name(re.sub(r"_p\d+$", "", pdf.stem) + ".json")
     if not sidecar.exists():
         return None
     try:

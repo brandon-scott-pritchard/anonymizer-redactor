@@ -198,34 +198,108 @@ def _inset(rect: pymupdf.Rect, padding: float) -> pymupdf.Rect:
     return pymupdf.Rect(rect.x0 - padding, rect.y0 + trim, rect.x1 + padding, rect.y1 - trim)
 
 
+ACROSS = (1.0, 0.0)              # the direction ordinary text reads in
+
+
+def _axis(direction) -> str:
+    """'across', 'down' or 'slanted': which page axis a line of text reads along.
+
+    Upside-down text still reads across the page, and text turned a quarter
+    either way reads down it; anything else runs at an angle to both axes.
+    """
+    dx, dy = direction
+    if abs(abs(dx) - 1.0) < 0.01:
+        return "across"
+    if abs(abs(dy) - 1.0) < 0.01:
+        return "down"
+    return "slanted"
+
+
+def _box(rect: pymupdf.Rect, padding: float, direction=ACROSS) -> pymupdf.Rect:
+    """The redaction box for text-layer words, shaped to how the text runs.
+
+    TEXT_BOX_INSET trims the box *across* the line, where neighbouring lines
+    are. Applied to text set sideways - a statement's account number printed
+    up the margin, a form's rotated column heading - the same trim took a
+    quarter off each end of every word instead, along the line: "Oakley V
+    Ward acct 3357 3537 2072" redacted to "O", "y", "d acct 3", "7 3". Text
+    that reads down the page is therefore trimmed left and right and padded
+    top and bottom; text at a slant has no axis that is safe to trim, so its
+    box is padded on every side.
+    """
+    axis = _axis(direction)
+    if axis == "across":
+        return _inset(rect, padding)
+    if axis == "down":
+        trim = rect.width * TEXT_BOX_INSET
+        return pymupdf.Rect(rect.x0 + trim, rect.y0 - padding, rect.x1 - trim, rect.y1 + padding)
+    return rect + (-padding, -padding, padding, padding)
+
+
+def _turned_lines(page: pymupdf.Page) -> list[tuple[pymupdf.Rect, tuple]]:
+    """(box, direction) for every line of text on the page not set left to right.
+
+    ``get_text("words")`` says nothing about direction; the line it came from
+    does. PyMuPDF keeps the direction on the line, not on its spans.
+    """
+    out = []
+    for block in page.get_text("dict")["blocks"]:
+        for line in block.get("lines", []):
+            direction = tuple(round(d, 3) for d in line.get("dir", ACROSS))
+            if direction != ACROSS:
+                out.append((pymupdf.Rect(line["bbox"]), direction))
+    return out
+
+
+def _direction_at(turned, rect: pymupdf.Rect) -> tuple:
+    """The direction of the line ``rect`` sits on: ACROSS unless it is turned."""
+    centre = pymupdf.Point((rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2)
+    for line, direction in turned:
+        if line.contains(centre):
+            return direction
+    return ACROSS
+
+
 def _rects_for_hit(hit: Hit, spans, padding: float = BOX_PADDING,
-                   ocr: bool = False) -> list[pymupdf.Rect]:
+                   ocr: bool = False, turned=()) -> list[pymupdf.Rect]:
     """Boxes covering a hit, one per line the hit crosses.
 
     On a scan the box is padded outward on every side, because there it is the
     pixels under it that get removed and OCR boxes are approximate. On a text
-    layer it is padded sideways and trimmed vertically - see TEXT_BOX_INSET.
+    layer it is padded along the line and trimmed across it - see
+    TEXT_BOX_INSET and :func:`_box` - which for sideways text (``turned``, from
+    :func:`_turned_lines`) means trimmed left and right, not top and bottom.
     """
-    lines: list[pymupdf.Rect] = []
+    lines: list[tuple[pymupdf.Rect, tuple]] = []
     for start, end, rect in spans:
         if end <= hit.start or start >= hit.end:
             continue
+        direction = ACROSS if ocr else _direction_at(turned, rect)
+        axis = _axis(direction)
         placed = False
-        for i, existing in enumerate(lines):
-            # same visual line if the vertical ranges substantially overlap
-            overlap = min(existing.y1, rect.y1) - max(existing.y0, rect.y0)
-            if overlap > 0.5 * min(existing.height, rect.height):
+        for i, (existing, existing_direction) in enumerate(lines):
+            if existing_direction != direction or axis == "slanted":
+                continue
+            # same line if the ranges across the line substantially overlap:
+            # the vertical ranges for ordinary text, horizontal for sideways
+            if axis == "across":
+                overlap = min(existing.y1, rect.y1) - max(existing.y0, rect.y0)
+                share = 0.5 * min(existing.height, rect.height)
+            else:
+                overlap = min(existing.x1, rect.x1) - max(existing.x0, rect.x0)
+                share = 0.5 * min(existing.width, rect.width)
+            if overlap > share:
                 # Rect union returns a new object, so assign it back into the
                 # list - an in-place |= would only rebind the loop variable and
                 # silently leave every word but the first uncovered.
-                lines[i] = existing | rect
+                lines[i] = (existing | rect, direction)
                 placed = True
                 break
         if not placed:
-            lines.append(pymupdf.Rect(rect))
+            lines.append((pymupdf.Rect(rect), direction))
     if ocr:
-        return [r + (-padding, -padding, padding, padding) for r in lines]
-    return [_inset(r, padding) for r in lines]
+        return [r + (-padding, -padding, padding, padding) for r, _d in lines]
+    return [_box(r, padding, direction) for r, direction in lines]
 
 
 # --------------------------------------------------------------------------
@@ -360,7 +434,9 @@ def iter_text_units(path: Path):
 # a statement ends. A merchant line says "ASIAN MARKET PROVO UT 13.99": a state,
 # then money, and no ZIP.
 _ZIP_LINE = re.compile(r"\b[A-Z]{2}\.?[ \t]+\d{5}(?:-\d{4})?[ \t]*$")
-_MONEY_ON_LINE = re.compile(r"\d[\d,]*\.\d{2}")
+# a figure with cents, or a dollar sign on whole dollars: an appraisal's
+# "2024 / $3,146" taxes line sat above a city line and was boxed as address
+_MONEY_ON_LINE = re.compile(r"\d[\d,]*\.\d{2}|\$\s?\d")
 # the lines above the ZIP: a street number, or a person's or company's name
 _ADDRESS_LINE = re.compile(r"^\s*(?:\d{1,6}[A-Za-z]?\s+\S|P\.?\s?O\.?\s+Box\b|[A-Za-z])")
 # The heading over a block names what the address is for - "Shipping Address",
@@ -795,8 +871,27 @@ def _style(span: dict) -> tuple[str, float, tuple, tuple, tuple]:
     font = _MONO[bold][italic] if mono else _BASE14[(serif, False, bold, italic)]
     colour = span.get("color", 0)
     rgb = (((colour >> 16) & 255) / 255, ((colour >> 8) & 255) / 255, (colour & 255) / 255)
+    # PyMuPDF puts a line's direction on the line, not its spans;
+    # :func:`_page_spans` copies it down so a sideways span is known as one
     return font, float(span.get("size", 9)), rgb, tuple(span.get("origin", (0, 0))), \
-        tuple(span.get("dir", (1, 0)))
+        tuple(span.get("dir", ACROSS))
+
+
+def _page_spans(page: pymupdf.Page) -> list[dict]:
+    """Every text span on the page, each carrying its line's direction.
+
+    PyMuPDF's dict output keeps ``dir`` on the line, not the span, so a span
+    read alone always looked level. A name printed up a statement's margin
+    was then given a horizontal replacement smeared across the lines beside
+    it, instead of the black box sideways text gets.
+    """
+    out = []
+    for block in page.get_text("dict")["blocks"]:
+        for line in block.get("lines", []):
+            direction = tuple(round(d, 3) for d in line.get("dir", ACROSS))
+            for span in line["spans"]:
+                out.append({**span, "dir": direction})
+    return out
 
 
 def _span_at(spans: list[dict], rect: pymupdf.Rect) -> dict | None:
@@ -851,15 +946,53 @@ def _allowance(length: int) -> int:
     return 2 if length >= 9 else 1
 
 
+# Letters OCR draws as one another, folded together: "rn" read as "m" turns
+# BLACKBURN into BLACKBUM, an i or a 1 is read as an l, an O as a 0.
+_LOOKALIKE_PAIRS = (("rn", "m"), ("vv", "w"), ("cl", "d"))
+_LOOKALIKE = str.maketrans({"i": "l", "1": "l", "|": "l", "!": "l", "0": "o"})
+
+
+def _looks(text: str) -> str:
+    """``text`` as OCR might confuse it: letters, with look-alikes folded."""
+    folded = re.sub(r"[^a-z0-9|!]", "", text.casefold())
+    for pair, single in _LOOKALIKE_PAIRS:
+        folded = folded.replace(pair, single)
+    return folded.translate(_LOOKALIKE)
+
+
+def _misread_name(text: str, letters: str, part: str) -> bool:
+    """Whether the OCR word ``text`` is the name part ``part`` misread.
+
+    A misread changes letters; it does not add a word ending. "Stevenson",
+    "Granted" and "Whitehall" carry Steven, Grant and White whole and are
+    other words, and "Grand" is an ordinary word one letter from Grant - all
+    four were rewritten on a scan. So a word holding the name intact is never
+    a misreading of it; a name of five letters is matched only through the
+    letters OCR actually confuses ("Smlth", "Srnith"); one of six to eight
+    letters may also have one other letter wrong, but no letter added or lost;
+    and a long name - nine letters or more - may be two edits off.
+    """
+    if letters == part:
+        return True
+    if part in letters:
+        return False
+    if _looks(text) == _looks(part):
+        return True
+    if len(part) >= 9:
+        return _distance(letters, part, 2) <= 2
+    return len(part) >= 6 and len(letters) == len(part) and _distance(letters, part, 1) <= 1
+
+
 def _ocr_near_misses(words, store: MappingStore, settings: Settings):
     """(hit, rect) for every OCR word within a letter or two of a registered value.
 
     OCR misreads predictably - an l for a 1, an O for a 0, a dropped or doubled
     letter - and a misread name or number matches nothing exactly, while the
     picture under it shows the real one to anybody who looks. On a scanned page
-    a registered name part of five letters or more, or a registered number of
-    six characters or more, is found one character off, two if it is nine or
-    longer. Only on scans: a text layer spells what it shows.
+    a registered name part of five letters or more is found misread as
+    :func:`_misread_name` allows, and a registered number of six characters or
+    more one character off, two if it is nine or longer. Only on scans: a text
+    layer spells what it shows.
     """
     names: list[tuple[str, object, str]] = []
     values: list[tuple[str, object]] = []
@@ -888,8 +1021,7 @@ def _ocr_near_misses(words, store: MappingStore, settings: Settings):
         match, replacement = None, ""
         if len(letters) >= GLUED_NAME_MIN:
             found = next(((e, part) for bit, e, part in names
-                          if _distance(letters, bit, _allowance(len(bit))) <= _allowance(len(bit))),
-                         None)
+                          if _misread_name(text, letters, bit)), None)
             if found:
                 match, replacement = found[0], _names.match_case(text, found[1] or found[0].replacement)
         # a figure or a date is never a misread identifier, however its digits fold
@@ -916,8 +1048,75 @@ def _ocr_near_misses(words, store: MappingStore, settings: Settings):
 GLUED_NAME_MIN = 5
 
 
-def _glued_names(words, store: MappingStore, settings: Settings):
-    """(hit, rect) for every OCR token that carries a person's name glued in."""
+# Endings that turn a name into another ordinary word or name - Steven into
+# Stevenson, Grant into Granted, White into Whitehall. A name glued to one of
+# these in a word with no case to go by is that other word, not the name.
+_WORD_ENDINGS = frozenset((
+    "ed", "er", "ers", "es", "est", "ing", "ings", "ly", "ness", "ment", "ish", "ful",
+    "son", "sons", "sen", "ton", "hall", "ham", "ley", "land", "field", "ford", "wood",
+    "ville", "worth"))
+
+
+def _letter_positions(text: str) -> tuple[list[int], str]:
+    """Where each a-z letter of ``text`` sits, and those letters lower-cased."""
+    positions = [i for i, ch in enumerate(text)
+                 if len(ch.casefold()) == 1 and "a" <= ch.casefold() <= "z"]
+    return positions, "".join(text[i].casefold() for i in positions)
+
+
+def _explained(rest: str, others) -> bool:
+    """True when ``rest`` is the person's other name parts, an initial aside."""
+    removed = False
+    for other in sorted(others, key=len, reverse=True):
+        if len(other) >= 2 and other in rest:
+            rest = rest.replace(other, "")
+            removed = True
+    return removed and len(rest) <= 1
+
+
+def _glued_at_edge(text: str, part: str, others) -> bool:
+    """Whether ``part`` opens or closes the word ``text`` as a name glued on.
+
+    OCR loses the spaces in a line - "NATHANCBLACKBURN", "fromBlackburn",
+    "BLACKBURN.LAW" - but a name at the start of a longer word is as often
+    just the start of that word: "Stevenson", "Granted", "Whitehall". The
+    name counts when something shows a join: a mark or a digit between it and
+    the rest, a change of case ("StevenGrant"), the rest being the person's
+    other names, or an "s" a lost apostrophe left ("Garcias"). In a word with
+    no case to go by - all capitals, as statements print - the name counts
+    unless the rest is an ending that makes it an ordinary word.
+    """
+    positions, letters = _letter_positions(text)
+    if len(letters) <= len(part):
+        return False
+    cased = any(ch.isupper() for ch in text) and any(ch.islower() for ch in text)
+    for at_start in (True, False):
+        if at_start:
+            if not letters.startswith(part):
+                continue
+            rest = letters[len(part):]
+            inner, outer = positions[len(part) - 1], positions[len(part)]
+            case_break = text[inner].islower() and text[outer].isupper()
+        else:
+            if not letters.endswith(part):
+                continue
+            cut = len(letters) - len(part)
+            rest = letters[:cut]
+            inner, outer = positions[cut], positions[cut - 1]
+            case_break = text[inner].isupper() and text[outer].islower()
+        if abs(inner - outer) > 1 or case_break:
+            return True                          # a mark, a digit or a case change
+        if at_start and rest == "s":
+            return True                          # "Garcia's" with the apostrophe lost
+        if _explained(rest, others):
+            return True
+        if not cased and not (at_start and rest in _WORD_ENDINGS):
+            return True
+    return False
+
+
+def _people_parts(store: MappingStore, settings: Settings) -> list:
+    """(entity, [name parts as bare lowercase letters]) for each ticked person."""
     people = []
     for entity in store.persons():
         if not entity.enabled or not settings.category_enabled(entity.category):
@@ -929,6 +1128,55 @@ def _glued_names(words, store: MappingStore, settings: Settings):
                 for piece in (person.first, *person.middles, person.last)
                 for bit in re.split(r"[-\s]", piece or "")]
         people.append((entity, [b for b in bits if b]))
+    return people
+
+
+def _no_glued_names(say: str, store: MappingStore, settings: Settings) -> str:
+    """A rewritten OCR word with any name still glued inside it replaced too.
+
+    A pattern replaces only its own span of a word, and OCR glues a whole ACH
+    line into one: "Clover/iservSettlement2403211971540395BLACKBURNLAW.PLLC"
+    came back as "…[CARD-1]BLACKBURNLAW.PLLC", drawn on the page and written
+    into the text layer with the surname in it.
+    """
+    for entity, bits in _people_parts(store, settings):
+        others = list(bits)
+        for bit in bits:
+            if len(bit) < GLUED_NAME_MIN or bit not in say.casefold():
+                continue
+            stand_in = _stand_in_part(entity, bit) or engine.REDACTION_TEXT
+            pattern = re.compile(rf"(?i)(?<![a-z]){re.escape(bit)}|{re.escape(bit)}(?![a-z])")
+
+            def swap(m, say=say, bit=bit, stand_in=stand_in):
+                # the run of letters the name sits in: a whole word is the
+                # name; a longer one only when the name is glued on, so a
+                # "Whitehall" beside a replaced name is not made "Daalhall"
+                lo, hi = m.start(), m.end()
+                while lo > 0 and say[lo - 1].isalpha():
+                    lo -= 1
+                while hi < len(say) and say[hi].isalpha():
+                    hi += 1
+                if (lo, hi) != (m.start(), m.end()) and not _glued_at_edge(
+                        say[lo:hi], bit, [o for o in others if o != bit]):
+                    return m.group(0)
+                return _names.match_case(m.group(0), stand_in)
+            say = pattern.sub(swap, say)
+            # A change of case is a join as plain as a mark: "Transfer
+            # HARRINGTONENTERPRISES" read as one word keeps the surname in its
+            # middle, with letters on both sides.
+            say = _case_joined(bit).sub(
+                lambda m, stand_in=stand_in: _names.match_case(m.group(0), stand_in), say)
+    return say
+
+
+def _case_joined(bit: str) -> re.Pattern:
+    """``bit`` in capitals or capitalised, straight after a lowercase letter."""
+    return re.compile(rf"(?<=[a-z])(?:{re.escape(bit.upper())}|{re.escape(bit.capitalize())})")
+
+
+def _glued_names(words, store: MappingStore, settings: Settings):
+    """(hit, rect) for every OCR token that carries a person's name glued in."""
+    people = _people_parts(store, settings)
     if not people:
         return []
     out = []
@@ -939,12 +1187,15 @@ def _glued_names(words, store: MappingStore, settings: Settings):
         best, score = None, 0
         for entity, bits in people:
             if not any(len(b) >= GLUED_NAME_MIN and len(letters) > len(b)
-                       and (letters.startswith(b) or letters.endswith(b)) for b in bits):
+                       and (letters.startswith(b) or letters.endswith(b))
+                       and _glued_at_edge(text, b, [o for o in bits if o != b])
+                       for b in bits):
                 continue
             explained = sum(len(b) for b in bits if b in letters)
             if explained > score:
                 best, score = entity, explained
         if best is None:
+            out.extend(_name_inside(x0, y0, x1, y1, text, people))
             continue
         rect = pymupdf.Rect(x0, y0, x1, y1) + (-OCR_BOX_PADDING, -OCR_BOX_PADDING,
                                                 OCR_BOX_PADDING, OCR_BOX_PADDING)
@@ -952,6 +1203,127 @@ def _glued_names(words, store: MappingStore, settings: Settings):
         out.append((Hit(0, len(text), text, best.category, replacement or engine.REDACTION_TEXT,
                         best.key, engine.FUZZY_PRIORITY), rect))
     return out
+
+
+def _name_inside(x0, y0, x1, y1, text: str, people) -> list:
+    """A name inside a longer run OCR glued together, at a boundary it keeps.
+
+    A photographed ACH line came back from one engine as a single word -
+    "RockyMountainPowerUtility2404039000000000BLACKBURNLAW.PLLC" - with the
+    household surname in the middle, after the company ID's digits. Only that
+    name's share of the word is covered: the merchant at the front stays.
+    The name has to touch a digit or a mark on one side - the word's own
+    edges are :func:`_glued_names`' business - so a surname is not found
+    inside an unrelated longer word.
+    """
+    out = []
+    width = (x1 - x0) / max(len(text), 1)
+    for entity, bits in people:
+        for bit in bits:
+            if len(bit) < GLUED_NAME_MIN:
+                continue
+            pattern = re.compile(rf"(?i)(?<=[^a-z]){re.escape(bit)}|{re.escape(bit)}(?=[^a-z])")
+            matches = list(pattern.finditer(text)) + [
+                m for m in _case_joined(bit).finditer(text)
+                if not any(m.start() == n.start() for n in pattern.finditer(text))]
+            for match in matches:
+                rect = pymupdf.Rect(x0 + width * (match.start() - 1), y0,
+                                    x0 + width * (match.end() + 1), y1)
+                rect = (rect & pymupdf.Rect(x0, y0, x1, y1)) + (
+                    -OCR_BOX_PADDING, -OCR_BOX_PADDING, OCR_BOX_PADDING, OCR_BOX_PADDING)
+                stand_in = _stand_in_part(entity, bit)
+                out.append((Hit(match.start(), match.end(), match.group(0), entity.category,
+                                _names.match_case(match.group(0), stand_in)
+                                if stand_in else engine.REDACTION_TEXT,
+                                entity.key, engine.FUZZY_PRIORITY), rect))
+    return out
+
+
+def _loosely(letters: str, part: str) -> bool:
+    """A word beside a name OCR read that may be the rest of that name misread.
+
+    Looser than :func:`_misread_name`, because the place is already known:
+    the same first letter, and no more than a third of the letters wrong. An
+    initial must be that letter.
+    """
+    if len(part) < 3:
+        return letters == part
+    allowance = max(1, len(part) // 3)
+    return (bool(letters) and letters[0] == part[0]
+            and _distance(letters, part, allowance) <= allowance)
+
+
+def _name_tails(text: str, spans, hits: list[Hit], store: MappingStore,
+                settings: Settings) -> list[Hit]:
+    """Hits for the rest of a name, beside a part of it a hit already found.
+
+    On a photographed statement "Online Transfer to Kyle D Harrington" came
+    back from one engine as "Kyle D Haningion": "Kyle D" matched, the misread
+    surname matched nothing, and the page went out reading "Ezra Oskar
+    Harrington". Once any part of a person's name is found on a scan, the
+    words either side of it, on the same line and running on from it, are
+    tested against the parts not yet found - each in turn, outward, until one
+    is not one of them.
+    """
+    out: list[Hit] = []
+    for hit in hits:
+        entity = store.entities.get(hit.entity_key)
+        if entity is None or not entity.is_person or entity.person is None:
+            continue
+        if not entity.enabled or not settings.category_enabled(entity.category):
+            continue
+        person = entity.person
+        said = set(re.findall(r"[a-z]+", hit.text.casefold()))
+        missing = [bit for bit in (re.sub(r"[^a-z]", "", (piece or "").casefold())
+                                   for piece in (person.first, *person.middles, person.last))
+                   if bit and bit not in said]
+        touched = [i for i, (start, end, _r) in enumerate(spans)
+                   if start < hit.end and hit.start < end]
+        if not missing or not touched:
+            continue
+        for step, edge in ((1, touched[-1]), (-1, touched[0])):
+            index = edge + step
+            while missing and 0 <= index < len(spans):
+                start, end, rect = spans[index]
+                near = spans[index - step][2]
+                gap = (rect.x0 - near.x1) if step > 0 else (near.x0 - rect.x1)
+                overlap = min(near.y1, rect.y1) - max(near.y0, rect.y0)
+                if overlap <= 0.5 * min(near.height, rect.height) or \
+                        gap > 2.0 * max(near.height, rect.height):
+                    break                           # another line, or another column
+                word = text[start:end]
+                letters = re.sub(r"[^a-z]", "", word.casefold())
+                part = next((bit for bit in missing if _loosely(letters, bit)), None)
+                if part is None:
+                    break
+                missing.remove(part)
+                stand_in = _stand_in_part(entity, part)
+                out.append(Hit(start, end, word, entity.category,
+                               _names.match_case(word, stand_in) if stand_in
+                               else engine.REDACTION_TEXT, entity.key, engine.FUZZY_PRIORITY))
+                index += step
+    return out
+
+
+def _stand_in_part(entity, bit: str) -> str:
+    """The stand-in's matching name part: a surname for a surname."""
+    person, surrogate = entity.person, entity.surrogate
+    if person is None or surrogate is None:
+        return ""
+    for real, fake in ((person.last, surrogate.last), (person.first, surrogate.first),
+                       *zip(person.middles, surrogate.middles)):
+        if real and re.sub(r"[^a-z]", "", real.casefold()) == bit:
+            return fake or ""
+    return surrogate.last or ""
+
+
+def _covered(rect: pymupdf.Rect, boxes: list[pymupdf.Rect]) -> float:
+    """The share of ``rect`` that ``boxes`` cover (overlaps between boxes
+    counted twice, so this can only overstate)."""
+    area = rect.get_area()
+    if area <= 0:
+        return 1.0
+    return min(1.0, sum((rect & box).get_area() for box in boxes if rect.intersects(box)) / area)
 
 
 def _plan_edits(word_sets: list[list], store, anon_settings, matcher, settings,
@@ -980,15 +1352,28 @@ def _plan_edits(word_sets: list[list], store, anon_settings, matcher, settings,
 
     for words in word_sets:
         for text, spans in _readings(words):
-            hits = engine.scan_text(text, store, anon_settings, matcher)
+            hits = list(engine.scan_text(text, store, anon_settings, matcher))
+            if ocr:
+                hits += _name_tails(text, spans, hits, store, settings)
             for run, run_hits in _runs(hits, spans):
                 words_in = [rect for _s, _e, rect in run]
                 fresh = claim(words_in)
                 if not fresh:
+                    # Taken by overlap is not taken whole. The other engine
+                    # read "SOURCE ***7039" as one wide word; the first read
+                    # "SOURCE" and a garbled "**+#7039", and its edit to
+                    # "SOURCE" counted the wide word as claimed - so the
+                    # masked digits it held were never covered at all.
+                    bare = [rect for rect in words_in if _covered(rect, claimed) < 0.9]
+                    if bare:
+                        edits.append(_Edit(bare, "", run_hits[0]))
+                        counted.extend(h for h in run_hits if h not in counted)
                     continue
                 counted.extend(h for h in run_hits if h not in counted)
                 if len(fresh) == len(words_in):
                     say = _rewrite(text, run, run_hits)
+                    if ocr:
+                        say = _no_glued_names(say, store, settings)
                 else:
                     say, words_in = "", fresh
                 edits.append(_Edit(words_in, say, run_hits[0]))
@@ -1155,9 +1540,10 @@ def _ocr_layer(word_sets: list[list], edits: list[_Edit],
 def _anonymize_scan(page, word_sets, store, anon_settings, matcher, settings,
                     report: PageReport, result: PdfResult, document_label: str) -> None:
     """A scanned page: white out each hit, write its replacement, add a text layer."""
+    before = len(result.hits)          # result.hits runs across the whole document
     edits = _plan_edits(word_sets, store, anon_settings, matcher, settings, result,
                         document_label, ocr=True)
-    report.hits = len(result.hits)
+    report.hits = len(result.hits) - before
     marks = _white_out(page, page.rect, word_sets, edits, report)
     if report.boxes:
         page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_PIXELS,
@@ -1169,12 +1555,18 @@ def _anonymize_scan(page, word_sets, store, anon_settings, matcher, settings,
             "blacked out.")
 
 
-def _white_out(page, region, word_sets, edits, report: PageReport) -> list[pymupdf.Rect]:
+def _white_out(page, region, word_sets, edits, report: PageReport,
+               extra=(), read=()) -> list[pymupdf.Rect]:
     """Queue the redactions for one OCR'd region: white under each replacement,
-    black over every patch of unread ink. Returns the black boxes."""
+    black over every patch of unread ink. Returns the black boxes.
+
+    ``extra`` is more to white out - the picture under a text-layer edit that
+    sits over an image. ``read`` is ink already accounted for - the image under
+    a page's own text layer - which is never mistaken for handwriting.
+    """
     pad = (-OCR_BOX_PADDING, -OCR_BOX_PADDING, OCR_BOX_PADDING, OCR_BOX_PADDING)
-    cleared = [_union(edit.words) + pad for edit in edits]
-    marks = _unread_ink(page, region, word_sets, cleared)
+    cleared = [_union(edit.words) + pad for edit in edits] + list(extra)
+    marks = _unread_ink(page, region, word_sets, cleared + list(read))
     for rect in cleared:
         page.add_redact_annot(rect, fill=(1, 1, 1), cross_out=False)
         report.boxes += 1
@@ -1203,8 +1595,27 @@ def _ocr_region(page: pymupdf.Page, rect: pymupdf.Rect, engines) -> list[list]:
     return sets
 
 
+# An OCR word this much covered by the page's own words is one the text layer
+# already holds - see :func:`_anonymize_images`.
+LIVE_COVER = 0.5
+
+
+def _covered(rect: pymupdf.Rect, by) -> float:
+    """The share of ``rect`` that the rectangles ``by`` lie over."""
+    area = rect.get_area()
+    if area <= 0:
+        return 0.0
+    total = 0.0
+    for other in by:
+        overlap = rect & other
+        if not overlap.is_empty:
+            total += overlap.get_area()
+    return min(total / area, 1.0)
+
+
 def _anonymize_images(page, store, anon_settings, matcher, settings, report: PageReport,
-                      result: PdfResult, document_label: str) -> list[tuple]:
+                      result: PdfResult, document_label: str,
+                      live_words=(), live_edits=()) -> list[tuple]:
     """Images on a text page: their text anonymized like a scan's, or replaced.
 
     Each image is read by OCR. One that holds text - a pasted statement, a
@@ -1213,7 +1624,24 @@ def _anonymize_images(page, store, anon_settings, matcher, settings, report: Pag
     signature - is whited out whole and marked [IMAGE]. With no OCR engine an
     image is blacked out, as when redacting. Returns the pieces to draw once
     the redactions are applied.
+
+    The region is OCR'd as it renders, so it reads the page's own text too
+    wherever that lies over the image - every word of a searchable scan's
+    hidden layer, and every word printed over a tinted background. Those
+    words are the text layer's business (``live_words``; its edits are
+    ``live_edits``): anonymizing them again here wrote each line into the text
+    layer twice and drew every replacement twice. So an OCR word the page's
+    own words cover is left out of the plan and the OCR layer; it still
+    counts as read ink, and the picture under a text-layer edit is whited out
+    in full, so the name in the image goes with the name in the text.
+
+    These boxes clear pixels only (PDF_REDACT_TEXT_NONE): the page's own text
+    is the text layer's to remove, and a box padded for an approximate OCR
+    word must not take a neighbouring line of it with it.
     """
+    live_words = [pymupdf.Rect(w[:4]) for w in live_words]
+    pad = (-OCR_BOX_PADDING, -OCR_BOX_PADDING, OCR_BOX_PADDING, OCR_BOX_PADDING)
+    queued = report.boxes
     engines = ocr.usable_engines() if settings.ocr_scanned_pdfs else []
     plan: list[tuple] = []
     read_any = False
@@ -1241,11 +1669,27 @@ def _anonymize_images(page, store, anon_settings, matcher, settings, report: Pag
                              rect.y0 + (rect.height + size) / 2, IMAGE_PLACEHOLDER,
                              -(rect.width - 4.0)))
                 continue
-            edits = _plan_edits(sets, store, anon_settings, matcher, settings, result,
+            live_here = [w for w in live_words if w.intersects(rect)]
+            fresh = [[w for w in words
+                      if _covered(pymupdf.Rect(w[:4]), live_here) < LIVE_COVER]
+                     for words in sets]
+            edited = [e + pad for e in live_edits if e.intersects(rect)]
+            # the picture of an edited word, wherever the OCR boxed it - but
+            # only a word mostly inside the edit: one engine boxes a whole
+            # line as one "word", and whiting that out took the figures too
+            edited += [pymupdf.Rect(w[:4]) + pad for words in sets for w in words
+                       if w[4].strip() and _covered(pymupdf.Rect(w[:4]), edited) >= LIVE_COVER]
+            edited = [(e & rect) for e in edited]
+            edits = _plan_edits(fresh, store, anon_settings, matcher, settings, result,
                                 document_label, ocr=True)
-            marks = _white_out(page, rect, sets, edits, report)
-            plan.extend(_ocr_layer(sets, edits, marks))
+            marks = _white_out(page, rect, sets, edits, report,
+                               extra=[e for e in edited if not e.is_empty], read=live_here)
+            plan.extend(_ocr_layer(fresh, edits, marks))
             inked += len(marks)
+    if report.boxes > queued:
+        page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_PIXELS,
+                              graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
+                              text=pymupdf.PDF_REDACT_TEXT_NONE)
     result.images_redacted += report.images_redacted
     if read_any:
         result.warnings.append(
@@ -1264,14 +1708,15 @@ def _anonymize_page(page, words, store, anon_settings, matcher, settings,
     else did. No word is ever written twice, and none is ever left.
     """
     trace = page.get_texttrace()             # the page's text as drawn, before any edit
+    before = len(result.hits)                # result.hits runs across the whole document
     edits = _plan_edits([words], store, anon_settings, matcher, settings, result,
                         document_label)
-    report.hits = len(result.hits)
 
-    spans = [span for block in page.get_text("dict")["blocks"]
-             for line in block.get("lines", []) for span in line["spans"]]
+    spans = _page_spans(page)
+    turned = _turned_lines(page)
     rows = _row_groups(words)
     planned: list[tuple[_Edit, dict, float]] = []
+    boxes: list[tuple[pymupdf.Rect, object]] = []
     for edit in edits:
         line = _union(edit.words)
         span = _span_at(spans, edit.words[0])
@@ -1282,18 +1727,26 @@ def _anonymize_page(page, words, store, anon_settings, matcher, settings,
                  and not any(_same_word(pymupdf.Rect(w[:4]), e) for e in edit.words)]
         limit = (min(after) - 2.0) if after else max(line.x1, page.rect.x1 - 18.0)
         limit = max(limit, line.x1)
-        rotated = span is not None and tuple(span.get("dir", (1, 0))) != (1.0, 0.0)
-        page.add_redact_annot(_inset(line, BOX_PADDING),
-                              fill=(0, 0, 0) if rotated else False, cross_out=False)
-        report.boxes += 1
+        direction = tuple(span["dir"]) if span is not None else _direction_at(turned, line)
+        rotated = _axis(direction) != "across" or direction[0] < 0
+        # sideways or upside-down text cannot take a level replacement: it is
+        # boxed in black, the box shaped to the way the text runs
+        boxes.append((_box(line, BOX_PADDING, direction), (0, 0, 0) if rotated else False))
         if edit.text and span is not None and not rotated:
             planned.append((edit, span, limit))
 
+    # images first, with the page's text still on it, so OCR reads the picture
+    # as a person sees it; their own boxes clear pixels only
     image_plan = (_anonymize_images(page, store, anon_settings, matcher, settings,
-                                    report, result, document_label)
+                                    report, result, document_label, live_words=words,
+                                    live_edits=[_union(e.words) for e in edits])
                   if settings.redact_images else [])
 
-    if report.boxes:
+    for rect, fill in boxes:
+        page.add_redact_annot(rect, fill=fill, cross_out=False)
+        report.boxes += 1
+    report.hits = len(result.hits) - before
+    if boxes:
         # keep the table rules and row shading the replacement sits on
         page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_PIXELS,
                               graphics=pymupdf.PDF_REDACT_LINE_ART_NONE)
@@ -1309,9 +1762,11 @@ def _anonymize_page(page, words, store, anon_settings, matcher, settings,
     # already gone; the replacements are written on top instead, which reads
     # right on the page and to a parser that orders by position, but a parser
     # that reads in file order finds them at the end of the page.
-    result.warnings.append(
-        f"page {report.number}: replacements were added on top of the page rather than "
-        "in its text order; a parser that reads in file order finds them at the end of the page.")
+    if planned:
+        result.warnings.append(
+            f"page {report.number}: replacements were added on top of the page rather than "
+            "in its text order; a parser that reads in file order finds them at the end of "
+            "the page.")
     for edit, span, limit in planned:
         _write(page, edit, span, limit)
     _draw_plan(page, image_plan)
@@ -1416,6 +1871,24 @@ def _draw_plan(page: pymupdf.Page, plan: list[tuple]) -> None:
     flush()
 
 
+def _moved(previous, char, size: float) -> bool:
+    """True when ``char`` is not set straight on from ``previous``.
+
+    One span of the text trace is one text object, and a text object is not
+    one line: a generator writes a whole statement header as one BT ... ET,
+    moving down with T* or Td between lines, and a table puts each cell with
+    a Td of its own. Drawn from its first character's origin as one run, a
+    span like that put every line on the first line's baseline - "Statement
+    period 01/31/2025Account holder: ..." - and pushed a date off the right
+    edge of the page. A new baseline, a step back, or a jump forward of more
+    than a word space starts a new piece, drawn at its own origin.
+    """
+    if abs(char[2][1] - previous[2][1]) > 0.01 * max(size, 1.0):
+        return True
+    gap = char[2][0] - previous[3][2]
+    return gap < -0.25 * size or gap > 0.5 * size
+
+
 def _rebuild(page: pymupdf.Page, trace: list[dict], edits: list[_Edit],
              limits: dict[int, float]) -> bool:
     """Rewrite the page's text in its original drawing order, edits in place.
@@ -1455,17 +1928,21 @@ def _rebuild(page: pymupdf.Page, trace: list[dict], edits: list[_Edit],
             # a fragment that is only the space after a replaced word draws
             # nothing, and drawn alone it reads as a blank line to a parser
             if run and "".join(chr(c[0]) for c in run).strip():
-                # split where the standard faces stop being able to encode it,
-                # so only a "■" itself, not its whole line, changes face
+                # Split where the standard faces stop being able to encode it,
+                # so only a "■" itself, not its whole line, changes face - and
+                # wherever the text moves: see :func:`_moved`.
                 pieces: list[list] = []
                 for char in run:
                     fits = _encodable(chr(char[0]))
-                    if pieces and _encodable(chr(pieces[-1][0][0])) == fits:
+                    if (pieces and _encodable(chr(pieces[-1][0][0])) == fits
+                            and not _moved(pieces[-1][-1], char, size)):
                         pieces[-1].append(char)
                     else:
                         pieces.append([char])
                 for piece in pieces:
                     text = "".join(chr(c[0]) for c in piece)
+                    if not text.strip():
+                        continue
                     width = piece[-1][3][2] - piece[0][3][0]
                     plan.append((font, size, colour, render, piece[0][2][0], piece[0][2][1],
                                  text, width))
@@ -1520,6 +1997,55 @@ def _rebuild(page: pymupdf.Page, trace: list[dict], edits: list[_Edit],
     return True
 
 
+def _remove_off_page_text(page: pymupdf.Page) -> int:
+    """Remove text drawn past the page's edge, and any word the edge cuts.
+
+    Text extraction stops at the page's edge, so nothing outside it is ever
+    scanned - but it is still in the file, and a parser that does not clip
+    reads it. A line set up the margin ran off the top of the page: "Statement
+    for Oakley V Ward acct 3357 3537 2072" was read as far as "acct 3357 3",
+    the account number never matched, and "3537 2072" shipped in the content
+    stream with the half-visible "3" on the page. A character whose centre
+    lies outside the page goes, and so does the rest of its word, so no
+    fragment of a value is left at the edge for anybody to read. Returns how
+    many characters went.
+    """
+    # the trace, like the words, is in the unrotated page's coordinates
+    visible = page.rect * page.derotation_matrix
+    marked: list[pymupdf.Rect] = []
+    for span in page.get_texttrace():
+        chars = span.get("chars", ())
+        if not chars:
+            continue
+        outside = [not visible.contains(pymupdf.Point((c[3][0] + c[3][2]) / 2,
+                                                      (c[3][1] + c[3][3]) / 2))
+                   for c in chars]
+        if not any(outside):
+            continue
+        take = list(outside)
+        # widen to whole words: a word the edge cuts is a fragment of a value
+        start = 0
+        for end in range(len(chars) + 1):
+            if end == len(chars) or chr(chars[end][0]).isspace():
+                if any(outside[start:end]):
+                    take[start:end] = [True] * (end - start)
+                start = end + 1
+        for char, gone in zip(chars, take):
+            if gone and not chr(char[0]).isspace():
+                box = pymupdf.Rect(char[3])
+                # the middle of the character: enough to remove it, too
+                # little to reach a neighbouring line's taller boxes
+                marked.append(box + (box.width / 4, box.height / 4,
+                                     -box.width / 4, -box.height / 4))
+    if not marked:
+        return 0
+    for rect in marked:
+        page.add_redact_annot(rect, fill=False, cross_out=False)
+    page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE,
+                          graphics=pymupdf.PDF_REDACT_LINE_ART_NONE)
+    return len(marked)
+
+
 def process(
     source: Path,
     output: Path,
@@ -1550,6 +2076,8 @@ def process(
         image_only_pages: list[int] = []
         ocr_failed_pages: list[int] = []
         ocr_pages_delivered = False
+        anonymized_scans = 0
+        boxed_scans: list[int] = []      # rotated scans, redacted in anonymize mode
         for index, page in enumerate(doc):
             report = PageReport(number=index + 1)
 
@@ -1557,6 +2085,13 @@ def process(
                 removed, links = _strip_page_extras(page)
                 result.annotations_removed += removed
                 result.links_removed += links
+
+            removed_off_page = _remove_off_page_text(page)
+            if removed_off_page:
+                result.warnings.append(
+                    f"page {index + 1}: {removed_off_page} character(s) of text printed past "
+                    "the edge of the page were removed - nothing on the page shows them, "
+                    "so they could not be checked, but a parser would still read them.")
 
             word_sets = [page.get_text("words")]
             page_text = page.get_text("text")
@@ -1597,15 +2132,23 @@ def process(
                 _anonymize_scan(page, word_sets, store, anon_settings, matcher,
                                 settings, report, result, document_label)
                 anonymized_pages += 1
+                anonymized_scans += 1
                 result.pages.append(report)
                 continue
+            if anonymize:
+                boxed_scans.append(index + 1)
 
             hits = []
             boxed: list = []
             readings = [reading for words in word_sets for reading in _readings(words)]
+            turned = [] if report.ocr_used else _turned_lines(page)
             for text, spans in readings:
-                for hit in engine.scan_text(text, store, redact_settings, matcher):
-                    rects = _rects_for_hit(hit, spans, padding, ocr=report.ocr_used)
+                found = list(engine.scan_text(text, store, redact_settings, matcher))
+                if report.ocr_used:
+                    found += _name_tails(text, spans, found, store, settings)
+                for hit in found:
+                    rects = _rects_for_hit(hit, spans, padding, ocr=report.ocr_used,
+                                           turned=turned)
                     # the second reading finds most things the first did; count
                     # each place once, so the report and review counts hold
                     if rects and all(any(r in b for b in boxed) for r in rects):
@@ -1703,11 +2246,19 @@ def process(
             result.output = None
             return result
 
-        if anonymize and ocr_pages_delivered:
+        if anonymize and anonymized_scans:
             result.warnings.append(
                 "Scanned pages were anonymized from their OCR: each name or number is "
                 "whited out and replaced, and the page's text added beneath it so a "
                 "parser can read it.")
+        if boxed_scans:
+            # a rotated scan keeps the redact path, so saying it was anonymized
+            # would describe replacements that are not on it
+            result.warnings.append(
+                f"page{'s' if len(boxed_scans) > 1 else ''} "
+                f"{', '.join(str(n) for n in boxed_scans)}: rotated scan"
+                f"{'s' if len(boxed_scans) > 1 else ''} redacted rather than anonymized - "
+                "each name or number is blacked out, with no replacement and no text layer.")
         if ocr_pages_delivered:
             result.warnings.append(
                 "Some pages are scans read by OCR. Machine-printed text on them was "

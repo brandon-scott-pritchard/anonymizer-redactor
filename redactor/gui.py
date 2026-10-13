@@ -16,7 +16,10 @@ import queue
 import secrets
 import string
 import subprocess
+import atexit
+import shutil
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -29,7 +32,7 @@ from tkinter import ttk
 import webbrowser
 
 from . import (__version__, caption, categories, feedback, grouping, names as _names, ner,
-               officials, pdf_processor, pipeline, review)
+               officials, pdf_processor, photo, pipeline, review)
 from .engine import Settings
 from .mapping import MappingStore
 from .review import REVIEW_INSTRUCTIONS, review_note
@@ -263,6 +266,8 @@ class App(Tk):
 
         self.files: list[Path] = []
         self.relative: dict[Path, str] = {}     # a file's place in an added folder
+        self.sources: dict[Path, Path] = {}     # what was chosen -> what is processed
+        self._photo_dir: Path | None = None     # photos made into PDFs
         self.skipped: list[str] = []            # what added folders held besides documents
         self.store = MappingStore()
         self.caption_names: list[caption.CaptionName] = []
@@ -684,19 +689,19 @@ class App(Tk):
 
     # ------------------------------------------------------------- files --
     def add_files(self):
+        photos = " ".join(f"*{suffix}" for suffix in sorted(photo.SUFFIXES))
         chosen = filedialog.askopenfilenames(
             title="Choose documents",
-            filetypes=[("Word and PDF", "*.docx *.pdf"), ("Word", "*.docx"),
-                       ("PDF", "*.pdf"), ("All files", "*.*")],
+            filetypes=[("Word, PDF and photos", f"*.docx *.pdf {photos}"), ("Word", "*.docx"),
+                       ("PDF", "*.pdf"), ("Photos and screenshots", photos),
+                       ("All files", "*.*")],
         )
         added = 0
         for raw in chosen:
             path = Path(raw)
             if pipeline.classify(path) is None:
                 continue
-            if path not in self.files:
-                self.files.append(path)
-                added += 1
+            added += self._take(path, path.name)
         self._refresh_files()
         if added:
             self.status.set(f"{len(self.files)} document(s) selected.")
@@ -713,25 +718,45 @@ class App(Tk):
         gathered = pipeline.gather([Path(chosen)])
         added = 0
         for path, relative in gathered.files:
-            if path not in self.files:
-                self.files.append(path)
-                self.relative[path] = relative
-                added += 1
+            added += self._take(path, relative)
         self.skipped.extend(s for s in gathered.skipped if s not in self.skipped)
         self._refresh_files()
         note = (f"  {len(gathered.skipped)} other file(s) in it will be left out - "
-                "not PDF or Word; the run report lists them." if gathered.skipped else "")
+                "not documents or photos; the run report lists them." if gathered.skipped else "")
         self.status.set(f"{added} document(s) added from {Path(chosen).name}.{note}")
+
+    def _take(self, path: Path, relative: str) -> int:
+        """Add one file; a photo is made into a PDF first. 1 if added."""
+        if path in self.sources:
+            return 0
+        document = path
+        if pipeline.classify(path) == "image":
+            if self._photo_dir is None:
+                self._photo_dir = Path(tempfile.mkdtemp(prefix="anonymizer-photos-"))
+                # unredacted copies of the client's photos: gone when the app is
+                atexit.register(shutil.rmtree, self._photo_dir, True)
+            try:
+                document = pipeline.as_document(path, self._photo_dir)
+            except Exception:
+                self.skipped.append(f"{relative} (could not be read as an image)")
+                return 0
+        self.files.append(document)
+        self.relative[document] = relative
+        self.sources[path] = document
+        return 1
 
     def remove_files(self):
         for index in sorted(self.file_list.curselection(), reverse=True):
-            self.relative.pop(self.files[index], None)
+            document = self.files[index]
+            self.relative.pop(document, None)
+            self.sources = {k: v for k, v in self.sources.items() if v != document}
             del self.files[index]
         self._refresh_files()
 
     def clear_files(self):
         self.files.clear()
         self.relative.clear()
+        self.sources.clear()
         self.skipped.clear()
         self._refresh_files()
 
@@ -1336,7 +1361,7 @@ class App(Tk):
 
         if result.skipped:
             self._log(f"{len(result.skipped)} other file(s) in the folders were left out - "
-                      "not PDF or Word. The report lists them.")
+                      "not documents or photos. The report lists them.")
 
         failures = result.failed
         if failures:

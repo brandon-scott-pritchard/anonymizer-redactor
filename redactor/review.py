@@ -122,6 +122,10 @@ def retype_entity(store: MappingStore, entity: Entity, new_category: str) -> Ent
         existing.occurrences += entity.occurrences
         existing.documents |= entity.documents
         del store.entities[entity.key]
+        if store.grouped:
+            # its forms pointed at the deleted row: regroup, or they vanish
+            # from both review lists while still being applied
+            grouping.group(store)
         return existing
     del store.entities[entity.key]
     if categories.style_for(new_category) == "person":
@@ -177,13 +181,15 @@ def carry_decisions(store: MappingStore,
             if moved is not None:
                 entity = moved
         # restore an edited replacement, but never mint a duplicate
-        # placeholder if numbering shifted between scans
-        if (replacement and replacement != entity.replacement
+        # placeholder if numbering shifted between scans. It belongs to the
+        # group: if a rescan made another form its head, the edit goes there.
+        target = grouping.head_of(store, entity) if entity.parent else entity
+        if (replacement and replacement != target.replacement
                 and category == entity.category
                 and replacement not in taken):
-            entity.replacement = replacement
-            if entity.is_person and entity.surrogate is not None:
-                entity.surrogate = _names.parse(replacement)
+            target.replacement = replacement
+            if target.is_person and target.surrogate is not None:
+                target.surrogate = _names.parse(replacement)
         entity.enabled = enabled
     grouping.sync(store)
 

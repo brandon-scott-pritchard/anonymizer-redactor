@@ -443,6 +443,13 @@ def _company_any_form(value: str) -> re.Pattern | None:
     ANALYTICS INC" on the W-2 and "Silicon Slopes Analytics" in the bank's
     deposit line. Two words of name at least: one alone - "Pingo" - is too
     often a merchant's name as well.
+
+    A name of two words is matched only in a capitalisation a name is written
+    in - as entered, in capitals, or each word capitalised - because two words
+    are short enough to be ordinary prose: the employer "Best Buy Co., Inc."
+    otherwise matched "the best buy of the year". And the apostrophe may be
+    dropped, as a card processor drops it: "Smith's Food & Drug" posts as
+    "SMITHS FOOD AND DRUG".
     """
     words = re.findall(r"[A-Za-z0-9']+", value.replace("&", " and "))
     core = [w for w in words
@@ -452,8 +459,17 @@ def _company_any_form(value: str) -> re.Pattern | None:
         core.pop()
     if len(core) < 2 or sum(len(w) for w in core) < 6:
         return None
-    pieces = [r"(?:and|&)" if w.casefold() == "and" else _names.escape_token(w) for w in core]
-    body = r"[\s,.\-]+".join(pieces)
+    def joined(ws: list[str]) -> str:
+        return r"[\s,.\-]+".join(
+            rf"(?:{re.escape(w)}|&)" if w.casefold() == "and"
+            else _names.escape_token(w).replace("['’]", "['’]?") for w in ws)
+
+    if len(core) <= 2:
+        forms = dict.fromkeys(tuple(f) for f in (
+            core, [w.upper() for w in core], [w[:1].upper() + w[1:].lower() for w in core]))
+        body = "(?-i:" + "|".join(joined(list(f)) for f in forms) + ")"
+    else:
+        body = joined(core)
     return re.compile(rf"(?<![^\W_])(?<![@.\-])(?:the\s+)?{body}"
                       rf"(?:[\s,]+{_COMPANY_SUFFIX})?(?![^\W_])(?![@\-])", re.IGNORECASE)
 
