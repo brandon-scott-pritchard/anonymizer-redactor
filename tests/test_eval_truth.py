@@ -62,3 +62,32 @@ def test_a_wallet_row_that_names_no_person_is_not_a_counterparty(name):
     truth.collect({"txns": [{"type": "General Payment", "name": name}]}, found, set())
     truth.finalize(found)
     assert not found.people
+
+
+def _scanned_page(cover=None) -> bytes:
+    """A page of pixels with a name and a figure on it, optionally boxed."""
+    pymupdf = pytest.importorskip("pymupdf")
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=200)
+    page.insert_text((60, 80), "Federal Withholding", fontsize=16)
+    page.insert_text((360, 80), "-68.67", fontsize=16)
+    page.insert_text((60, 140), "KAYLA J RUIZ", fontsize=16)
+    if cover is not None:
+        page.draw_rect(pymupdf.Rect(cover), color=(0, 0, 0), fill=(0, 0, 0))
+    pix = page.get_pixmap(dpi=150)
+    scan = pymupdf.open()
+    scan.new_page(width=612, height=200).insert_image(scan[0].rect, stream=pix.tobytes("png"))
+    return scan.tobytes()
+
+
+def test_a_figure_painted_over_on_a_scan_is_counted_and_a_name_box_is_not():
+    """OCR before and after counted every misread as a lost figure; the
+    pixels under the figure cannot be misread."""
+    from eval import corpus_eval
+    from redactor import ocr
+    if not ocr.usable_engines():
+        pytest.skip("no OCR engine")
+    before = _scanned_page()
+    assert not corpus_eval._figures_covered(before, _scanned_page(cover=(55, 120, 200, 148)))
+    lost = corpus_eval._figures_covered(before, _scanned_page(cover=(355, 60, 430, 88)))
+    assert sum(lost.values()) == 1

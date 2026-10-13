@@ -118,6 +118,14 @@ household's pooled secrets.
     ~/.venvs/anonymizer-redactor/bin/python -m eval.corpus_eval CORPUS --out RUN \
         --photos --match "\.(jpg|png)$"
 
+A scan or photo has no text to compare figures against, so "destroyed dollar
+figures" stays at zero for them. `--scan-money` adds "figures painted over on
+scans/photos": the page as received is OCR'd once to find where its figures
+are, and each counts as painted over when a quarter of the pixels under it
+changed. An earlier version OCR'd the output too and compared the readings;
+every misread on either side counted, and it reported thousands of lost
+figures on pages where none were.
+
 ## Reading the report
 
 ```

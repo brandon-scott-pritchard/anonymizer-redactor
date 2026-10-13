@@ -35,6 +35,7 @@ import tempfile
 import time
 import traceback
 import zipfile
+from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict
 from pathlib import Path
@@ -203,6 +204,62 @@ def _output_text(data: bytes, suffix: str, ocr_it: bool) -> str:
         os.unlink(name)
 
 
+# A dollar figure as one OCR word: "$1,204.50", "1,204.50", "-49.21".
+_FIGURE_WORD = re.compile(r"[-+(]?\$?\d[\d,]*\.\d{2}\)?")
+# A pixel counts as changed when it moved this far in grey (0-255): a black
+# box or a white-out moves the page's pixels by well over a hundred, and
+# re-encoding the picture by a few.
+_CHANGED_GREY = 60
+# A figure was touched when this share of its box changed.
+_TOUCHED_SHARE = 0.25
+_FIGURE_DPI = 100
+
+
+def _figures_covered(before: bytes, after: bytes) -> Counter:
+    """Dollar figures on a scan or photo that the run painted over.
+
+    Comparing OCR of the page before and after counted every misread on
+    either side as a lost figure - thousands on a corpus where checking by
+    eye found none. Only the page as received is read here, to find where
+    its figures are; whether each was touched is then measured on the
+    pixels under it, which OCR cannot misread. A page whose size changed is
+    not measured.
+    """
+    import numpy as np
+    import pymupdf
+
+    from redactor import ocr, pdf_processor
+
+    engines = ocr.usable_engines()
+    touched: Counter = Counter()
+    if not engines:
+        return touched
+    with pymupdf.open(stream=before, filetype="pdf") as src, \
+            pymupdf.open(stream=after, filetype="pdf") as out:
+        for index, page in enumerate(src):
+            if index >= len(out) or page.rect != out[index].rect:
+                continue
+            words = pdf_processor._ocr_words(page, engines[0]) or []
+            figures = [w for w in words if _FIGURE_WORD.fullmatch(w[4].strip())]
+            if not figures:
+                continue
+            grey = []
+            for doc_page in (page, out[index]):
+                pix = doc_page.get_pixmap(dpi=_FIGURE_DPI, colorspace=pymupdf.csGRAY)
+                grey.append(np.frombuffer(pix.samples, np.uint8)
+                            .reshape(pix.height, pix.stride)[:, :pix.width].astype(int))
+            if grey[0].shape != grey[1].shape:
+                continue
+            scale = _FIGURE_DPI / 72.0
+            for x0, y0, x1, y1, word, *_rest in figures:
+                box = (slice(max(0, int(y0 * scale)), int(y1 * scale) + 1),
+                       slice(max(0, int(x0 * scale)), int(x1 * scale) + 1))
+                region = np.abs(grey[0][box] - grey[1][box])
+                if region.size and (region > _CHANGED_GREY).mean() >= _TOUCHED_SHARE:
+                    touched[re.sub(r"[^\d,.]", "", word)] += 1
+    return touched
+
+
 def _doc_type(label: dict | None, pdf: Path) -> str:
     if not label:
         return "unlabelled"
@@ -284,12 +341,8 @@ def run_batch(batch_id: str, pdfs: list[str], root: str, out: str, mode: str,
                     entry["destroyed_money"] = dict(truth.destroyed_money(source_text, text))
                     entry["lost_merchants"] = truth.lost_merchants(source_text, text, merchants, secrets)
                 elif scan_money and not docx and pdf.stem in given:
-                    # A scan or photo has no text to compare against, so the
-                    # page as the app received it is OCR'd too. OCR misreads
-                    # on either side make this noisy: it is kept apart from
-                    # the exact count, as a signal of figures boxed off a scan.
-                    before = _output_text(given[pdf.stem].read_bytes(), ".pdf", ocr_it=True)
-                    entry["destroyed_money_ocr"] = dict(truth.destroyed_money(before, text))
+                    entry["destroyed_money_ocr"] = dict(
+                        _figures_covered(given[pdf.stem].read_bytes(), data))
             record["files"].append(entry)
     except Exception as exc:
         record["error"] = f"{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=6)}"
@@ -350,7 +403,7 @@ def main(argv=None) -> int:
     parser.add_argument("--ner", action="store_true", help="ask the spaCy model too")
     parser.add_argument("--keep-outputs", action="store_true")
     parser.add_argument("--scan-money", action="store_true",
-                        help="also OCR each scan or photo as received, to count figures lost on it")
+                        help="also find the figures on each scan or photo as received and count those painted over")
     parser.add_argument("--photos", action="store_true",
                         help="also run the phone photos and screenshots (made into PDFs)")
     args = parser.parse_args(argv)

@@ -92,7 +92,7 @@ def main(argv=None) -> int:
     print(f"destroyed dollar figures {s['money']} in {s['money_files']} files"
           + delta(0, base and f"{base['money']} in {base['money_files']}"))
     if s["scan_money_measured"]:
-        print(f"figures lost on scans/photos (OCR before vs after, noisy) {s['scan_money']} "
+        print(f"figures painted over on scans/photos {s['scan_money']} "
               f"in {s['scan_money_files']} of {s['scan_money_measured']} files")
     if s["fallbacks"]:
         print(f"anonymized pages that fell back to appended text: {s['fallbacks']}")
