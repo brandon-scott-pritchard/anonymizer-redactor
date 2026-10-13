@@ -26,7 +26,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from . import caption, ner, patterns
+from . import caption, ner, patterns, places
 
 # The payment rails and the generic banking verbs. Every one of these except the
 # verbs is already hardcoded in the payment_handle detector in patterns.py, so
@@ -532,6 +532,12 @@ _PO_BOX = re.compile(r"(?i)^\s*(?:P\.?\s?O\.?\s+box|post\s+office\s+box)\b")
 
 def _names_on_line(line: str) -> list[str]:
     """Every name on an addressee line, or nothing if any part is not one."""
+    # A name never spans a column gap. A photographed stub read in rows put
+    # the employee beside the next column's heading - "KAYLA J RUIZ   Current"
+    # - and the two together were proposed as one person, boxed across the
+    # row and through the figure under it. The address block is the first
+    # cell; what lies past the gap is another column's.
+    line = re.split(r"[^\S\n]{3,}", line.strip())[0]
     parts = [" ".join(p.split()).strip(" ,.") for p in _JOINT.split(line.strip())]
     # "Colby & Jess Morgan" - the first holder borrows the shared surname
     if len(parts) == 2 and len(parts[0].split()) == 1 and len(parts[1].split()) >= 2:
@@ -692,11 +698,14 @@ _PAID_IN = re.compile(r"(?i)pay\s*roll|direct\s*dep|dir\s*dep|salary|wages|contr
 #   RED ROCK DENTAL ARTS             Cache County School District
 #   595 S BLUFF ST, ST GEORGE UT     2063 N 1200 E, Logan UT 84341
 #   EARNINGS STATEMENT               Earnings Statement
-_PAY_STUB = re.compile(r"(?i)\b(?:gross\s+(?:pay|earnings)|net\s+pay)\b")
-_PAY_STUB_TOO = re.compile(r"(?i)\b(?:pay\s+(?:date|period|day)|check\s+date|period\s+(?:begin|end))")
+# The gaps are optional: OCR of a photographed stub drops the space in small
+# caps - "NETPAY", "GROSSEARNINGS", "CHECKDATE" - and a stub that was never
+# recognised as one kept its letterhead employer.
+_PAY_STUB = re.compile(r"(?i)\b(?:gross\s*(?:pay|earnings)|net\s*pay)\b")
+_PAY_STUB_TOO = re.compile(r"(?i)\b(?:pay\s*(?:date|period|day)|check\s*date|period\s*(?:begin|end))")
 _STUB_TITLE = re.compile(
-    r"(?i)^[^\S\n]*(?:earnings\s+statement|pay\s+statement|statement\s+of\s+earnings"
-    r"|employee\s+pay\s+stub|pay\s+stub|payroll\s+advice|direct\s+deposit\s+advice)[^\S\n]*$")
+    r"(?i)^[^\S\n]*(?:earnings\s*statement|pay\s*statement|statement\s+of\s+earnings"
+    r"|employee\s+pay\s*stub|pay\s*stub|payroll\s*advice|direct\s+deposit\s+advice)[^\S\n]*$")
 _CITY_ZIP = re.compile(r"\b[A-Z]{2}\.?[^\S\n]+\d{5}(?:-\d{4})?[^\S\n]*$", re.IGNORECASE)
 LETTERHEAD_LINES = 4
 
@@ -711,7 +720,28 @@ def _letterhead_name(line: str) -> str:
     bare = [t.strip(".,'’").casefold() for t in tokens]
     if bare[0] in _EMP_NOT_A_NAME or bare[0] in _EMP_NOISE:
         return ""
+    # A photographed stub read down its columns puts a tax or leave row's label
+    # straight over the title - "Social Security Tax", "Sick/PTO" - and a
+    # column gap cuts the town out of the employee's street line. Neither is a
+    # letterhead, and the label proposed as an employer was boxed in every row.
+    # A business that says it is one keeps its name: "Liberty Tax Service LLC".
+    words = [w for t in bare for w in re.split(r"[/\-]", t) if w]
+    if not _is_org(line) and any(w in _STUB_ROW_WORDS or w.endswith(_STUB_ROW_ENDINGS)
+                                 for w in words):
+        return ""
+    if places.known(line):
+        return ""
     return line
+
+
+# the vocabulary of a stub's tax, deduction and leave rows - never a business's
+_STUB_ROW_WORDS = frozenset((
+    "tax", "taxes", "withholding", "withholdings", "medicare", "fica", "oasdi", "sdi",
+    "futa", "suta", "pto", "sick", "vacation", "deduction", "deductions", "earnings",
+    "hours", "rate", "overtime", "ytd", "current", "gross", "net", "garnishment",
+    "reimbursement", "allowances", "exemptions", "accrued", "available", "used"))
+# the same words OCR glued to the one before: "SocialSecurityTax", "UTStateWithholding"
+_STUB_ROW_ENDINGS = ("tax", "taxes", "withholding", "withholdings")
 
 
 def pay_stub_employers(text: str) -> list[str]:
@@ -721,8 +751,23 @@ def pay_stub_employers(text: str) -> list[str]:
     # a column gap splits a line into cells, and a letterhead shares its line
     # with the stub's title as often as not: "RED ROCK DENTAL ARTS    EARNINGS
     # STATEMENT" is two cells, the employer and the title
-    lines = [cell.strip() for line in text.splitlines()
-             for cell in (re.split(r"[^\S\n]{2,}", line.strip()) or [""])]
+    lines: list[str] = []
+    # the whole line each cell came from: OCR spaces a typed name as widely as
+    # a column gap - "MEGAN L   HOLBROOK" over the employee's street - and
+    # the surname alone, a cell of its own, was taken for the employer
+    whole: list[str] = []
+    on_address: list[bool] = []
+    for line in text.splitlines():
+        cells = [cell.strip() for cell in (re.split(r"[^\S\n]{2,}", line.strip()) or [""])]
+        # the title is a cell of its own, not part of anybody's name
+        joined = " ".join(cell for cell in cells if not _STUB_TITLE.match(cell))
+        # a cell of the street line - "1321 S 1100 E Unit 4,   Salt Lake
+        # City,   UT 84105" is three cells - is the street line too
+        address = any(_STREET_LINE.match(cell) or _CITY_ZIP.search(cell) for cell in cells)
+        for cell in cells:
+            lines.append(cell)
+            whole.append(joined)
+            on_address.append(address)
     found: list[str] = []
     for index, line in enumerate(lines):
         if not _STUB_TITLE.match(line):
@@ -732,14 +777,17 @@ def pay_stub_employers(text: str) -> list[str]:
             candidate = lines[above]
             if not candidate:
                 continue
-            if _STREET_LINE.match(candidate) or _CITY_ZIP.search(candidate):
+            if on_address[above]:
                 continue
             name = _letterhead_name(candidate)
             # the employee's own name sits between the employer and the title
             # on some stubs - "New Hope Pacific Islander Church / SAMUEL T
             # FONOTI / Employee Pay Stub" - so a person is stepped over, not
             # taken and not a reason to stop
-            if name and _person_shaped(name.split()) and not _is_org(name):
+            if name and not _is_org(name) and (
+                    _person_shaped(name.split())
+                    or (whole[above] != name and not _is_org(whole[above])
+                        and _person_shaped(whole[above].split()))):
                 continue
             if name:
                 found.append(name)

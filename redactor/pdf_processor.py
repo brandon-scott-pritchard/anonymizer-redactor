@@ -1089,7 +1089,12 @@ def _glued_at_edge(text: str, part: str, others) -> bool:
     positions, letters = _letter_positions(text)
     if len(letters) <= len(part):
         return False
-    cased = any(ch.isupper() for ch in text) and any(ch.islower() for ch in text)
+    # Cased means written in mixed case, not one stray small letter: OCR reads
+    # an I in a line of capitals as "i" - "HARRiNGTONENTERPRISES" - and that
+    # one letter made the word count as cased, so the surname glued to the
+    # business stayed in the rewritten line.
+    lower = sum(1 for i in positions if text[i].islower())
+    cased = lower > 1 and lower * 4 >= len(positions) and any(ch.isupper() for ch in text)
     for at_start in (True, False):
         if at_start:
             if not letters.startswith(part):
@@ -1184,18 +1189,27 @@ def _glued_names(words, store: MappingStore, settings: Settings):
         letters = re.sub(r"[^a-z]", "", text.casefold())
         # "REBECCALBLACKBURN" carries two Blackburns' surname; the one whose
         # other names are in it too is the one it is
-        best, score = None, 0
+        best, score, edge = None, 0, None
         for entity, bits in people:
-            if not any(len(b) >= GLUED_NAME_MIN and len(letters) > len(b)
-                       and (letters.startswith(b) or letters.endswith(b))
-                       and _glued_at_edge(text, b, [o for o in bits if o != b])
-                       for b in bits):
+            glued = next((b for b in bits
+                          if len(b) >= GLUED_NAME_MIN and len(letters) > len(b)
+                          and (letters.startswith(b) or letters.endswith(b))
+                          and _glued_at_edge(text, b, [o for o in bits if o != b])), None)
+            if glued is None:
                 continue
             explained = sum(len(b) for b in bits if b in letters)
             if explained > score:
-                best, score = entity, explained
+                best, score, edge = entity, explained, (glued, bits)
         if best is None:
             out.extend(_name_inside(x0, y0, x1, y1, text, people))
+            continue
+        start, end = _name_span(text, *edge)
+        if end - start < GLUED_WHOLE_SHARE * len(text):
+            # A scanned ACH line read as one word - "LittleSproutsAcademy
+            # Tuition2409059000000000CODYBASHWORTH" - ends in the name, but
+            # most of it is the merchant: only the name's share is covered,
+            # as inside a word, or every description on the page went white.
+            out.extend(_slice_hit(x0, y0, x1, y1, text, start, end, best, edge[1]))
             continue
         rect = pymupdf.Rect(x0, y0, x1, y1) + (-OCR_BOX_PADDING, -OCR_BOX_PADDING,
                                                 OCR_BOX_PADDING, OCR_BOX_PADDING)
@@ -1203,6 +1217,55 @@ def _glued_names(words, store: MappingStore, settings: Settings):
         out.append((Hit(0, len(text), text, best.category, replacement or engine.REDACTION_TEXT,
                         best.key, engine.FUZZY_PRIORITY), rect))
     return out
+
+
+# a name that fills less of an OCR word than this is covered by its own share
+GLUED_WHOLE_SHARE = 0.6
+
+
+def _name_span(text: str, part: str, bits: list[str]) -> tuple[int, int]:
+    """Where in ``text`` the name glued at its edge lies, with the person's
+    other name parts run on beside it: "…0000CODYBASHWORTH" is the whole
+    name, not just the surname."""
+    positions, letters = _letter_positions(text)
+    if letters.startswith(part):
+        start, end = 0, positions[len(part) - 1] + 1
+        while True:
+            run = re.match(r"[A-Za-z]+", text[end:])
+            more = next((b for b in bits if run and run.group(0).casefold().startswith(b)), None)
+            if not more:
+                break
+            end += len(more)
+        return start, end
+    start, end = positions[len(letters) - len(part)], len(text)
+    while True:
+        run = re.search(r"[A-Za-z]+$", text[:start])
+        more = next((b for b in bits if run and run.group(0).casefold().endswith(b)), None)
+        if not more:
+            break
+        start -= len(more)
+    return start, end
+
+
+def _share_rect(x0, y0, x1, y1, text: str, start: int, end: int) -> pymupdf.Rect:
+    """The box of ``text[start:end]`` inside an OCR word, by its share of the
+    characters, a character's slack either side."""
+    width = (x1 - x0) / max(len(text), 1)
+    rect = pymupdf.Rect(x0 + width * (start - 1), y0, x0 + width * (end + 1), y1)
+    return (rect & pymupdf.Rect(x0, y0, x1, y1)) + (
+        -OCR_BOX_PADDING, -OCR_BOX_PADDING, OCR_BOX_PADDING, OCR_BOX_PADDING)
+
+
+def _slice_hit(x0, y0, x1, y1, text: str, start: int, end: int, entity, bits) -> list:
+    """(hit, rect) for ``text[start:end]``, boxed by its share of the word."""
+    rect = _share_rect(x0, y0, x1, y1, text, start, end)
+    said = text[start:end]
+    folded = re.sub(r"[^a-z]", "", said.casefold())
+    stand_in = (_stand_in_part(entity, folded) if folded in bits
+                else entity.replacement)
+    return [(Hit(start, end, said, entity.category,
+                 _names.match_case(said, stand_in) if stand_in else engine.REDACTION_TEXT,
+                 entity.key, engine.FUZZY_PRIORITY), rect)]
 
 
 def _name_inside(x0, y0, x1, y1, text: str, people) -> list:
@@ -1217,8 +1280,28 @@ def _name_inside(x0, y0, x1, y1, text: str, people) -> list:
     inside an unrelated longer word.
     """
     out = []
-    width = (x1 - x0) / max(len(text), 1)
+
+    def cover(start: int, end: int, said: str, entity, replacement: str):
+        out.append((Hit(start, end, said, entity.category, replacement or engine.REDACTION_TEXT,
+                        entity.key, engine.FUZZY_PRIORITY),
+                    _share_rect(x0, y0, x1, y1, text, start, end)))
+
     for entity, bits in people:
+        # The whole name with its spaces lost, wherever it sits: a scanned ACH
+        # line read as "CardSvcsEpay2408296158391052CODYBASHWORTH" ends in the
+        # name, so no boundary follows the surname and the initial sits right
+        # before it - neither rule below could see it, and the name shipped
+        # beside its own stand-in. A first name, an optional middle and a
+        # surname run together is never an accident of spelling.
+        whole_spans: list[tuple[int, int]] = []
+        for joined in _joined_names(bits):
+            for match in re.finditer(re.escape(joined), text, re.IGNORECASE):
+                if any(lo <= match.start() < hi for lo, hi in whole_spans):
+                    continue
+                whole_spans.append((match.start(), match.end()))
+                cover(match.start(), match.end(), match.group(0), entity,
+                      _names.match_case(match.group(0), entity.replacement)
+                      if entity.replacement else "")
         for bit in bits:
             if len(bit) < GLUED_NAME_MIN:
                 continue
@@ -1227,16 +1310,29 @@ def _name_inside(x0, y0, x1, y1, text: str, people) -> list:
                 m for m in _case_joined(bit).finditer(text)
                 if not any(m.start() == n.start() for n in pattern.finditer(text))]
             for match in matches:
-                rect = pymupdf.Rect(x0 + width * (match.start() - 1), y0,
-                                    x0 + width * (match.end() + 1), y1)
-                rect = (rect & pymupdf.Rect(x0, y0, x1, y1)) + (
-                    -OCR_BOX_PADDING, -OCR_BOX_PADDING, OCR_BOX_PADDING, OCR_BOX_PADDING)
+                if any(lo <= match.start() < hi for lo, hi in whole_spans):
+                    continue
                 stand_in = _stand_in_part(entity, bit)
-                out.append((Hit(match.start(), match.end(), match.group(0), entity.category,
-                                _names.match_case(match.group(0), stand_in)
-                                if stand_in else engine.REDACTION_TEXT,
-                                entity.key, engine.FUZZY_PRIORITY), rect))
+                cover(match.start(), match.end(), match.group(0), entity,
+                      _names.match_case(match.group(0), stand_in) if stand_in else "")
     return out
+
+
+# a run-together name this short could be part of an ordinary word
+JOINED_NAME_MIN = 8
+
+
+def _joined_names(bits: list[str]) -> list[str]:
+    """A person's name parts run together as OCR loses the spaces, longest first:
+    "codybashworth", "codyashworth", "ashworthcody"."""
+    if len(bits) < 2:
+        return []
+    first, middles, last = bits[0], bits[1:-1], bits[-1]
+    forms = {first + last, last + first}
+    if middles:
+        forms.add(first + "".join(m[0] for m in middles) + last)
+        forms.add(first + "".join(middles) + last)
+    return sorted((f for f in forms if len(f) >= JOINED_NAME_MIN), key=len, reverse=True)
 
 
 def _loosely(letters: str, part: str) -> bool:
@@ -1383,6 +1479,13 @@ def _plan_edits(word_sets: list[list], store, anon_settings, matcher, settings,
                 rect = rect + (OCR_BOX_PADDING, OCR_BOX_PADDING, -OCR_BOX_PADDING, -OCR_BOX_PADDING)
                 if claim([rect]):
                     edits.append(_Edit([rect], hit.replacement, hit))
+                    counted.append(hit)
+                elif _covered(rect, claimed) < 0.9:
+                    # Taken by overlap is not taken whole, here as above: the
+                    # other engine boxed "CODYBASHWORTH" a third of its width,
+                    # its edit claimed the start of the name, and the surname
+                    # past the end of that box stayed on the page.
+                    edits.append(_Edit([rect], "", hit))
                     counted.append(hit)
         # the mailing block: whatever in it no hit took is removed, so a name
         # that slipped every pattern still does not ship
