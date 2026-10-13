@@ -147,3 +147,13 @@ def test_an_itin_found_hyphenated_is_also_taken_bare():
         "Heber Valley Regional Hospital   922-74-1631\nEMPTOYER1DEURE1PI) 922741631", store,
         engine.Settings(use_ner=False), "doc")
     assert "922-74-1631" not in out and "922741631" not in out, out
+
+
+@pytest.mark.parametrize("line, expected", [
+    ("Cad9916", [("credit_card", "9916")]),
+    ("Crd9916", [("credit_card", "9916")]),
+    ("CAD 1234", []),          # Canadian dollars
+    ("Arcad1234", []),         # inside a longer word
+])
+def test_a_card_label_missing_a_letter_still_introduces_its_tail(line, expected):
+    assert [f for f in _found(line) if f[0] == "credit_card"] == expected

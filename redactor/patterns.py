@@ -586,6 +586,12 @@ DETECTORS: tuple[Detector, ...] = (
     # by a bare four-digit run.
     _d("credit_card", r"(?<=\d)(?-i:Card|CARD)[^\S\n]?(\d{4})(?!\d)(?![\-/.,]\d)",
        group=1, priority=92, digit=True, kw=("card",)),
+    # The same label with a letter lost, glued to the tail: the photographed
+    # statement that read "Card9916" on one line read "Cad9916" on the next,
+    # and the literal pass will not find a known tail behind a letter. Only
+    # glued and only these spellings - "CAD 1234" is Canadian dollars.
+    _d("credit_card", r"(?<![A-Za-z])(?-i:Cad|Crd|CRD)(\d{4})(?!\d)(?![\-/.,]\d)",
+       group=1, priority=92, digit=True, kw=("cad", "crd")),
     _d("routing_number", labeled(("routing", "aba", "rtn", "transit")), group=1, priority=91,
        digit=True, kw=("routing", "aba", "rtn", "transit")),
     # The same label as OCR returns it from a photograph: "Routing Number
