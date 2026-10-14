@@ -1024,6 +1024,7 @@ class App(Tk):
         shielded, so this has to follow the name list rather than the files.
         """
         parties = [name for name, _category in self.name_lines()]
+        parties += officials.parties_of(self.caption_names)
         self.protection = officials.protected_terms(self.judicial_officers,
                                                     avoid=parties)
         self._render_guard()

@@ -201,7 +201,7 @@ def _prepare_set(events, files, settings, spill_dir) -> None:
         pdf_processor.keep_ocr_on_disk(spill_dir)
         caption_names = pipeline.collect_caption_names(files)
         bench = pipeline.collect_officials(files)
-        protection = officials.protected_terms(bench)
+        protection = officials.protected_terms(bench, avoid=officials.parties_of(caption_names))
         settings.protected_names = list(protection.terms)
         found, notes = pipeline.collect_suggestions(files, MappingStore(), settings,
                                                     caption_names=caption_names)

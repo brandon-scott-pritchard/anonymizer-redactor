@@ -54,8 +54,13 @@ _T_LEADING = rf"(?:(?:Magistrate|MAGISTRATE)[^\S\n]+)?(?:{_T})"
 _HON = r"(?:Hon\.?|HON\.?|Honorable|HONORABLE|Hon\.?orable)"
 
 # Words allowed to sit in front of the title word: "Third District Court Judge",
-# "Chief Justice", "PRESIDING JUDGE".  Capitalised or an ordinal, nothing else.
-_LEAD = r"(?:[A-Z][A-Za-z.'\-]{0,14}|\d{1,2}(?:st|nd|rd|th))"
+# "Chief Justice", "PRESIDING JUDGE".  Capitalised or an ordinal, nothing else -
+# and never a party's role. A two-column caption puts the bench beside the
+# parties, and once OCR dropped the comma after a name the next line,
+# "Defendant   Judge: Thorne", read as the title of the name above it: the
+# defendant went on the bench and could not be anonymized.
+_LEAD = (rf"(?!(?i:{caption.ROLE_ALT})(?![A-Za-z]))"
+         r"(?:[A-Z][A-Za-z.'\-]{0,14}|\d{1,2}(?:st|nd|rd|th))")
 
 TITLE_PHRASE = rf"(?:{_LEAD}[^\S\n]+){{0,4}}(?:{_T})"
 
@@ -109,6 +114,14 @@ _BY_THE_COURT = re.compile(
     re.IGNORECASE,
 )
 _BY_THE_COURT_LINES = 6
+
+# A signature under the heading that says whose it is: a stipulated order
+# carries "IT IS SO ORDERED" over the parties' and counsel's own signatures -
+# "/s/ John Smith" over "Respondent", "Attorney for Petitioner", "Approved as to
+# form" - and the first of them went on the bench as the signing officer.
+_NOT_THE_COURT = re.compile(
+    rf"(?i)\b(?:{caption.ROLE_ALT}|attorneys?\s+for|counsel\s+for|pro\s+se|"
+    r"approved\s+as\s+to\s+(?:form|content)|stipulated|agreed|bar\s+(?:no|number|#))\b")
 
 # Trailing furniture that rides along with a harvested name.
 _TRAILING = re.compile(
@@ -257,16 +270,22 @@ def harvest(text: str, source: str = "") -> list[Official]:
             starts.append(index)
         offset += len(line) + 1
     for index in starts:
-        for line in lines[index + 1: index + 1 + _BY_THE_COURT_LINES]:
+        block = lines[index + 1: index + 1 + _BY_THE_COURT_LINES]
+        for at, line in enumerate(block):
             stripped = line.strip(" _\t")
             if not stripped:
                 continue
             candidate = caption._first_name_in(stripped.lstrip("/s "))
-            if candidate:
-                name = _acceptable(candidate)
-                if name:
-                    add(name, "Signing judicial officer", "medium")
-                break
+            if not candidate:
+                continue
+            # the line over the signer, theirs and the two under it say who
+            # signed: "APPROVED AS TO FORM:" sits above, "Respondent" below
+            if _NOT_THE_COURT.search("\n".join(block[max(0, at - 1): at + 3])):
+                continue
+            name = _acceptable(candidate)
+            if name:
+                add(name, "Signing judicial officer", "medium")
+            break
 
     return list(found.values())
 
@@ -326,6 +345,18 @@ class Protection:
                 f"protected. A bare surname there follows the party's pseudonym."
             )
         return out
+
+
+def parties_of(caption_names) -> list[str]:
+    """The caption's parties, who are never the bench whatever a page says.
+
+    A name the caption reader found beside a role word - Petitioner,
+    Respondent, Attorney for... - is somebody in the case. Read off a
+    two-column caption or a stipulation's signatures as a judge, it was
+    shielded from the run until it was typed into the name list by hand.
+    """
+    return [c.name for c in caption_names or ()
+            if getattr(c, "confidence", "") in ("high", "medium")]
 
 
 def protected_terms(officials: list[Official], avoid: list[str] | None = None) -> Protection:

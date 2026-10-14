@@ -397,3 +397,41 @@ def test_a_genuine_name_is_not_mistaken_for_an_address():
     from redactor import caption
     assert not caption.is_address("Marisol Quenby Ashdown")
     assert caption._first_name_in("Marisol Quenby Ashdown") == "Marisol Quenby Ashdown"
+
+
+# ---------------------------------------------------------------- parties ---
+
+@pytest.mark.parametrize("text, judge", [
+    # a two-column caption, the comma after the name lost to OCR
+    ("ROBERT LEE JONES\nDefendant  Judge: Thorne\n", "Thorne"),
+    ("JOHN MICHAEL SMITH\nRespondent   Commissioner Delia Farnsworth\n", "Delia Farnsworth"),
+])
+def test_a_party_beside_the_bench_is_not_the_bench(text, judge):
+    found = {o.name for o in officials.harvest(text)}
+    assert found == {judge}
+
+
+@pytest.mark.parametrize("signature", [
+    "/s/ John Michael Smith\nRespondent, pro se",
+    "/s/ John Michael Smith\nAttorney for Petitioner",
+    "APPROVED AS TO FORM:\n/s/ John Michael Smith",
+])
+def test_a_party_signing_a_stipulated_order_is_not_the_signing_judge(signature):
+    text = f"IT IS SO ORDERED.\n\n{signature}\n"
+    assert not officials.harvest(text)
+
+
+def test_the_court_still_signs_under_its_heading():
+    text = "BY THE COURT:\n\n____________________\nAmber M. Cordova\nDistrict Court Judge\n"
+    assert {o.name for o in officials.harvest(text)} == {"Amber M. Cordova"}
+
+
+def test_a_caption_party_is_never_shielded_as_the_bench():
+    from redactor import caption
+    bench = [officials.Official("John Michael Smith", "Signing judicial officer", "x", "medium"),
+             officials.Official("Amber M. Cordova", "Judge", "x", "high")]
+    party = [caption.CaptionName("JOHN MICHAEL SMITH", "Respondent", "x", "high")]
+    protection = officials.protected_terms(bench, avoid=officials.parties_of(party))
+    assert "John Michael Smith" not in protection.terms
+    assert "Amber M. Cordova" in protection.terms
+    assert protection.dropped == ["John Michael Smith"]

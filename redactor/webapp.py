@@ -231,7 +231,8 @@ def _name_entries(lines: list[dict]) -> list[tuple[str, str]]:
 def _reprotect(entries: list[tuple[str, str]]) -> list[str]:
     """Rebuild the do-not-change list against the current party names."""
     SESSION.protection = officials.protected_terms(
-        SESSION.officials, avoid=[name for name, _category in entries])
+        SESSION.officials, avoid=[name for name, _category in entries]
+        + officials.parties_of(SESSION.caption_names))
     return list(SESSION.protection.terms)
 
 
@@ -538,7 +539,8 @@ def captions():
             # the bench, harvested at the same time: their names are shielded
             # for the whole run rather than proposed as parties
             SESSION.officials = pipeline.collect_officials(files, progress)
-            SESSION.protection = officials.protected_terms(SESSION.officials)
+            SESSION.protection = officials.protected_terms(
+                SESSION.officials, avoid=officials.parties_of(found))
         return {"captions": [
             {"name": c.name, "role": c.role, "confidence": c.confidence,
              "source": c.source, "category": c.category} for c in found],
