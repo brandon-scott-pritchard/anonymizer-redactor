@@ -31,7 +31,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import (__version__, caption, categories, feedback, grouping, names as _names, ner,
-               officials, pipeline, review)
+               ocr_pool, officials, pdf_processor, pipeline, review)
 from .engine import Settings
 from .mapping import MappingStore
 
@@ -61,6 +61,10 @@ class Job:
     fraction: float = 0.0
     result: dict | None = None
     error: str = ""
+    # pages this step has read, of the pages it will read: the time is in
+    # the pages, not the files, and a scanned page is the slow one
+    pages_done: int = 0
+    pages_total: int = 0
 
 
 class Session:
@@ -94,19 +98,29 @@ class Session:
 SESSION = Session()
 
 
-def _start_job(work) -> str:
-    """Run ``work(progress)`` on a thread; the browser polls the job."""
+def _start_job(work, pages_total: int = 0) -> str:
+    """Run ``work(progress)`` on a thread; the browser polls the job.
+
+    ``pages_total`` is how many pages the step will read; each page read is
+    counted against it as it happens.
+    """
     if not SESSION.busy.acquire(blocking=False):
         raise HTTPException(409, "Still working on the previous step.")
     job_id = uuid.uuid4().hex
-    job = SESSION.jobs[job_id] = Job()
+    job = SESSION.jobs[job_id] = Job(pages_total=pages_total)
+    seen: set[tuple[str, int]] = set()
 
     def progress(message: str, fraction: float) -> None:
         job.message, job.fraction = message, fraction
 
+    def page_read(path: str, index: int) -> None:
+        seen.add((path, index))
+        job.pages_done = min(len(seen), job.pages_total) if job.pages_total else len(seen)
+
     def runner() -> None:
         try:
-            job.result = work(progress)
+            with pdf_processor.page_listener(page_read):
+                job.result = work(progress)
             job.status = "done"
         except Exception as exc:                   # surfaced to the operator
             job.status = "error"
@@ -352,7 +366,7 @@ async def upload(files: list[UploadFile] = File(default=[]),
     names the files the page did not send because they are not documents or
     photos, so the report can list them.
     """
-    added = 0
+    added: list[Path] = []
     for index, item in enumerate(files):
         given = paths[index] if index < len(paths) else ""
         relative = _safe_relative(given) or Path(item.filename or "upload").name
@@ -363,13 +377,17 @@ async def upload(files: list[UploadFile] = File(default=[]),
             SESSION.skipped.append(relative)
             continue
         data = await item.read()
-        if _keep(relative, lambda target: target.write_bytes(data)) is not None:
-            added += 1
+        kept = _keep(relative, lambda target: target.write_bytes(data))
+        if kept is not None:
+            added.append(kept)
     for name in skipped:
         relative = _safe_relative(name)
         if relative and not pipeline._housekeeping(relative.rsplit("/", 1)[-1]):
             SESSION.skipped.append(relative)
-    return {"added": added, **_files_payload()}
+    # the scans start being read now, while the operator sets the options and
+    # types the names, rather than when the first step asks for them
+    ocr_pool.read_ahead_in_background(added)
+    return {"added": len(added), **_files_payload()}
 
 
 def add_paths(paths: list[str | Path]) -> dict:
@@ -378,12 +396,14 @@ def add_paths(paths: list[str | Path]) -> dict:
     The documents are copied into the session; the originals are not touched.
     """
     gathered = pipeline.gather([Path(p) for p in paths])
-    added = 0
+    added: list[Path] = []
     for source, relative in gathered.files:
-        if _keep(relative, lambda target, source=source: shutil.copyfile(source, target)):
-            added += 1
+        kept = _keep(relative, lambda target, source=source: shutil.copyfile(source, target))
+        if kept is not None:
+            added.append(kept)
     SESSION.skipped.extend(gathered.skipped)
-    return {"added": added, **_files_payload()}
+    ocr_pool.read_ahead_in_background(added)
+    return {"added": len(added), **_files_payload()}
 
 
 @app.delete("/api/files/{index}")
@@ -427,7 +447,7 @@ def captions():
              "source": c.source, "category": c.category} for c in found],
             **_guard_payload()}
 
-    return {"job": _start_job(work)}
+    return {"job": _start_job(work, pipeline.count_pages(files, pdf_processor.CAPTION_PAGES))}
 
 
 @app.post("/api/suggestions")
@@ -447,7 +467,7 @@ async def suggestions(request: Request):
             for s in found],
             "notes": notes, **_guard_payload()}
 
-    return {"job": _start_job(work)}
+    return {"job": _start_job(work, pipeline.count_pages(files))}
 
 
 # --------------------------------------------------------------------------
@@ -473,7 +493,7 @@ async def build_review(request: Request):
         SESSION.store = store
         return {**_entities_payload(), **_guard_payload()}
 
-    return {"job": _start_job(work)}
+    return {"job": _start_job(work, pipeline.count_pages(files))}
 
 
 @app.patch("/api/entities")
@@ -578,7 +598,7 @@ async def run(request: Request):
             "skipped": len(result.skipped),
         }
 
-    return {"job": _start_job(work)}
+    return {"job": _start_job(work, pipeline.count_pages(files))}
 
 
 @app.get("/api/jobs/{job_id}")
@@ -587,7 +607,8 @@ def job_status(job_id: str):
     if job is None:
         raise HTTPException(404, "no such job")
     return {"status": job.status, "message": job.message,
-            "fraction": job.fraction, "result": job.result, "error": job.error}
+            "fraction": job.fraction, "result": job.result, "error": job.error,
+            "pages_done": job.pages_done, "pages_total": job.pages_total}
 
 
 @app.get("/api/download/{kind}")

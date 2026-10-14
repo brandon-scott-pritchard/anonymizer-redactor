@@ -30,3 +30,20 @@ def test_on_windows_it_goes_beside_the_exe_then_to_local_app_data(monkeypatch, t
     targets = launcher._selftest_targets()
     assert targets[0].parent == Path(sys.executable).resolve().parent
     assert targets[1] == tmp_path / "Anonymizer-Redactor" / "selftest.txt"
+
+
+def test_the_self_test_reads_a_page_in_the_worker_processes(monkeypatch):
+    """A frozen build that cannot start its workers quietly reads one page at
+    a time; the self-test is where that has to show."""
+    import pytest
+
+    from redactor import ocr, ocr_pool
+    if not ocr.usable_engines():
+        pytest.skip("no OCR engine")
+    launcher = _launcher()
+    monkeypatch.setenv("REDACTOR_OCR_WORKERS", "2")
+    for name, value in (("_pool", None), ("_broken", False), ("_pending", {}), ("_surveys", {})):
+        monkeypatch.setattr(ocr_pool, name, value)
+    ok, note = launcher._ocr_workers()
+    assert ok, note
+    assert note.startswith("2 worker(s)")

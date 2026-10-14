@@ -233,6 +233,10 @@ td button { padding: 5px 11px; white-space: nowrap; }
   flex: 1; color: var(--muted); font: 400 14px/1.4 var(--sans);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+.progress .pages {
+  flex: none; color: var(--ink); font: 600 14px/1.4 var(--sans);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
 
 /* ----------------------------------------------------------------- modal -- */
 .overlay {

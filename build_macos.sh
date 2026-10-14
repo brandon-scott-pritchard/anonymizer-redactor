@@ -33,6 +33,15 @@ pick_python() {
   echo "PYTHON=/path/to/python3.11 and run this again." >&2
   return 1
 }
+APP_NAME="Document Redactions & Anonymization"
+
+# A build replaces dist/ - pulling the files out from under a copy that is
+# running from there. Stop before spending ten minutes on it.
+if pgrep -f "$HERE/dist/$APP_NAME.app/Contents/MacOS/" >/dev/null 2>&1; then
+  echo "The app in dist/ is open. Quit it first: a build replaces it." >&2
+  exit 1
+fi
+
 BUILD_PYTHON="$(pick_python)"
 echo "==> Building with $BUILD_PYTHON ($(describe "$BUILD_PYTHON"))"
 
@@ -48,6 +57,7 @@ cp -R "$HERE/webapp" "$STAGE/src/"
 cp "$HERE/requirements.txt" "$STAGE/src/"
 cp "$HERE/build/launcher.py" "$STAGE/src/"
 cp "$HERE/build/redactor.spec" "$STAGE/src/"
+[ -f "$HERE/build/icon.icns" ] && cp "$HERE/build/icon.icns" "$STAGE/src/"
 if [ -d "$HERE/vendor" ]; then
   echo "    including vendored Tesseract"
   cp -R "$HERE/vendor" "$STAGE/src/"
@@ -66,8 +76,6 @@ echo "==> Building"
 cd "$STAGE/src"
 "$BUILD_VENV/bin/pyinstaller" --noconfirm --clean redactor.spec
 
-APP_NAME="Document Redactions & Anonymization"
-
 echo "==> Copying the app back"
 mkdir -p "$HERE/dist"
 rm -rf "$HERE/dist/$APP_NAME.app" "$HERE/dist/Anonymizer-Redactor.app"
@@ -82,6 +90,13 @@ if [ -n "${CODESIGN_IDENTITY:-}" ]; then
   echo "      ditto -c -k --keepParent \"dist/$APP_NAME.app\" /tmp/app.zip"
   echo "      xcrun notarytool submit /tmp/app.zip --keychain-profile <profile> --wait"
   echo "      xcrun stapler staple \"dist/$APP_NAME.app\""
+fi
+
+# Every build goes straight into Applications unless INSTALL=0. If the copy
+# there is open, the install waits for ./install_macos.sh to be run again.
+if [ "${INSTALL:-1}" != "0" ]; then
+  echo "==> Installing in ${INSTALL_DIR:-/Applications}"
+  "$HERE/install_macos.sh" || echo "    not installed this time - see above"
 fi
 
 cat <<'NOTE'

@@ -122,6 +122,11 @@ a = Analysis(
 )
 pyz = PYZ(a.pure)
 
+# The app's icon, drawn by build/make_icon.py and staged beside this spec by
+# the build scripts. Missing, the build goes on with PyInstaller's default.
+ICNS = "icon.icns" if os.path.exists("icon.icns") else None
+ICO = "icon.ico" if os.path.exists("icon.ico") else None
+
 # Set CODESIGN_IDENTITY to a "Developer ID Application: ..." identity to sign
 # during the build; unset, PyInstaller ad-hoc signs on Apple Silicon.
 exe = EXE(
@@ -132,6 +137,7 @@ exe = EXE(
     disable_windowed_traceback=False,
     argv_emulation=False,
     codesign_identity=os.environ.get("CODESIGN_IDENTITY"),
+    icon=ICO if sys.platform.startswith("win") else None,
 )
 coll = COLLECT(
     exe, a.binaries, a.datas,
@@ -141,6 +147,7 @@ coll = COLLECT(
 app = BUNDLE(
     coll,
     name=f"{APP_NAME}.app",
+    icon=ICNS,
     bundle_identifier="family.thepritchard.anonymizer-redactor",
     info_plist={
         "CFBundleName": APP_NAME,

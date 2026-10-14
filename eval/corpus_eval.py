@@ -416,6 +416,9 @@ def main(argv=None) -> int:
                  "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS"):
         os.environ.setdefault(knob, "1")
     os.environ.setdefault("REDACTOR_OCR_THREADS", "1")
+    # the harness is its own pool of processes; each reading ahead with a pool
+    # of its own would put four OCR processes behind every worker
+    os.environ.setdefault("REDACTOR_OCR_WORKERS", "0")
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "_tmp").mkdir(exist_ok=True)
     _snapshot_code(args.out)

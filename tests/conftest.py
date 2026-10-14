@@ -1,7 +1,12 @@
+import os
 import sys
 from pathlib import Path
 
 import pytest
+
+# Each test reads its pages in-line, so it stands alone; the read-ahead pool of
+# worker processes has tests of its own that switch it on.
+os.environ.setdefault("REDACTOR_OCR_WORKERS", "0")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 

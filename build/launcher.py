@@ -34,6 +34,9 @@ def selftest() -> int:
     photos_ok, photos_note = _photo_formats()
     lines.append(f"photo formats:        {'OK  ' if photos_ok else 'FAIL'} {photos_note}")
 
+    workers_ok, workers_note = _ocr_workers() if ok else (False, "no OCR engine")
+    lines.append(f"OCR read-ahead:       {'OK  ' if workers_ok else 'FAIL'} {workers_note}")
+
     report = "\n".join(lines)
     print(report)
     # the Windows build is windowed (console=False), so stdout goes nowhere;
@@ -47,7 +50,7 @@ def selftest() -> int:
         print(f"written to {target}")
         break
 
-    return 0 if ok and model_ok and photos_ok else 1
+    return 0 if ok and model_ok and photos_ok and workers_ok else 1
 
 
 def _photo_formats() -> tuple[bool, str]:
@@ -77,6 +80,53 @@ def _photo_formats() -> tuple[bool, str]:
             failed.append(f"{fmt} ({type(exc).__name__})")
     note = ", ".join(worked) + (f"; FAILED: {', '.join(failed)}" if failed else "")
     return not failed, note
+
+
+def _ocr_workers() -> tuple[bool, str]:
+    """Read one scanned page in the worker processes, as a run would.
+
+    Worker processes are started by relaunching the app's own binary, which
+    is exactly what a frozen build can get wrong - and when it does, the app
+    quietly reads one page at a time instead. Only a page read in a worker
+    proves the bundle can do it.
+    """
+    import tempfile
+    import time
+    from pathlib import Path
+
+    import pymupdf
+
+    from redactor import ocr, ocr_pool, pdf_processor
+
+    count = ocr_pool.worker_count()
+    if count < 1:
+        return True, "off (REDACTOR_OCR_WORKERS=0)"
+    with tempfile.TemporaryDirectory() as tmp:
+        text = pymupdf.open()
+        text.new_page().insert_text((72, 100), "Self test 4417220193", fontsize=18)
+        scan = pymupdf.open()
+        scan.new_page().insert_image(pymupdf.Rect(0, 0, 595, 842),
+                                     stream=text[0].get_pixmap(dpi=150).tobytes("png"))
+        path = Path(tmp) / "scan.pdf"
+        scan.save(path)
+        started = time.time()
+        read: list[int] = []
+        ocr_pool.read_ahead([path], on_page=lambda _p, index: read.append(index))
+        seconds = time.time() - started
+        # what came back from the workers, straight out of the cache
+        base = pdf_processor._ocr_key(path, 0)
+        names = [engine.name for engine in ocr.usable_engines()]
+        cached = base is not None and pdf_processor.ocr_cached(base, names)
+        words = [w[4] for name in names
+                 for w in (pdf_processor._ocr_cache.get(base + (name,)) or [])] if cached else []
+        if ocr_pool._pool is not None:
+            ocr_pool._pool.shutdown(wait=True, cancel_futures=True)
+    if read != [0] or not cached:
+        return False, (f"{count} worker(s) started, but no page came back - "
+                       "reading falls back to one page at a time")
+    if not any("4417220193" in word for word in words):
+        return False, f"a worker read the test page but not its text: {' '.join(words)[:80]}"
+    return True, f"{count} worker(s), a test page read in {seconds:.1f}s"
 
 
 def _selftest_targets():

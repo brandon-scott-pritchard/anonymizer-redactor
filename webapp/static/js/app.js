@@ -90,15 +90,33 @@ function Stepper({ step, unlocked, go }) {
   </nav>`;
 }
 
+// "Page 37 of 412 · about 6 min left". The time is in the pages - a scanned
+// page takes seconds to read, a typed one a blink - so the estimate is the
+// pace of this step so far, and only once there is enough of it to go on.
+function pageCount(pages) {
+  if (!pages || !pages.total) return "";
+  const { done, total, seconds } = pages;
+  let text = `Page ${Math.min(done, total).toLocaleString()} of ${total.toLocaleString()}`;
+  if (done >= 3 && done < total && seconds >= 10) {
+    const left = (seconds / done) * (total - done);
+    text += left < 60 ? " · under a minute left"
+      : ` · about ${Math.round(left / 60).toLocaleString()} min left`;
+  }
+  return text;
+}
+
 function Progress({ busy }) {
   if (!busy.active) return null;
-  const known = busy.fraction > 0;
+  const pages = busy.pages && busy.pages.total ? busy.pages : null;
+  const fraction = pages ? Math.min(pages.done / pages.total, 1) : busy.fraction;
+  const known = fraction > 0;
   return html`<div class="progress">
     <div class="track">
       <div class=${"fill" + (known ? "" : " pulse")}
-           style=${{ width: known ? `${Math.round(busy.fraction * 100)}%` : "30%" }}></div>
+           style=${{ width: known ? `${Math.round(fraction * 100)}%` : "30%" }}></div>
     </div>
     <span class="msg">${busy.message}</span>
+    ${pages && html`<span class="pages">${pageCount(pages)}</span>`}
   </div>`;
 }
 
@@ -544,7 +562,7 @@ function App() {
     api.get("/api/state").then(setMeta).catch((e) => setFault(e.message));
   }, []);
 
-  const track = (message, fraction) => setBusy({ active: true, message, fraction });
+  const track = (message, fraction, pages) => setBusy({ active: true, message, fraction, pages });
   const settle = () => setBusy({ active: false, message: "", fraction: 0 });
 
   // Every step that touches the name list gets a fresh read of what the run

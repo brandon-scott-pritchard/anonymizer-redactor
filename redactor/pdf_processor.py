@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 import threading
 from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -363,17 +364,27 @@ def _ocr_words(page: pymupdf.Page, ocr_engine=None):
     means "a page with nothing on it", while None means "we could not look",
     and the caller must refuse the page rather than deliver it as clean.
     """
-    from PIL import Image
-
     if ocr_engine is None:
         ocr_engine, _note = ocr.select_engine()
     if ocr_engine is None:
         return None
+    return words_from_image(render_for_ocr(page), ocr_engine)
 
-    scale = OCR_DPI / 72.0
+
+def render_for_ocr(page: pymupdf.Page):
+    """The page as the OCR engines see it, at OCR_DPI."""
+    from PIL import Image
+
     pixmap = page.get_pixmap(dpi=OCR_DPI, colorspace=pymupdf.csRGB)
-    image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
+    return Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
 
+
+def words_from_image(image, ocr_engine) -> list:
+    """One engine's words on a rendered page, in PDF coordinates.
+
+    Touches no PDF, so the engines can read one picture side by side.
+    """
+    scale = OCR_DPI / 72.0
     return [
         (w.x0 / scale, w.y0 / scale, w.x1 / scale, w.y1 / scale,
          w.text, w.block, w.line, w.word, w.confidence)
@@ -397,7 +408,43 @@ def _ocr_key(path: Path, index: int) -> tuple | None:
     return (str(Path(path).resolve()), stat.st_size, stat.st_mtime_ns, index)
 
 
+# Told of each page as it is read, so the window can count pages rather than
+# files: one scanned file can be forty pages, and "file 3 of 9" said nothing
+# about how long was left. One job runs at a time, so one listener will do.
+_page_listener = None
+
+
+@contextmanager
+def page_listener(callback):
+    """Call ``callback(path, index)`` for each page read inside the block."""
+    global _page_listener
+    previous, _page_listener = _page_listener, callback
+    try:
+        yield
+    finally:
+        _page_listener = previous
+
+
+def _page_read(path, index: int) -> None:
+    listener = _page_listener
+    if listener is not None:
+        try:
+            listener(str(Path(path).resolve()), index)
+        except Exception:                         # a counter never stops a run
+            pass
+
+
+CAPTION_PAGES = 6                 # page one, and the header strip of five more
+
+
 def _page_words(page: pymupdf.Page, path: Path, index: int, engines=None):
+    """See :func:`_read_page_words`; the page is counted once it is read."""
+    found = _read_page_words(page, path, index, engines)
+    _page_read(path, index)
+    return found
+
+
+def _read_page_words(page: pymupdf.Page, path: Path, index: int, engines=None):
     """``(word_sets, scanned)`` - the text layer, or every engine's OCR of a scan.
 
     A text page gives one word list. A scanned page gives one per OCR engine
@@ -416,29 +463,66 @@ def _page_words(page: pymupdf.Page, path: Path, index: int, engines=None):
         return [page.get_text("words")], False
     if engines is None:
         engines = ocr.usable_engines()
+    base = _ocr_key(path, index)
+    found: dict[str, list] = {}
+    if base is not None:
+        with _ocr_cache_lock:
+            for engine_ in engines:
+                words = _ocr_cache.get(base + (engine_.name,))
+                if words is not None:
+                    _ocr_cache.move_to_end(base + (engine_.name,))
+                    found[engine_.name] = words
+    missing = [engine_ for engine_ in engines if engine_.name not in found]
+    if missing:
+        # one picture of the page, read by every engine at once: each is a
+        # program or a model of its own and neither touches the PDF, so a
+        # page costs the slower engine's time rather than the sum of both
+        image = render_for_ocr(page)
+        found.update(zip((engine_.name for engine_ in missing),
+                         _read_side_by_side(image, missing)))
+        if base is not None:
+            store_ocr(base, {name: found[name] for name in (e.name for e in missing)})
     sets: list[list] = []
     for engine_ in engines:
-        key = _ocr_key(path, index)
-        key = key + (engine_.name,) if key is not None else None
-        words = None
-        if key is not None:
-            with _ocr_cache_lock:
-                words = _ocr_cache.get(key)
-                if words is not None:
-                    _ocr_cache.move_to_end(key)
+        words = found.get(engine_.name)
         if words is None:
-            words = _ocr_words(page, engine_)
-            if words is None:
-                if not sets:
-                    return None, True        # the preferred engine failed: refuse
-                continue
-            if key is not None:
-                with _ocr_cache_lock:
-                    _ocr_cache[key] = words
-                    while len(_ocr_cache) > OCR_CACHE_PAGES:
-                        _ocr_cache.popitem(last=False)
+            if not sets:
+                return None, True            # the preferred engine failed: refuse
+            continue
         sets.append(words)
     return (sets or None), True
+
+
+def _read_side_by_side(image, engines) -> list:
+    """Each engine's words for one rendered page, None where one failed."""
+    def read(engine_):
+        try:
+            return words_from_image(image, engine_)
+        except Exception:                          # refused below, never shipped
+            return None
+
+    if len(engines) == 1:
+        return [read(engines[0])]
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(len(engines)) as threads:
+        return list(threads.map(read, engines))
+
+
+def store_ocr(base: tuple, by_engine: dict) -> None:
+    """Keep each engine's reading of a page; a failed reading is not kept."""
+    with _ocr_cache_lock:
+        for name, words in by_engine.items():
+            if words is None:
+                continue
+            _ocr_cache[base + (name,)] = words
+            _ocr_cache.move_to_end(base + (name,))
+        while len(_ocr_cache) > OCR_CACHE_PAGES:
+            _ocr_cache.popitem(last=False)
+
+
+def ocr_cached(base: tuple, names) -> bool:
+    with _ocr_cache_lock:
+        return all(base + (name,) in _ocr_cache for name in names)
 
 
 # --------------------------------------------------------------------------
@@ -751,7 +835,7 @@ def caption_sources(path: Path) -> dict[str, str]:
             "\n".join(_words_to_text(words)[0] for words in sets or []) if scanned
             else first.get_text("text"))
         header_text: list[str] = []
-        for index in range(1, min(doc.page_count, 6)):
+        for index in range(1, min(doc.page_count, CAPTION_PAGES)):
             page = doc[index]
             strip = pymupdf.Rect(0, 0, page.rect.width, page.rect.height * 0.15)
             sets, scanned = _page_words(page, path, index)
@@ -2314,6 +2398,7 @@ def process(
         boxed_scans: list[int] = []      # rotated scans, redacted in anonymize mode
         for index, page in enumerate(doc):
             report = PageReport(number=index + 1)
+            _page_read(source, index)
 
             if settings.scrub_embedded:
                 removed, links = _strip_page_extras(page)

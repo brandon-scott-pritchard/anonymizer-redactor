@@ -15,6 +15,7 @@ xcopy /e /i /q "%HERE%webapp" "%STAGE%\src\webapp" >nul
 copy /y "%HERE%requirements.txt" "%STAGE%\src\" >nul
 copy /y "%HERE%build\launcher.py" "%STAGE%\src\" >nul
 copy /y "%HERE%build\redactor.spec" "%STAGE%\src\" >nul
+if exist "%HERE%build\icon.ico" copy /y "%HERE%build\icon.ico" "%STAGE%\src\" >nul
 REM The vendored Tesseract tarball, if vendor_tesseract_windows.py was run.
 REM Without it the exe still has OCR - RapidOCR is bundled from pip.
 if exist "%HERE%vendor\tesseract-windows-*.tar.gz" (

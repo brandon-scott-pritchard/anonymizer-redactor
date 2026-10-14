@@ -23,12 +23,17 @@ window.api = (() => {
   const patch = (path, body) => request("PATCH", path, body);
   const del = (path) => request("DELETE", path);
 
-  /* Start a job-returning endpoint and poll it to completion. */
+  /* Start a job-returning endpoint and poll it to completion. The pages
+     read so far, of the pages the step will read, and the seconds since it
+     started go to onProgress as a third argument. */
   async function job(start, onProgress) {
     const { job: id } = await start;
+    const began = Date.now();
     for (;;) {
       const state = await get(`/api/jobs/${id}`);
-      if (onProgress) onProgress(state.message, state.fraction);
+      if (onProgress) onProgress(state.message, state.fraction, {
+        done: state.pages_done || 0, total: state.pages_total || 0,
+        seconds: (Date.now() - began) / 1000 });
       if (state.status === "done") return state.result;
       if (state.status === "error") throw new Error(state.error);
       await new Promise((resolve) => setTimeout(resolve, 350));

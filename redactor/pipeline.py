@@ -15,7 +15,7 @@ from typing import Callable, Iterable, Sequence
 from dataclasses import replace as _replace
 
 from . import (caption, categories, children, docx_processor, engine, grouping, mapping,
-               names, ner, officials, pdf_processor, photo, places,
+               names, ner, ocr_pool, officials, pdf_processor, photo, places,
                transactions)
 from .engine import PersonMatcher, Settings
 from .mapping import MappingStore
@@ -49,6 +49,41 @@ def as_document(path: Path, folder: Path) -> Path:
 
 def _noop(_message: str, _fraction: float) -> None:
     pass
+
+
+def _read_ahead(files: Sequence[Path], progress: Progress, per_file: int | None = None) -> None:
+    """The scanned pages of ``files`` read a few at once before a step walks
+    them one by one - see :mod:`ocr_pool`. Each page is counted as it is read."""
+    told = []
+
+    def page_read(path, index) -> None:
+        if not told:
+            progress("Reading scanned pages", 0.0)
+            told.append(True)
+        pdf_processor._page_read(path, index)
+
+    try:
+        ocr_pool.read_ahead(files, per_file=per_file, on_page=page_read)
+    except Exception:                              # the step reads them itself
+        pass
+
+
+def count_pages(files: Sequence[Path], per_file: int | None = None) -> int:
+    """Pages across the PDFs among ``files`` (photos are PDFs by now), at most
+    ``per_file`` from each. Word files have no pages until Word lays them out
+    and are not counted."""
+    import pymupdf
+
+    total = 0
+    for path in files:
+        if Path(path).suffix.lower() != ".pdf":
+            continue
+        try:
+            with pymupdf.open(path) as doc:
+                total += doc.page_count if per_file is None else min(doc.page_count, per_file)
+        except Exception:                          # unreadable: the run says so
+            continue
+    return total
 
 
 def tables_in(path: Path) -> list:
@@ -96,6 +131,7 @@ def column_texts(tables) -> list[str]:
 
 def collect_caption_names(files: Sequence[Path], progress: Progress = _noop) -> list[caption.CaptionName]:
     """Party names harvested from every selected document's caption and headers."""
+    _read_ahead(files, progress, per_file=pdf_processor.CAPTION_PAGES)
     regions: dict[str, str] = {}
     total = max(len(files), 1)
     for index, path in enumerate(files):
@@ -193,6 +229,7 @@ def document_texts(files: Sequence[Path], progress: Progress = _noop,
     rules want and the language model does not: it reads "Jenna Harrington
     <column gap> Colton Hughes" as one person."""
     texts: dict[str, str] = {}
+    _read_ahead(files, progress)
     total = max(len(files), 1)
     for index, path in enumerate(files):
         path = Path(path)
@@ -482,6 +519,8 @@ def prescan(
     """
     matcher = PersonMatcher(store, settings)
     total = max(len(files), 1)
+    if settings.ocr_scanned_pdfs:
+        _read_ahead(files, progress)
     # Tables first: a label/value pair split across two cells has to be a known
     # value before the paragraph walk reaches the cell holding the bare number.
     found = register_table_context(files, store, settings, progress)
@@ -787,6 +826,8 @@ def run_job(
         entity.occurrences = 0
         entity.documents.clear()
 
+    if settings.ocr_scanned_pdfs:
+        _read_ahead(files, progress)
     for index, raw_path in enumerate(files, start=1):
         path = Path(raw_path)
         kind = classify(path)

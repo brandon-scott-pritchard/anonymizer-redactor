@@ -329,3 +329,28 @@ def test_a_photo_in_a_folder_comes_back_as_a_pdf_in_the_same_place(client):
         assert archive.namelist() == ["Case/2024/receipt.pdf"]
         delivered = pymupdf.open(stream=archive.read("Case/2024/receipt.pdf"))
     assert "harrington" not in delivered[0].get_text().casefold()
+
+
+def _pdf(path, pages):
+    pymupdf = pytest.importorskip("pymupdf")
+    doc = pymupdf.open()
+    for number in range(pages):
+        doc.new_page().insert_text((72, 72), f"Kyle D Harrington, page {number + 1}, account 4417220193")
+    doc.save(path)
+    return path
+
+
+def test_each_step_counts_the_pages_it_reads(client, tmp_path):
+    """The time is in the pages, not the files: a step reports pages read of
+    the pages it will read, so the window can say how far along it is."""
+    first, second = _pdf(tmp_path / "a.pdf", 3), _pdf(tmp_path / "b.pdf", 8)
+    with open(first, "rb") as a, open(second, "rb") as b:
+        client.post("/api/files", files=[("files", ("a.pdf", a, "application/pdf")),
+                                          ("files", ("b.pdf", b, "application/pdf"))])
+    for path, body, total in (("/api/captions", None, 3 + 6),
+                              ("/api/review", {"names": [], "options": {}}, 11),
+                              ("/api/run", {"options": {}, "password": "pw-123456"}, 11)):
+        job_id = client.post(path, json=body).json()["job"]
+        wait_for(client, job_id)
+        state = client.get(f"/api/jobs/{job_id}").json()
+        assert (state["pages_done"], state["pages_total"]) == (total, total), path

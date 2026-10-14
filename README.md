@@ -69,6 +69,22 @@ Only if BOTH are unavailable does the tool refuse a scanned page; it refuses
 rather than writing a file that looks redacted without being redacted. With
 only one available, that one is used alone.
 
+Reading a scan is the slow part, so it is done as fast as the machine allows
+without changing a word of what is read:
+
+- both engines read each page at the same time, from one rendering of it;
+- up to four pages are read at once in worker processes (`redactor/ocr_pool.py`),
+  ahead of whichever step needs them, into the same per-page cache every step
+  reads. `REDACTOR_OCR_WORKERS=N` sets the number; `0` reads in-line;
+- scans start being read as soon as they are added, while the options and
+  names are being filled in.
+
+On 41 scanned pages that took the caption step from 126 s to 50 s on a 16-core
+Mac. Each step's progress bar counts pages—"Page 10 of 24 · about 1 min
+left"—since the time is in the pages, not the files. The app's `--selftest`
+reads a page in the workers, because a frozen build that cannot start them
+falls back to one page at a time without saying so.
+
 To bundle Tesseract into the macOS app:
 
 ```bash
@@ -600,8 +616,18 @@ macOS:
 ./build_macos.sh
 ```
 
-Produces `dist/Document Redactions & Anonymization.app`. It is unsigned, so the first launch
-needs a right-click → Open, then Open again in the dialog.
+Produces `dist/Document Redactions & Anonymization.app` and installs it in
+`/Applications`, replacing the copy there, so Applications always holds the
+latest build. `INSTALL=0` skips the install; `INSTALL_DIR=…` puts it elsewhere.
+If the installed copy is open, the build leaves it alone and says so: quit it,
+then run `./install_macos.sh` to finish. Quit any copy running from `dist/`
+before building—the build replaces it and refuses to start while it is open.
+It is unsigned, so the first launch needs a right-click → Open, then Open again
+in the dialog.
+
+The icon is `build/icon.icns` (and `build/icon.ico` for Windows), drawn by
+`build/make_icon.py` from the interface's own maroon and EB Garamond. The
+outputs are committed; run the script again only to change the design.
 
 The build needs Python 3.11 built for the Mac it runs on—PyInstaller freezes
 for the interpreter's architecture, and an Intel 3.11 on an Apple Silicon Mac
@@ -639,7 +665,7 @@ the language model, and copy the result back into `dist/`.
 ~/.venvs/anonymizer-redactor/bin/python -m pytest tests/ -q
 ```
 
-1,028 tests covering detector accuracy, allowlist protection, judicial-officer
+1,035 tests covering detector accuracy, allowlist protection, judicial-officer
 harvesting in every layout a court prints, child rosters and custody clauses,
 name-variant expansion and merging, overlapping-name folding, typo matching,
 Word's own run and tab structure, surrogate determinism, image redaction,
