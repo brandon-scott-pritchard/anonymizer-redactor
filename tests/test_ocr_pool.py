@@ -123,3 +123,19 @@ def test_the_pages_a_step_waits_for_go_ahead_of_a_dropped_batch(pool, tmp_path, 
     # pages can have been handed out before the step asked
     assert order.count("wanted.pdf") == 2
     assert order.index("wanted.pdf") <= 2 and order[:4].count("wanted.pdf") == 2
+
+
+@pytest.mark.parametrize("step", ["collect_children", "collect_officials", "document_texts"])
+def test_every_step_that_reads_whole_documents_reads_them_ahead(step, monkeypatch, tmp_path):
+    """The caption step read six pages ahead, then built the children list and
+    the bench page by page, one at a time, for hours, its counter already full."""
+    from redactor import pipeline
+    calls = []
+    monkeypatch.setattr(ocr_pool, "read_ahead",
+                        lambda files, per_file=None, **kw: calls.append((list(files), per_file)))
+    path = tmp_path / "a.pdf"
+    doc = pymupdf.open()
+    doc.new_page().insert_text((72, 72), "Nothing to see")
+    doc.save(path)
+    getattr(pipeline, step)([path])
+    assert ([path], None) in calls

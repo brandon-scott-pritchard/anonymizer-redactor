@@ -154,8 +154,14 @@ def collect_caption_names(files: Sequence[Path], progress: Progress = _noop) -> 
 
 def collect_children(files: Sequence[Path],
                      progress: Progress = _noop) -> list[caption.CaptionName]:
-    """Children and their birth dates, as proposals for the same name screen."""
+    """Children and their birth dates, as proposals for the same name screen.
+
+    Reads every page, not the caption's six, so every page is read ahead
+    first, a few at once - one page at a time it took hours on a large batch
+    while the page counter, which had counted only the caption pages, sat full.
+    """
     seen: dict[str, caption.CaptionName] = {}
+    _read_ahead(files, progress)
     total = max(len(files), 1)
     for index, raw_path in enumerate(files):
         path = Path(raw_path)
@@ -194,6 +200,7 @@ def collect_officials(files: Sequence[Path],
     block at the very bottom, and both have to survive the run untouched.
     """
     found: dict[str, str] = {}
+    _read_ahead(files, progress)
     total = max(len(files), 1)
     for index, raw_path in enumerate(files):
         path = Path(raw_path)

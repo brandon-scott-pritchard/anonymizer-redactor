@@ -347,7 +347,7 @@ def test_each_step_counts_the_pages_it_reads(client, tmp_path):
     with open(first, "rb") as a, open(second, "rb") as b:
         client.post("/api/files", files=[("files", ("a.pdf", a, "application/pdf")),
                                           ("files", ("b.pdf", b, "application/pdf"))])
-    for path, body, total in (("/api/captions", None, 3 + 6),
+    for path, body, total in (("/api/captions", None, 11),
                               ("/api/review", {"names": [], "options": {}}, 11),
                               ("/api/run", {"options": {}, "password": "pw-123456"}, 11)):
         job_id = client.post(path, json=body).json()["job"]

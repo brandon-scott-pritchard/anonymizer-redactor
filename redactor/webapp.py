@@ -529,7 +529,9 @@ def captions():
              "source": c.source, "category": c.category} for c in found],
             **_guard_payload()}
 
-    return {"job": _start_job(work, lambda: pipeline.count_pages(files, pdf_processor.CAPTION_PAGES))}
+    # the children and the bench are looked for on every page, so this step
+    # reads them all and counts them all
+    return {"job": _start_job(work, lambda: pipeline.count_pages(files))}
 
 
 @app.post("/api/suggestions")
