@@ -278,21 +278,7 @@ def collect_suggestions(
         for label, text in texts.items()
     }
 
-    known: set[str] = set()
-    for entity in store.entities.values():
-        known.add(entity.canonical.casefold())
-        for variant in entity.variants:
-            known.add(variant.text.casefold())
-    # Caption parties may not be in the store yet (the operator has not ticked
-    # them), but their surnames must never resurface as "organization" rows.
-    for item in caption_names or ():
-        known.add(item.name.casefold())
-        known.update(token.casefold() for token in item.name.split())
-    # a judge proposed as a person is the one suggestion nobody should be able
-    # to tick by accident
-    for term in settings.protected_names:
-        known.add(term.casefold())
-        known.update(token.casefold() for token in term.split())
+    known = _known_names(store, settings, caption_names)
 
     # Towns and cities come from rules and a gazetteer, not from the model, so
     # they are gathered before the model is consulted and survive a run where
@@ -350,23 +336,62 @@ def collect_suggestions(
                               and s.key not in seen]
     filtered = ner.drop_bare_names(filtered)
 
-    # A diminutive of a party's first name is that party, and the model has no
-    # idea - it offered "Chrissy" as an organization while Christine sat on the
-    # name list, and the nickname shipped. Retype it and say who it belongs to.
+    notes.append(note)
+    return _as_diminutives(filtered, store, caption_names), notes
+
+
+def _known_names(store: MappingStore, settings: Settings,
+                 caption_names: Sequence[caption.CaptionName] | None) -> set[str]:
+    """Names never to propose: what the list has, the caption's, the bench's."""
+    known: set[str] = set()
+    for entity in store.entities.values():
+        known.add(entity.canonical.casefold())
+        for variant in entity.variants:
+            known.add(variant.text.casefold())
+    # Caption parties may not be in the store yet (the operator has not ticked
+    # them), but their surnames must never resurface as "organization" rows.
+    for item in caption_names or ():
+        known.add(item.name.casefold())
+        known.update(token.casefold() for token in item.name.split())
+    # a judge proposed as a person is the one suggestion nobody should be able
+    # to tick by accident
+    for term in settings.protected_names:
+        known.add(term.casefold())
+        known.update(token.casefold() for token in term.split())
+    return known
+
+
+def _as_diminutives(found: list, store: MappingStore,
+                    caption_names: Sequence[caption.CaptionName] | None) -> list:
+    """A diminutive of a party's first name is that party, and the model has no
+    idea - it offered "Chrissy" as an organization while Christine sat on the
+    name list, and the nickname shipped. Retype it and say who it belongs to."""
     parties = [entity.canonical for entity in store.persons()]
     parties += [item.name for item in caption_names or ()]
-    for index, suggestion in enumerate(filtered):
+    out = list(found)
+    for index, suggestion in enumerate(out):
         # a confirmed town is not somebody's diminutive, whatever the table
         # says: Bill, Jack and Vernal are all real places
         if suggestion.category == "location":
             continue
         owner = names.nickname_for(suggestion.text, parties)
         if owner:
-            filtered[index] = _replace(suggestion, category="person",
-                                      nickname_for=owner)
+            out[index] = _replace(suggestion, category="person", nickname_for=owner)
+    return out
 
-    notes.append(note)
-    return filtered, notes
+
+def refine_suggestions(found: list, store: MappingStore, settings: Settings,
+                       caption_names: Sequence[caption.CaptionName] | None = None) -> list:
+    """Suggestions worked out before the name list existed, fitted to it.
+
+    A set's suggestions are gathered overnight, as soon as its pages are read,
+    with no names typed yet - so in the morning its name screen opens at once.
+    What the list now holds is taken back out, and a diminutive of a party is
+    retyped as that party, exactly as a fresh scan would.
+    """
+    known = _known_names(store, settings, caption_names)
+    return _as_diminutives([s for s in found if s.text.casefold() not in known],
+                           store, caption_names)
 
 
 _FIGURE = re.compile(r"(?<![\d,.])\$?\d{1,3}(?:,\d{3})*\.\d{2}(?!\d)")

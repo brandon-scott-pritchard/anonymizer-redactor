@@ -334,7 +334,8 @@ details.skipped ul { max-height: 180px; overflow-y: auto; margin: 6px 0 0; paddi
 .setchip .setstate { font: 400 12.5px/1.35 var(--sans); color: var(--muted); }
 .setchip.done .setstate { color: #2f6b3a; }
 .setchip.failed .setstate { color: var(--accent); }
-.setchip.running .setstate, .setchip.reading .setstate { color: var(--ink); }
+.setchip.running .setstate, .setchip.reading .setstate,
+.setchip.preparing .setstate { color: var(--ink); }
 .setbar { height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
 .setbar span { display: block; height: 100%; background: var(--accent); transition: width .4s; }
 .setremove {

@@ -22,6 +22,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import uuid
 import webbrowser
 from dataclasses import dataclass, field
@@ -144,13 +145,16 @@ class Session:
         """Started on first use: a session that never queues never runs a thread."""
         if self.queue is None:
             self.queue = sets.RunQueue(self.ocr_dir)
+            self.preparer = sets.Preparer(
+                self.ocr_dir, lambda: sorted(self.sets.values(), key=lambda s: s.rank),
+                lambda doc_set: _settings({}))
             self.awake = sets.KeepAwake(self.anything_going)
         return self.queue
 
     def anything_going(self) -> bool:
         if self.queue is not None and self.queue.busy():
             return True
-        return any(s.summary()["state"] == "reading" for s in self.sets.values())
+        return any(s.summary()["state"] in ("reading", "preparing") for s in self.sets.values())
 
 
 SESSION = Session()
@@ -481,8 +485,11 @@ def _read_in_background(added: list[Path]) -> None:
     if not added or ocr_pool.worker_count() < 1:
         return
     doc_set.reading_started(added)
+    doc_set.last_added = time.time()
     if ocr_pool.read_ahead_in_background(added, rank=doc_set.rank, on_page=doc_set.page_read,
                                          on_scans=doc_set.scans_found):
+        # once read, its name screen is worked out ahead too - see sets.Preparer
+        doc_set.prepare_wanted = True
         SESSION.run_queue()                  # keeps the Mac awake while it reads
     else:
         doc_set.unsurveyed = 0               # nothing reads ahead: the steps read in-line
@@ -516,22 +523,30 @@ def remove_all_files():
 @app.post("/api/captions")
 def captions():
     files = list(SESSION.files)
+    prepared = SESSION.current.ready_prepared()
 
     def work(progress):
-        found = pipeline.collect_caption_names(files, progress)
-        SESSION.caption_names = found
-        # the bench, harvested at the same time: their names are shielded for
-        # the whole run rather than proposed as parties
-        SESSION.officials = pipeline.collect_officials(files, progress)
-        SESSION.protection = officials.protected_terms(SESSION.officials)
+        if prepared is not None:
+            # worked out ahead, as soon as the set was read
+            found = prepared["caption_names"]
+            SESSION.caption_names = found
+            SESSION.officials = prepared["officials"]
+            SESSION.protection = prepared["protection"]
+        else:
+            found = pipeline.collect_caption_names(files, progress)
+            SESSION.caption_names = found
+            # the bench, harvested at the same time: their names are shielded
+            # for the whole run rather than proposed as parties
+            SESSION.officials = pipeline.collect_officials(files, progress)
+            SESSION.protection = officials.protected_terms(SESSION.officials)
         return {"captions": [
             {"name": c.name, "role": c.role, "confidence": c.confidence,
              "source": c.source, "category": c.category} for c in found],
             **_guard_payload()}
 
     # the children and the bench are looked for on every page, so this step
-    # reads them all and counts them all
-    return {"job": _start_job(work, lambda: pipeline.count_pages(files))}
+    # reads them all and counts them all - unless they were read ahead
+    return {"job": _start_job(work, None if prepared else lambda: pipeline.count_pages(files))}
 
 
 @app.post("/api/suggestions")
@@ -540,10 +555,18 @@ async def suggestions(request: Request):
     files = list(SESSION.files)
     settings, store, _entries = _prepare(body)
     captions_now = list(SESSION.caption_names)
+    prepared = SESSION.current.ready_prepared()
+    if prepared is not None and prepared["use_ner"] != settings.use_ner:
+        prepared = None                      # worked out with the model on, or off
 
     def work(progress):
-        found, notes = pipeline.collect_suggestions(
-            files, store, settings, progress, caption_names=captions_now)
+        if prepared is not None:
+            found = pipeline.refine_suggestions(prepared["suggestions"], store, settings,
+                                                captions_now)
+            notes = list(prepared["notes"])
+        else:
+            found, notes = pipeline.collect_suggestions(
+                files, store, settings, progress, caption_names=captions_now)
         SESSION.suggestions = found
         return {"suggestions": [
             {"text": s.text, "category": s.category, "count": s.count,
@@ -551,7 +574,7 @@ async def suggestions(request: Request):
             for s in found],
             "notes": notes, **_guard_payload()}
 
-    return {"job": _start_job(work, lambda: pipeline.count_pages(files))}
+    return {"job": _start_job(work, None if prepared else lambda: pipeline.count_pages(files))}
 
 
 # --------------------------------------------------------------------------

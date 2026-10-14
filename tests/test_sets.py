@@ -155,3 +155,60 @@ def test_the_sets_are_read_in_the_order_they_were_made(client):
     assert (first.rank, second.rank) == (1, 2)
     assert ocr_pool._ahead(first.rank, 9) < ocr_pool._ahead(second.rank, 0)
     assert ocr_pool.NEEDED_NOW < ocr_pool._ahead(first.rank, 0)
+
+
+def test_a_read_set_has_its_name_screen_worked_out_ahead(client, monkeypatch):
+    """Eleven sets read overnight still had minutes each of captions, bench and
+    suggestions to work out at the keyboard; worked out ahead, the name screen
+    opens at once - and says what a fresh scan would."""
+    if not ocr.usable_engines():
+        pytest.skip("no OCR engine")
+    monkeypatch.setattr(sets.Preparer, "SETTLE", 1.0)
+    set_id = client.get("/api/sets").json()["sets"][0]["id"]
+    letter = ("IN THE THIRD JUDICIAL DISTRICT COURT\nJANE ELIZABETH SMITH, Petitioner,\n"
+              "v.\nJOHN MICHAEL SMITH, Respondent.\nCase No. 224900871\n"
+              "Judge Amber M. Cordova\nPaid to Tanner Jensen on 03/02/2024 $120.00")
+    doc = pymupdf.open()
+    page = doc.new_page()
+    for number, line in enumerate(letter.splitlines()):
+        page.insert_text((72, 72 + 18 * number), line, fontsize=11)
+    client.post("/api/files", headers={"X-Set": set_id},
+                files=[("files", ("petition.pdf", doc.tobytes(), "application/pdf")),
+                       ("files", ("scan.pdf", _scan(["Account holder Jane Smith"]),
+                                  "application/pdf"))])
+    states = set()
+    _wait(client, lambda p: states.add(p["sets"][0]["state"]) or p["sets"][0]["state"] == "ready")
+    assert "preparing" in states
+    doc_set = webapp.SESSION.sets[set_id]
+    assert doc_set.ready_prepared() is not None
+
+    captions = client.post("/api/captions", headers={"X-Set": set_id})
+    result = _job(client, captions, set_id)
+    state = client.get(f"/api/jobs/{captions.json()['job']}", headers={"X-Set": set_id}).json()
+    assert state["pages_total"] == 0                    # nothing left to read
+    assert any("SMITH" in c["name"].upper() for c in result["captions"])
+    body = {"names": [{"name": "Jane Elizabeth Smith", "category": "person"}],
+            "options": {}}
+    prepared = _job(client, client.post("/api/suggestions", headers={"X-Set": set_id},
+                                        json=body), set_id)
+    # the same request with nothing prepared: a fresh scan
+    doc_set.prepared = None
+    fresh = _job(client, client.post("/api/suggestions", headers={"X-Set": set_id},
+                                     json=body), set_id)
+    assert sorted(s["text"] for s in prepared["suggestions"]) == \
+        sorted(s["text"] for s in fresh["suggestions"])
+    assert "Jane Elizabeth Smith" not in {s["text"] for s in prepared["suggestions"]}
+
+
+def test_a_set_given_more_files_is_prepared_again(tmp_path):
+    doc_set = sets.DocSet(id="a", name="A", rank=1, folder=tmp_path / "a")
+    doc_set.prepare_wanted = True
+    doc_set.files = [tmp_path / "one.pdf"]
+    doc_set.prepared, doc_set.prepared_for = {"x": 1}, doc_set._file_set()
+    assert doc_set.ready_prepared() is not None and not doc_set.should_prepare(0)
+    doc_set.files.append(tmp_path / "two.pdf")
+    assert doc_set.ready_prepared() is None
+    doc_set.last_added = time.time()
+    assert not doc_set.should_prepare(10)              # still uploading: wait
+    assert doc_set.should_prepare(0)
+    assert doc_set.summary()["state"] == "preparing"

@@ -52,9 +52,13 @@ cases, each with its own documents, names, review decisions, invented names
 and mapping-key password (`redactor/sets.py`). Make a set, name it, drop its
 documents in; make the next. The sets' scans are read in the background in
 the order the sets were made, each with its own counter ("Reading 340 of
-1,200 scanned pages"), and a set reads "ready to review" when its reading is
-done. Review it while the next one reads, then **Queue this set to run** on
-the Run step.
+1,200 scanned pages"). Once a set is read, everything its name screen shows
+—the captions, the children, the bench, the suggestions—is worked out ahead
+in a process of its own ("working out the name lists"), so a set reads
+"ready to review" with its name screen ready to open at once: drop every set
+in at night and review them all in the morning. A set given more files is
+worked out again. Review a set while the next one reads, then **Queue this
+set to run** on the Run step.
 
 Queued sets run one at a time, in the order queued, with no further input,
 into the results folder chosen at the top of the window—a folder per set,
@@ -687,7 +691,7 @@ the language model, and copy the result back into `dist/`.
 ~/.venvs/anonymizer-redactor/bin/python -m pytest tests/ -q
 ```
 
-1,040 tests covering detector accuracy, allowlist protection, judicial-officer
+1,045 tests covering detector accuracy, allowlist protection, judicial-officer
 harvesting in every layout a court prints, child rosters and custody clauses,
 name-variant expansion and merging, overlapping-name folding, typo matching,
 Word's own run and tab structure, surrogate determinism, image redaction,

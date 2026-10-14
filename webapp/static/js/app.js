@@ -814,6 +814,7 @@ function setStatus(info) {
   switch (info.state) {
     case "empty": return "No documents yet";
     case "reading": return `Reading ${n(read.done)} of ${n(read.total)} scanned pages`;
+    case "preparing": return "Read - working out the name lists";
     case "ready": return `${n(info.files)} document(s) read - ready to review`;
     case "queued": return "Queued to run";
     case "running": return run.total ? `Running - page ${n(run.done)} of ${n(run.total)}` : "Running";
