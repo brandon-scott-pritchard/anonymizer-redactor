@@ -42,8 +42,7 @@ def test_the_self_test_reads_a_page_in_the_worker_processes(monkeypatch):
         pytest.skip("no OCR engine")
     launcher = _launcher()
     monkeypatch.setenv("REDACTOR_OCR_WORKERS", "2")
-    for name, value in (("_pool", None), ("_broken", False), ("_pending", {}), ("_surveys", {})):
-        monkeypatch.setattr(ocr_pool, name, value)
+    ocr_pool.shutdown()
     ok, note = launcher._ocr_workers()
     assert ok, note
     assert note.startswith("2 worker(s)")

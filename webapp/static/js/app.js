@@ -163,11 +163,18 @@ const READABLE = new RegExp(`\\.(pdf|docx|${PHOTO_TYPES.join("|")})$`, "i");
 
 function FilesStep({ state, set, actions }) {
   const [over, setOver] = useState(false);
-  const pick = () => document.getElementById("filepick").click();
+  const pick = () => document.getElementById(`filepick-${state.setId}`).click();
   const onPicked = (list) => list.length && actions.upload(list);
   const asItems = (files) => [...files].map((file) => ({ file, path: file.webkitRelativePath || file.name }));
   const folders = folderCount(state.files);
   return html`
+    <div class="card setname">
+      <label>Name of this set
+        <input type="text" value=${state.setName}
+               placeholder="e.g. a client or case - it names the set's results folder"
+               onChange=${(e) => actions.renameSet(e.target.value)} />
+      </label>
+    </div>
     <div class="columns">
       <div class="card">
         <h2>Documents (Word, PDF, photos)</h2>
@@ -180,10 +187,10 @@ function FilesStep({ state, set, actions }) {
           Drop documents, photos of documents or whole folders here, or click to
           choose files. A photo comes back as a PDF, straightened and cropped to the
           page. Folders keep their layout. Everything stays on this computer.
-          <input id="filepick" type="file" multiple hidden
+          <input id=${`filepick-${state.setId}`} type="file" multiple hidden
                  accept=${[".docx", ".pdf", ...PHOTO_TYPES.map((t) => "." + t)].join(",")}
                  onChange=${(e) => { onPicked(asItems(e.target.files)); e.target.value = ""; }} />
-          <input id="folderpick" type="file" multiple hidden webkitdirectory=${true}
+          <input id=${`folderpick-${state.setId}`} type="file" multiple hidden webkitdirectory=${true}
                  onChange=${(e) => { onPicked(asItems(e.target.files)); e.target.value = ""; }} />
         </div>
         <div class="bar">
@@ -479,45 +486,56 @@ function ReviewStep({ state, actions, meta }) {
         onSave=${(changes) => actions.saveEditor(state.editing, changes)} />` : null}`;
 }
 
+// The run is queued, not run here: the queue runs every queued set one after
+// another, unattended, into the results folder - a folder per set - so the
+// next set can be reviewed while this one runs.
+const RUN_STATES = {
+  queued: "Queued - it runs when every set queued before it has.",
+  running: "Running now.",
+  done: "Done.",
+  failed: "Failed.",
+};
+
 function RunStep({ state, actions, meta }) {
-  const active = state.active;
-  const result = state.runInfo;
-  // The token goes on the URL because a download is a plain navigation, and a
-  // web view runs it as a separate task that does not reliably carry the
-  // same-site cookie. Without this the app window saved the API's 401 body
-  // under the archive's name, which opens as "unsupported format".
-  const dl = (kind) => `/api/download/${kind}` +
-    (meta && meta.download_token ? `?token=${encodeURIComponent(meta.download_token)}` : "");
+  const info = state.info || { run: {} };
+  const run = info.run || {};
+  const waiting = info.state === "queued";
+  const going = waiting || info.state === "running";
+  const finished = info.state === "done";
+  const dl = (kind) => `/api/download/${kind}?set=${encodeURIComponent(state.setId)}` +
+    (meta && meta.download_token ? `&token=${encodeURIComponent(meta.download_token)}` : "");
   return html`
     <div class="card">
       <h2>Run</h2>
-      <p>${state.files.length} document(s), ${active} item(s) will be replaced.
+      <p>${state.files.length} document(s), ${state.active} item(s) will be replaced.
          DOCX: ${state.options.docx_mode}. PDF: ${state.options.pdf_mode}.</p>
+      <p class="hint">Results go to
+        ${state.resultsRoot ? html` <strong>${state.resultsRoot}</strong>, in a folder named after this set`
+          : html` the results folder - choose it at the top of the window first`}.
+        Queued sets run one at a time, in the order they were queued, with no
+        further input: review the next set while this one runs.</p>
       <div class="bar">
-        <button class="primary" disabled=${state.busy.active}
-                onClick=${actions.run}>Run</button>
-        <button disabled=${!result} onClick=${() =>
-          navigator.clipboard.writeText(state.password)}>Copy mapping-key password</button>
+        ${waiting ? html`<button onClick=${actions.unqueue}>Take out of the queue</button>`
+          : html`<button class="primary" disabled=${state.busy.active || going || finished}
+                         onClick=${actions.queue}>Queue this set to run</button>`}
+        <button onClick=${() => navigator.clipboard.writeText(state.password)}>
+          Copy mapping-key password</button>
       </div>
-      ${result ? html`
-        <pre class="log">${result.outcomes.map((o) =>
-          `${o.source}: ${o.status}${o.delivered ? `  ->  ${o.delivered}` : ""}` +
-          `  (${o.hits} change(s))` +
-          (o.error ? `\n    ${o.error}` : "") +
-          (o.warnings || []).map((w) => `\n    WARNING: ${w}`).join("")
-        ).join("\n")}</pre>
-        <p class=${result.failed ? "status-bad" : "status-ok"}>
-          ${result.failed
-            ? `${result.failed} file(s) were refused or failed and are NOT in the archive.`
-            : "Finished."}</p>
-        ${result.skipped ? html`<p class="hint">${`${result.skipped} other file(s) in the folders were left out - not documents or photos. The report lists them.`}</p>` : null}
+      ${RUN_STATES[info.state] ? html`
+        <p class=${info.state === "failed" ? "status-bad" : info.state === "done" ? "status-ok" : ""}>
+          ${RUN_STATES[info.state]} ${run.message && info.state !== "done" ? `${run.message}.` : ""}
+          ${info.state === "running" && run.total ? ` Page ${run.done.toLocaleString()} of ${run.total.toLocaleString()}.` : ""}
+          ${run.error ? html`<br />${run.error}` : null}</p>` : null}
+      ${finished ? html`
+        <p class=${run.failed ? "status-bad" : "status-ok"}>
+          ${run.failed ? `${run.failed} of ${run.files} file(s) were refused or failed and are NOT in the archive - the report says why.`
+            : `${run.files} file(s) done.`} Saved in <strong>${run.results}</strong>.</p>
         <div class="downloads">
-          ${result.archive ? html`<a href=${dl("archive")} download><button class="primary">Download archive</button></a>` : null}
-          ${result.key ? html`<a href=${dl("key")} download><button>Download mapping key</button></a>` : null}
-          ${result.report ? html`<a href=${dl("report")} download><button>Download report</button></a>` : null}
+          <a href=${dl("archive")} download><button>Download archive</button></a>
+          <a href=${dl("key")} download><button>Download mapping key</button></a>
+          <a href=${dl("report")} download><button>Download report</button></a>
         </div>
-        ${result.key ? html`<p class="warn">Keep the mapping key and the report
-          away from anything you deliver.</p>` : null}` : null}
+        <p class="warn">Keep the mapping key and the report away from anything you deliver.</p>` : null}
     </div>
     <div class="bar">
       <button onClick=${() => actions.go(2)}>← Back</button>
@@ -526,8 +544,8 @@ function RunStep({ state, actions, meta }) {
 
 /* ------------------------------------------------------------------- app -- */
 
-function App() {
-  const [meta, setMeta] = useState(null);
+function Workspace({ setId, visible, meta, info, resultsRoot, refreshSets }) {
+  const api = useMemo(() => window.makeApi(setId), [setId]);
   const [step, setStep] = useState(0);
   const [unlocked, setUnlocked] = useState(0);
   const [files, setFiles] = useState([]);
@@ -552,15 +570,6 @@ function App() {
   const [runInfo, setRunInfo] = useState(null);
   const [busy, setBusy] = useState({ active: false, message: "", fraction: 0 });
   const [fault, setFault] = useState("");
-
-  useEffect(() => {
-    // the launch token did its job at load; the session cookie carries auth
-    // from here, so drop it from the URL rather than leave it on screen
-    if (window.location.search.includes("token=")) {
-      window.history.replaceState({}, "", window.location.pathname);
-    }
-    api.get("/api/state").then(setMeta).catch((e) => setFault(e.message));
-  }, []);
 
   const track = (message, fraction, pages) => setBusy({ active: true, message, fraction, pages });
   const settle = () => setBusy({ active: false, message: "", fraction: 0 });
@@ -636,7 +645,7 @@ function App() {
         if (result) applyFiles(result);
         return;
       }
-      document.getElementById("folderpick").click();   // a browser's own
+      document.getElementById(`folderpick-${setId}`).click();   // a browser's own
     }),
 
     removeFile: (index) => guarded(async () => {
@@ -758,16 +767,130 @@ function App() {
 
     toRun: () => { setUnlocked((u) => Math.max(u, 3)); setStep(3); },
 
-    run: () => guarded(async () => {
+    queue: () => guarded(async () => {
       if (!password.trim()) throw new Error("Set a mapping-key password first.");
-      const result = await api.job(api.post("/api/run", { options, password }), track);
-      setRunInfo(result);
+      refreshSets(await api.post("/api/queue", { options, password }));
+    }),
+
+    unqueue: () => guarded(async () => {
+      refreshSets(await api.post("/api/queue/cancel"));
+    }),
+
+    renameSet: (name) => guarded(async () => {
+      if (name.trim()) refreshSets(await api.patch(`/api/sets/${setId}`, { name }));
     }),
   };
 
   const set = {
     option: (key, value) => setOptions((o) => ({ ...o, [key]: value })),
     password: setPassword, showPassword: setShowPassword, namesText: setNamesText,
+  };
+
+  const state = { setId, setName: info ? info.name : "", info, resultsRoot,
+                  files, options, password, showPassword, namesText, captions,
+                  officials, guardNotes, overlaps,
+                  suggestions, suggChecked, suggCats, entities, risky, unused, active, instructions, skipped,
+                  editing, runInfo, busy };
+
+  // every set's workspace stays mounted, so switching sets loses nothing -
+  // the names typed, the ticks, the review list, the step it was on
+  return html`<div style=${{ display: visible ? "block" : "none" }}>
+    <${Stepper} step=${step} unlocked=${unlocked} go=${actions.go} />
+    ${fault ? html`<div class="card"><p class="error">${fault}</p></div>` : null}
+    ${step === 0 ? html`<${FilesStep} state=${state} set=${set} actions=${actions} />` : null}
+    ${step === 1 ? html`<${NamesStep} state=${state} set=${set} actions=${actions} meta=${meta} />` : null}
+    ${step === 2 ? html`<${ReviewStep} state=${state} actions=${actions} meta=${meta} />` : null}
+    ${step === 3 ? html`<${RunStep} state=${state} actions=${actions} meta=${meta} />` : null}
+    ${visible ? html`<${Progress} busy=${busy} />` : null}
+  </div>`;
+}
+
+/* ------------------------------------------------------------------ sets -- */
+
+function setStatus(info) {
+  const read = info.reading || {};
+  const run = info.run || {};
+  const n = (value) => (value || 0).toLocaleString();
+  switch (info.state) {
+    case "empty": return "No documents yet";
+    case "reading": return `Reading ${n(read.done)} of ${n(read.total)} scanned pages`;
+    case "ready": return `${n(info.files)} document(s) read - ready to review`;
+    case "queued": return "Queued to run";
+    case "running": return run.total ? `Running - page ${n(run.done)} of ${n(run.total)}` : "Running";
+    case "done": return run.failed ? `Done - ${run.failed} file(s) refused` : "Done";
+    case "failed": return "Run failed";
+    default: return "";
+  }
+}
+
+function SetsBar({ sets, actions }) {
+  return html`<div class="sets">
+    <div class="setlist">
+      ${sets.sets.map((info) => html`
+        <div key=${info.id}
+             class=${"setchip " + info.state + (info.id === sets.selected ? " selected" : "")}
+             onClick=${() => actions.select(info.id)}>
+          <span class="setname">${info.name}</span>
+          <span class="setstate">${setStatus(info)}</span>
+          ${info.state === "reading" && info.reading.total ? html`<span class="setbar"><span
+             style=${{ width: `${Math.round(100 * info.reading.done / info.reading.total)}%` }}></span></span>` : null}
+          ${info.state === "running" && info.run.total ? html`<span class="setbar"><span
+             style=${{ width: `${Math.round(100 * info.run.done / info.run.total)}%` }}></span></span>` : null}
+          ${sets.sets.length > 1 && !["queued", "running"].includes(info.state) ? html`<button
+             class="setremove" title="Remove this set"
+             onClick=${(e) => { e.stopPropagation(); actions.remove(info); }}>×</button>` : null}
+        </div>`)}
+      <button class="setadd" onClick=${actions.add}>+ New set</button>
+    </div>
+    <div class="resultsroot">
+      Results go to: <strong>${sets.results_root || "not chosen yet"}</strong>
+      <button onClick=${actions.chooseResults}>${sets.results_root ? "Change…" : "Choose folder…"}</button>
+    </div>
+  </div>`;
+}
+
+function App() {
+  const [meta, setMeta] = useState(null);
+  const [sets, setSets] = useState({ sets: [], selected: null, results_root: "" });
+  const [fault, setFault] = useState("");
+
+  useEffect(() => {
+    // the launch token did its job at load; the session cookie carries auth
+    // from here, so drop it from the URL rather than leave it on screen
+    if (window.location.search.includes("token=")) {
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+    api.get("/api/state").then((state) => { setMeta(state); setSets(state); })
+      .catch((e) => setFault(e.message));
+    // the sets read and run in the background: their counters move on their own
+    const timer = setInterval(() => {
+      api.get("/api/sets").then(setSets).catch(() => {});
+    }, 2000);
+    return () => clearInterval(timer);
+  }, []);
+
+  async function guarded(work) {
+    setFault("");
+    try { return await work(); } catch (error) { setFault(error.message); }
+  }
+
+  const actions = {
+    add: () => guarded(async () => setSets(await api.post("/api/sets", {}))),
+    select: (id) => guarded(async () => setSets(await api.post(`/api/sets/${id}/select`))),
+    remove: (info) => guarded(async () => {
+      if (!window.confirm(`Remove "${info.name}" and its documents from this window?`)) return;
+      setSets(await api.del(`/api/sets/${info.id}`));
+    }),
+    chooseResults: () => guarded(async () => {
+      const bridge = window.pywebview && window.pywebview.api;
+      if (bridge && bridge.choose_results_folder) {
+        const result = await bridge.choose_results_folder();
+        if (result) setSets(result);
+        return;
+      }
+      const typed = window.prompt("Folder for the results (a full path):", sets.results_root || "");
+      if (typed) setSets(await api.post("/api/results-folder", { path: typed }));
+    }),
   };
 
   if (!meta) {
@@ -779,24 +902,17 @@ function App() {
         : html`<p class="hint">Loading…</p>`}</div></div></div>`;
   }
 
-  const state = { files, options, password, showPassword, namesText, captions,
-                  officials, guardNotes, overlaps,
-                  suggestions, suggChecked, suggCats, entities, risky, unused, active, instructions, skipped,
-                  editing, runInfo, busy };
-
   return html`<div>
     <header class="topbar"><div class="topbar-inner">
       <h1>Document Redactions & Anonymization</h1>
       <span class="version">${meta.version} · everything stays on this computer</span>
     </div></header>
     <div class="shell">
-      <${Stepper} step=${step} unlocked=${unlocked} go=${actions.go} />
+      <${SetsBar} sets=${sets} actions=${actions} />
       ${fault ? html`<div class="card"><p class="error">${fault}</p></div>` : null}
-      ${step === 0 ? html`<${FilesStep} state=${state} set=${set} actions=${actions} />` : null}
-      ${step === 1 ? html`<${NamesStep} state=${state} set=${set} actions=${actions} meta=${meta} />` : null}
-      ${step === 2 ? html`<${ReviewStep} state=${state} actions=${actions} meta=${meta} />` : null}
-      ${step === 3 ? html`<${RunStep} state=${state} actions=${actions} meta=${meta} />` : null}
-      <${Progress} busy=${busy} />
+      ${sets.sets.map((info) => html`<${Workspace} key=${info.id} setId=${info.id}
+          visible=${info.id === sets.selected} meta=${meta} info=${info}
+          resultsRoot=${sets.results_root} refreshSets=${setSets} />`)}
     </div>
   </div>`;
 }

@@ -119,8 +119,7 @@ def _ocr_workers() -> tuple[bool, str]:
         cached = base is not None and pdf_processor.ocr_cached(base, names)
         words = [w[4] for name in names
                  for w in (pdf_processor._ocr_cache.get(base + (name,)) or [])] if cached else []
-        if ocr_pool._pool is not None:
-            ocr_pool._pool.shutdown(wait=True, cancel_futures=True)
+        ocr_pool.shutdown()
     if read != [0] or not cached:
         return False, (f"{count} worker(s) started, but no page came back - "
                        "reading falls back to one page at a time")

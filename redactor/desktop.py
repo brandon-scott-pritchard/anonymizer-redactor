@@ -17,7 +17,7 @@ import urllib.error
 import urllib.request
 
 from . import __version__
-from .webapp import COOKIE, TOKEN, add_paths, app
+from .webapp import COOKIE, TOKEN, add_paths, app, set_results_root
 
 WINDOW_TITLE = "Document Redactions & Anonymization"
 MIN_SIZE = (900, 620)
@@ -91,6 +91,17 @@ class Bridge:
         if not chosen:
             return None
         return add_paths(list(chosen))
+
+    def choose_results_folder(self):
+        """The one folder every queued set's results go to, a folder each."""
+        import webview
+
+        if not webview.windows:
+            return None
+        chosen = webview.windows[0].create_file_dialog(webview.FileDialog.FOLDER)
+        if not chosen:
+            return None
+        return set_results_root(chosen[0])
 
 
 def main() -> int:

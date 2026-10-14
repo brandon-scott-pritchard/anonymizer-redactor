@@ -1,8 +1,11 @@
 /* Thin fetch wrappers. The auth cookie is set by the launcher's first load. */
 
-window.api = (() => {
+/* makeApi(setId) speaks for one set of documents: every call names it, so a
+   step started in one set's tab works on that set whichever tab is showing
+   by the time it finishes. window.api is the one for calls about no set. */
+window.makeApi = (setId) => {
   async function request(method, path, body) {
-    const options = { method, headers: {} };
+    const options = { method, headers: setId ? { "X-Set": setId } : {} };
     if (body instanceof FormData) {
       options.body = body;
     } else if (body !== undefined) {
@@ -41,4 +44,6 @@ window.api = (() => {
   }
 
   return { get, post, patch, del, job };
-})();
+};
+
+window.api = window.makeApi(null);

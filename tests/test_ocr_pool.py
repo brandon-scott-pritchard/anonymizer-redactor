@@ -1,6 +1,7 @@
 """Scanned pages read ahead in worker processes: the same words, sooner."""
 
 import io
+from pathlib import Path
 
 import pytest
 
@@ -14,12 +15,10 @@ def pool(monkeypatch):
     if not ocr.usable_engines():
         pytest.skip("no OCR engine")
     monkeypatch.setenv("REDACTOR_OCR_WORKERS", "2")
-    for name, value in (("_pool", None), ("_broken", False), ("_pending", {}), ("_surveys", {})):
-        monkeypatch.setattr(ocr_pool, name, value)
+    ocr_pool.shutdown()
     pdf_processor._ocr_cache.clear()
     yield
-    if ocr_pool._pool is not None:
-        ocr_pool._pool.shutdown(wait=True, cancel_futures=True)
+    ocr_pool.shutdown()
     pdf_processor._ocr_cache.clear()
 
 
@@ -71,24 +70,28 @@ def test_reading_stops_at_the_pages_a_step_needs(pool, tmp_path):
     assert not pdf_processor.ocr_cached(pdf_processor._ocr_key(path, 3), names)
 
 
-def test_a_page_read_in_the_background_is_not_read_twice(pool, tmp_path):
+def test_a_page_read_in_the_background_is_not_read_twice(pool, tmp_path, monkeypatch):
     path = _scan(tmp_path / "scan.pdf", 2)
     ocr_pool.read_ahead([path], wait=False)
-    in_flight = dict(ocr_pool._pending)
+    scheduler = ocr_pool._get_scheduler()
+    submitted = []
+    real = scheduler.readers.submit
+    monkeypatch.setattr(scheduler.readers, "submit",
+                        lambda fn, *args: submitted.append(args) or real(fn, *args))
     seen = []
     ocr_pool.read_ahead([path], on_page=lambda p, i: seen.append(i))
     # the step waited on the readings already under way rather than starting its own
-    assert set(in_flight) <= {pdf_processor._ocr_key(path, i) for i in range(2)}
+    assert len(submitted) == len(set(submitted)) and sorted(seen) == [0, 1]
     names = [engine.name for engine in ocr.usable_engines()]
     assert all(pdf_processor.ocr_cached(pdf_processor._ocr_key(path, i), names) for i in range(2))
 
 
 def test_turned_off_it_reads_nothing(monkeypatch, tmp_path):
     monkeypatch.setenv("REDACTOR_OCR_WORKERS", "0")
-    monkeypatch.setattr(ocr_pool, "_pool", None)
+    ocr_pool.shutdown()
     seen = []
     ocr_pool.read_ahead([tmp_path / "missing.pdf"], on_page=lambda p, i: seen.append(i))
-    assert seen == [] and ocr_pool._pool is None
+    assert seen == [] and ocr_pool._scheduler is None
 
 
 def test_text_pages_are_not_sent_for_reading(pool, tmp_path):
@@ -98,4 +101,25 @@ def test_text_pages_are_not_sent_for_reading(pool, tmp_path):
     doc.save(path)
     seen = []
     ocr_pool.read_ahead([path], on_page=lambda p, i: seen.append(i))
-    assert seen == [] and not ocr_pool._pending
+    scheduler = ocr_pool._get_scheduler()
+    assert seen == [] and not scheduler.pages
+
+
+def test_the_pages_a_step_waits_for_go_ahead_of_a_dropped_batch(pool, tmp_path, monkeypatch):
+    """A drop of a few hundred files queued every page of every file, and the
+    caption step - wanting only the first pages - waited behind the lot with
+    its counter at nought."""
+    monkeypatch.setenv("REDACTOR_OCR_WORKERS", "1")
+    ocr_pool.shutdown()
+    batch, wanted = _scan(tmp_path / "batch.pdf", 6), _scan(tmp_path / "wanted.pdf", 2)
+    ocr_pool.read_ahead([batch], wait=False)
+    scheduler = ocr_pool._get_scheduler()
+    order = []
+    finished = scheduler._finished
+    monkeypatch.setattr(scheduler, "_finished",
+                        lambda base, task: order.append(Path(base[0]).name) or finished(base, task))
+    ocr_pool.read_ahead([wanted], on_page=lambda p, i: None)
+    # one worker and one page ready behind it: at most two of the batch's
+    # pages can have been handed out before the step asked
+    assert order.count("wanted.pdf") == 2
+    assert order.index("wanted.pdf") <= 2 and order[:4].count("wanted.pdf") == 2

@@ -14,6 +14,7 @@ Run with ``python -m redactor.webapp``.
 from __future__ import annotations
 
 import atexit
+import contextvars
 import os
 import re
 import secrets
@@ -31,7 +32,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import (__version__, caption, categories, feedback, grouping, names as _names, ner,
-               ocr_pool, officials, pdf_processor, pipeline, review)
+               ocr_pool, officials, pdf_processor, pipeline, review, sets)
 from .engine import Settings
 from .mapping import MappingStore
 
@@ -67,47 +68,107 @@ class Job:
     pages_total: int = 0
 
 
+# Which set a request is about: the page names it on every call (the X-Set
+# header, or ?set= on a download), and a job carries it onto its thread.
+_current_set: contextvars.ContextVar[str | None] = contextvars.ContextVar("current_set",
+                                                                          default=None)
+
+
+class _PerSet:
+    """A Session attribute that is really the current set's."""
+
+    def __set_name__(self, owner, name: str) -> None:
+        self.name = name
+
+    def __get__(self, session, owner=None):
+        if session is None:
+            return self
+        return getattr(session.current, self.name)
+
+    def __set__(self, session, value) -> None:
+        setattr(session.current, self.name, value)
+
+
 class Session:
-    """One operator, one batch. The web app is single-user by design."""
+    """One operator, any number of sets - see :mod:`redactor.sets`.
+
+    Everything a set owns (its files, names, review list and results) is
+    reached through the session as before - ``SESSION.files``,
+    ``SESSION.store`` - and means the set the request is about.
+    """
+
+    uploads = _PerSet()
+    output = _PerSet()
+    files = _PerSet()
+    relative = _PerSet()
+    skipped = _PerSet()
+    store = _PerSet()
+    caption_names = _PerSet()
+    officials = _PerSet()
+    protection = _PerSet()
+    suggestions = _PerSet()
+    overlaps = _PerSet()
+    run_result = _PerSet()
 
     def __init__(self) -> None:
         self.workdir = Path(tempfile.mkdtemp(prefix="anonymizer-web-"))
-        # the uploads are the client's documents, unredacted: gone when the
-        # app is, not left in the temp folder
+        # the uploads are the client's documents, unredacted, and the readings
+        # kept beside them are their text: gone when the app is, not left in
+        # the temp folder
         atexit.register(shutil.rmtree, self.workdir, True)
-        self.uploads = self.workdir / "uploads"
-        self.output = self.workdir / "output"
-        self.uploads.mkdir()
-        self.output.mkdir()
-        self.files: list[Path] = []
-        # where each file sat in what was dropped in ("Case/2024/a.pdf"), and
-        # what those folders held that is not a PDF or Word file
-        self.relative: dict[Path, str] = {}
-        self.skipped: list[str] = []
-        self.store = MappingStore()
-        self.caption_names: list[caption.CaptionName] = []
-        self.officials: list[officials.Official] = []
-        self.protection = officials.Protection([], [], [])
-        self.suggestions: list[ner.Suggestion] = []
-        self.overlaps: list[_names.Overlap] = []
-        self.run_result: pipeline.RunResult | None = None
+        self.ocr_dir = self.workdir / "ocr"
+        pdf_processor.keep_ocr_on_disk(self.ocr_dir)
+        self.sets: dict[str, sets.DocSet] = {}
+        self.selected = self.new_set().id
+        self.results_root: Path | None = None
         self.jobs: dict[str, Job] = {}
         self.busy = threading.Lock()
+        self.queue: sets.RunQueue | None = None
+        self.awake: sets.KeepAwake | None = None
+
+    def new_set(self, name: str = "") -> sets.DocSet:
+        rank = max((s.rank for s in self.sets.values()), default=0) + 1
+        set_id = sets.new_id()
+        doc_set = sets.DocSet(id=set_id, name=name.strip() or f"Set {rank}", rank=rank,
+                              folder=self.workdir / "sets" / set_id)
+        self.sets[set_id] = doc_set
+        return doc_set
+
+    @property
+    def current(self) -> sets.DocSet:
+        chosen = _current_set.get()
+        return self.sets.get(chosen) or self.sets.get(self.selected) \
+            or next(iter(self.sets.values()))
+
+    def run_queue(self) -> sets.RunQueue:
+        """Started on first use: a session that never queues never runs a thread."""
+        if self.queue is None:
+            self.queue = sets.RunQueue(self.ocr_dir)
+            self.awake = sets.KeepAwake(self.anything_going)
+        return self.queue
+
+    def anything_going(self) -> bool:
+        if self.queue is not None and self.queue.busy():
+            return True
+        return any(s.summary()["state"] == "reading" for s in self.sets.values())
 
 
 SESSION = Session()
 
 
-def _start_job(work, pages_total: int = 0) -> str:
+def _start_job(work, pages=None) -> str:
     """Run ``work(progress)`` on a thread; the browser polls the job.
 
-    ``pages_total`` is how many pages the step will read; each page read is
-    counted against it as it happens.
+    ``pages`` says how many pages the step will read - counted on the job's
+    thread, where the PDFs are opened; each page read is counted against it as
+    it happens. The job works on the set the request was about, whichever set
+    the page shows by the time it finishes.
     """
     if not SESSION.busy.acquire(blocking=False):
         raise HTTPException(409, "Still working on the previous step.")
     job_id = uuid.uuid4().hex
-    job = SESSION.jobs[job_id] = Job(pages_total=pages_total)
+    job = SESSION.jobs[job_id] = Job()
+    context = contextvars.copy_context()
     seen: set[tuple[str, int]] = set()
 
     def progress(message: str, fraction: float) -> None:
@@ -119,6 +180,8 @@ def _start_job(work, pages_total: int = 0) -> str:
 
     def runner() -> None:
         try:
+            if pages is not None:
+                job.pages_total = pages()
             with pdf_processor.page_listener(page_read):
                 job.result = work(progress)
             job.status = "done"
@@ -128,7 +191,7 @@ def _start_job(work, pages_total: int = 0) -> str:
         finally:
             SESSION.busy.release()
 
-    threading.Thread(target=runner, daemon=True).start()
+    threading.Thread(target=lambda: context.run(runner), daemon=True).start()
     return job_id
 
 
@@ -262,7 +325,12 @@ async def _require_token(request: Request, call_next):
         supplied = request.query_params.get("token", "")
     if not secrets.compare_digest(supplied or "", TOKEN):
         return JSONResponse({"detail": "unauthorized"}, status_code=401)
-    return await call_next(request)
+    chosen = request.headers.get("x-set") or request.query_params.get("set")
+    marker = _current_set.set(chosen)
+    try:
+        return await call_next(request)
+    finally:
+        _current_set.reset(marker)
 
 
 @app.get("/")
@@ -296,6 +364,7 @@ def state():
         # so the results screen can put it on the download links; see the
         # middleware above for why a cookie is not enough
         "download_token": TOKEN,
+        **_sets_payload(),
     }
 
 
@@ -386,7 +455,7 @@ async def upload(files: list[UploadFile] = File(default=[]),
             SESSION.skipped.append(relative)
     # the scans start being read now, while the operator sets the options and
     # types the names, rather than when the first step asks for them
-    ocr_pool.read_ahead_in_background(added)
+    _read_in_background(added)
     return {"added": len(added), **_files_payload()}
 
 
@@ -402,8 +471,21 @@ def add_paths(paths: list[str | Path]) -> dict:
         if kept is not None:
             added.append(kept)
     SESSION.skipped.extend(gathered.skipped)
-    ocr_pool.read_ahead_in_background(added)
+    _read_in_background(added)
     return {"added": len(added), **_files_payload()}
+
+
+def _read_in_background(added: list[Path]) -> None:
+    """Queue the set's scans for reading, behind every set made before it."""
+    doc_set = SESSION.current
+    if not added or ocr_pool.worker_count() < 1:
+        return
+    doc_set.reading_started(added)
+    if ocr_pool.read_ahead_in_background(added, rank=doc_set.rank, on_page=doc_set.page_read,
+                                         on_scans=doc_set.scans_found):
+        SESSION.run_queue()                  # keeps the Mac awake while it reads
+    else:
+        doc_set.unsurveyed = 0               # nothing reads ahead: the steps read in-line
 
 
 @app.delete("/api/files/{index}")
@@ -447,7 +529,7 @@ def captions():
              "source": c.source, "category": c.category} for c in found],
             **_guard_payload()}
 
-    return {"job": _start_job(work, pipeline.count_pages(files, pdf_processor.CAPTION_PAGES))}
+    return {"job": _start_job(work, lambda: pipeline.count_pages(files, pdf_processor.CAPTION_PAGES))}
 
 
 @app.post("/api/suggestions")
@@ -467,7 +549,7 @@ async def suggestions(request: Request):
             for s in found],
             "notes": notes, **_guard_payload()}
 
-    return {"job": _start_job(work, pipeline.count_pages(files))}
+    return {"job": _start_job(work, lambda: pipeline.count_pages(files))}
 
 
 # --------------------------------------------------------------------------
@@ -493,7 +575,7 @@ async def build_review(request: Request):
         SESSION.store = store
         return {**_entities_payload(), **_guard_payload()}
 
-    return {"job": _start_job(work, pipeline.count_pages(files))}
+    return {"job": _start_job(work, lambda: pipeline.count_pages(files))}
 
 
 @app.patch("/api/entities")
@@ -598,7 +680,111 @@ async def run(request: Request):
             "skipped": len(result.skipped),
         }
 
-    return {"job": _start_job(work, pipeline.count_pages(files))}
+    return {"job": _start_job(work, lambda: pipeline.count_pages(files))}
+
+
+# --------------------------------------------------------------------------
+# sets and the run queue
+# --------------------------------------------------------------------------
+
+
+def _sets_payload() -> dict:
+    return {"sets": [s.summary() for s in sorted(SESSION.sets.values(), key=lambda s: s.rank)],
+            "selected": SESSION.selected,
+            "results_root": str(SESSION.results_root) if SESSION.results_root else ""}
+
+
+def _find_set(set_id: str) -> sets.DocSet:
+    found = SESSION.sets.get(set_id)
+    if found is None:
+        raise HTTPException(404, "no such set")
+    return found
+
+
+@app.get("/api/sets")
+def list_sets():
+    return _sets_payload()
+
+
+@app.post("/api/sets")
+async def create_set(request: Request):
+    body = await request.json() if await request.body() else {}
+    doc_set = SESSION.new_set(str(body.get("name", "")))
+    SESSION.selected = doc_set.id
+    return _sets_payload()
+
+
+@app.post("/api/sets/{set_id}/select")
+def select_set(set_id: str):
+    SESSION.selected = _find_set(set_id).id
+    return _sets_payload()
+
+
+@app.patch("/api/sets/{set_id}")
+async def rename_set(set_id: str, request: Request):
+    doc_set = _find_set(set_id)
+    name = str((await request.json()).get("name", "")).strip()
+    if name:
+        doc_set.name = name[:120]
+    return _sets_payload()
+
+
+@app.delete("/api/sets/{set_id}")
+def remove_set(set_id: str):
+    doc_set = _find_set(set_id)
+    if doc_set.run_state in ("queued", "running"):
+        raise HTTPException(409, "Take it out of the queue first - or wait for it to finish.")
+    pdf_processor.forget_ocr(doc_set.files)
+    shutil.rmtree(doc_set.folder, ignore_errors=True)
+    del SESSION.sets[set_id]
+    if not SESSION.sets:
+        SESSION.new_set()
+    if SESSION.selected not in SESSION.sets:
+        SESSION.selected = next(iter(SESSION.sets))
+    return _sets_payload()
+
+
+def set_results_root(path: str | Path) -> dict:
+    """Where every set's results go, a folder per set. The app window's
+    folder panel calls this; the page posts a typed path in a browser."""
+    root = Path(path).expanduser()
+    if not root.is_dir():
+        raise HTTPException(422, f"{root} is not a folder.")
+    SESSION.results_root = root.resolve()
+    return _sets_payload()
+
+
+@app.post("/api/results-folder")
+async def results_folder(request: Request):
+    return set_results_root(str((await request.json()).get("path", "")))
+
+
+@app.post("/api/queue")
+async def queue_run(request: Request):
+    """Queue this set's run. It runs when every set queued before it has, and
+    writes its archive, mapping key and report to its own folder."""
+    body = await request.json()
+    password = str(body.get("password", ""))
+    if not password.strip():
+        raise HTTPException(422, "Set a mapping-key password first.")
+    if SESSION.results_root is None:
+        raise HTTPException(422, "Choose the folder the results go to first.")
+    doc_set = SESSION.current
+    if not doc_set.files:
+        raise HTTPException(422, "Add at least one document first.")
+    if not doc_set.store.entities:
+        raise HTTPException(422, "Build the review list first - the run uses what it says.")
+    settings = _settings(body.get("options", {}))
+    SESSION.run_queue().add(doc_set, settings, password, SESSION.results_root)
+    return _sets_payload()
+
+
+@app.post("/api/queue/cancel")
+def cancel_run():
+    doc_set = SESSION.current
+    if not SESSION.run_queue().cancel(doc_set):
+        raise HTTPException(409, "Only a set still waiting in the queue can be taken out.")
+    return _sets_payload()
 
 
 @app.get("/api/jobs/{job_id}")

@@ -466,12 +466,10 @@ def _read_page_words(page: pymupdf.Page, path: Path, index: int, engines=None):
     base = _ocr_key(path, index)
     found: dict[str, list] = {}
     if base is not None:
-        with _ocr_cache_lock:
-            for engine_ in engines:
-                words = _ocr_cache.get(base + (engine_.name,))
-                if words is not None:
-                    _ocr_cache.move_to_end(base + (engine_.name,))
-                    found[engine_.name] = words
+        for engine_ in engines:
+            words = _cached_words(base, engine_.name)
+            if words is not None:
+                found[engine_.name] = words
     missing = [engine_ for engine_ in engines if engine_.name not in found]
     if missing:
         # one picture of the page, read by every engine at once: each is a
@@ -508,21 +506,104 @@ def _read_side_by_side(image, engines) -> list:
         return list(threads.map(read, engines))
 
 
-def store_ocr(base: tuple, by_engine: dict) -> None:
-    """Keep each engine's reading of a page; a failed reading is not kept."""
+# Readings also kept on disk, when a folder is given for them. Eleven sets of
+# a few thousand scanned pages each will not fit in memory, and a set queued
+# to run overnight is run by a process of its own, which has none of this
+# process's memory - without the copy on disk it read every page again. The
+# folder is the app's private temporary folder, emptied when a set is done
+# and removed when the app quits, the same as the uploaded copies beside it.
+_spill_dir: Path | None = None
+
+
+def keep_ocr_on_disk(folder: Path | None) -> None:
+    global _spill_dir
+    _spill_dir = Path(folder) if folder is not None else None
+    if _spill_dir is not None:
+        _spill_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _spill_path(base: tuple, name: str) -> Path | None:
+    if _spill_dir is None:
+        return None
+    import hashlib
+
+    folder = hashlib.sha1(base[0].encode("utf-8")).hexdigest()[:20]
+    page = hashlib.sha1(repr(base).encode("utf-8")).hexdigest()[:20]
+    return _spill_dir / folder / f"{page}-{re.sub(r'[^A-Za-z0-9]', '', name)}.pkl"
+
+
+def _cached_words(base: tuple, name: str) -> list | None:
+    """One engine's reading of a page, from memory or else from disk."""
+    key = base + (name,)
     with _ocr_cache_lock:
-        for name, words in by_engine.items():
-            if words is None:
-                continue
-            _ocr_cache[base + (name,)] = words
-            _ocr_cache.move_to_end(base + (name,))
+        words = _ocr_cache.get(key)
+        if words is not None:
+            _ocr_cache.move_to_end(key)
+            return words
+    spilled = _spill_path(base, name)
+    if spilled is None or not spilled.is_file():
+        return None
+    import pickle
+
+    try:
+        words = pickle.loads(spilled.read_bytes())
+    except Exception:                              # a torn file: read the page again
+        return None
+    _remember(key, words)
+    return words
+
+
+def _remember(key: tuple, words: list) -> None:
+    with _ocr_cache_lock:
+        _ocr_cache[key] = words
+        _ocr_cache.move_to_end(key)
         while len(_ocr_cache) > OCR_CACHE_PAGES:
             _ocr_cache.popitem(last=False)
 
 
+def store_ocr(base: tuple, by_engine: dict) -> None:
+    """Keep each engine's reading of a page; a failed reading is not kept."""
+    import pickle
+
+    for name, words in by_engine.items():
+        if words is None:
+            continue
+        _remember(base + (name,), words)
+        spilled = _spill_path(base, name)
+        if spilled is not None:
+            try:
+                spilled.parent.mkdir(parents=True, exist_ok=True)
+                partial = spilled.with_suffix(".partial")
+                partial.write_bytes(pickle.dumps(words))
+                partial.replace(spilled)             # whole or not at all
+            except OSError:
+                pass
+
+
 def ocr_cached(base: tuple, names) -> bool:
+    for name in names:
+        with _ocr_cache_lock:
+            if base + (name,) in _ocr_cache:
+                continue
+        spilled = _spill_path(base, name)
+        if spilled is None or not spilled.is_file():
+            return False
+    return True
+
+
+def forget_ocr(paths) -> None:
+    """Drop every reading of ``paths``, from memory and from disk."""
+    import hashlib
+    import shutil
+
+    wanted = {str(Path(p).resolve()) for p in paths}
     with _ocr_cache_lock:
-        return all(base + (name,) in _ocr_cache for name in names)
+        for key in [k for k in _ocr_cache if k[0] in wanted]:
+            del _ocr_cache[key]
+    if _spill_dir is not None:
+        for resolved in wanted:
+            folder = _spill_dir / hashlib.sha1(resolved.encode("utf-8")).hexdigest()[:20]
+            shutil.rmtree(folder, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------

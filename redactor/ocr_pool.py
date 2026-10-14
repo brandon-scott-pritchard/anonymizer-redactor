@@ -12,9 +12,17 @@ Processes, not threads. PyMuPDF must not be used from two threads at once, and
 the page has to be drawn before it can be read; each worker opens the file
 itself, draws the page and hands the picture to both engines side by side.
 
-The pool is started on first use and shared by everything, so a drop read in
-the background and the step that later needs the same pages never read a page
-twice: a page already on its way is waited for, not read again.
+Pages are read in order of need, not in the order they were asked for. A drop
+of a few hundred files queued every page of every file, and the caption step -
+which reads the first six pages of each - waited behind the lot with its page
+counter at nought. So the pages a step is waiting for go first, then the
+first pages of every file (the caption step's), then the rest. Which pages
+of a file are scans is found by a process of its own, so that never queues
+behind the reading either.
+
+Everything is shared, so a drop read in the background and the step that
+later needs the same pages never read a page twice: a page already queued is
+moved up, and one already being read is waited for.
 
 ``REDACTOR_OCR_WORKERS`` sets the number of workers; 0 turns reading ahead
 off (the corpus harness runs its own pool of processes and sets it so).
@@ -23,9 +31,12 @@ off (the corpus harness runs its own pool of processes and sets it so).
 from __future__ import annotations
 
 import atexit
+import heapq
+import itertools
 import os
+import queue
 import threading
-from concurrent.futures import Future, ProcessPoolExecutor, as_completed
+from concurrent.futures import Future, ProcessPoolExecutor
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -34,10 +45,19 @@ from typing import Callable, Iterable
 # engines contend for cores more than they gain.
 MAX_WORKERS = 4
 
+# Lower is sooner: a page a step is waiting for, then the sets read ahead in
+# the order they were made - each set's caption pages before its others.
+NEEDED_NOW = (1,)
+
+
+def _ahead(rank: int, index: int) -> tuple:
+    from . import pdf_processor
+
+    return (2, rank, 0 if index < pdf_processor.CAPTION_PAGES else 1)
+
 _lock = threading.Lock()
-_pool: ProcessPoolExecutor | None = None
+_scheduler: "_Scheduler | None" = None
 _broken = False
-_pending: dict[tuple, Future] = {}        # page key -> its reading, in flight
 _surveys: dict[tuple, Future] = {}        # file key -> which pages are scans
 
 
@@ -81,26 +101,140 @@ def _read(path: str, index: int) -> dict[str, list | None]:
     return {engine.name: words for engine, words in zip(engines, readings)}
 
 
-def _get_pool() -> ProcessPoolExecutor | None:
-    global _pool, _broken
+class _Scheduler:
+    """Pages waiting to be read, most needed first, fed to the workers a few
+    at a time so a page asked for later can still go ahead of them."""
+
+    def __init__(self, workers: int) -> None:
+        import multiprocessing
+
+        spawn = multiprocessing.get_context("spawn")
+        threads = max(1, (os.cpu_count() or 2) // workers)
+        self.readers = ProcessPoolExecutor(workers, mp_context=spawn,
+                                           initializer=_start_worker, initargs=(threads,))
+        self.surveyor = ProcessPoolExecutor(1, mp_context=spawn)
+        self.slots = workers + 1                  # one ready as each finishes
+        self.heap: list[tuple[tuple, int, tuple]] = []
+        self.order = itertools.count()
+        self.pages: dict[tuple, dict] = {}        # page key -> its place in line
+        self.running = 0
+        self.wake = threading.Condition(_lock)
+        self.closed = False
+        # submitted from a thread of its own rather than from the workers'
+        # completion callbacks, which run on the executor's own thread
+        threading.Thread(target=self._feed, daemon=True, name="ocr-feeder").start()
+
+    def want(self, path: Path, index: int, names: list[str], priority: tuple) -> Future | None:
+        """The reading of one page: None if it is already cached, else a
+        future that completes once it is (or once it has failed - the step
+        then reads it in-line)."""
+        from . import pdf_processor
+
+        base = pdf_processor._ocr_key(path, index)
+        if base is None or pdf_processor.ocr_cached(base, names):
+            return None
+        with self.wake:
+            entry = self.pages.get(base)
+            if entry is None:
+                entry = self.pages[base] = {"future": Future(), "priority": priority,
+                                            "running": False, "path": str(path),
+                                            "index": index}
+                heapq.heappush(self.heap, (priority, next(self.order), base))
+                self.wake.notify()
+            elif not entry["running"] and priority < entry["priority"]:
+                entry["priority"] = priority
+                heapq.heappush(self.heap, (priority, next(self.order), base))
+                self.wake.notify()
+            return entry["future"]
+
+    def _feed(self) -> None:
+        while not self.closed:
+            try:
+                self._feed_one()
+            except Exception:                     # never leave a step waiting on a
+                self.shutdown()                   # line nothing will move
+                return
+
+    def _feed_one(self) -> None:
+        """Hand the most needed waiting page to a worker once one is free."""
+        with self.wake:
+            while not self.closed and (self.running >= self.slots or not self.heap):
+                self.wake.wait()
+            if self.closed:
+                return
+            priority, _order, base = heapq.heappop(self.heap)
+            entry = self.pages.get(base)
+            if entry is None or entry["running"] or priority != entry["priority"]:
+                return                        # read already, or moved up the line
+            entry["running"] = True
+            self.running += 1
+        try:
+            task = self.readers.submit(_read, entry["path"], entry["index"])
+        except Exception:                     # shut down: the steps read in-line
+            self._finished(base, None)
+            return
+        task.add_done_callback(lambda done, base=base: self._finished(base, done))
+
+    def _finished(self, base: tuple, task) -> None:
+        from . import pdf_processor
+
+        if task is not None:
+            try:
+                pdf_processor.store_ocr(base, task.result())
+            except Exception:                     # the step reads it in-line instead
+                pass
+        with self.wake:
+            self.running -= 1
+            entry = self.pages.pop(base, None)
+            self.wake.notify()
+        if entry is not None and not entry["future"].done():
+            entry["future"].set_result(None)
+
+    def shutdown(self) -> None:
+        with self.wake:
+            self.closed = True
+            self.wake.notify_all()
+            waiting = list(self.pages.values())
+            self.pages.clear()
+            self.heap.clear()
+        for entry in waiting:
+            if not entry["future"].done():
+                entry["future"].set_result(None)
+        self.readers.shutdown(wait=False, cancel_futures=True)
+        self.surveyor.shutdown(wait=False, cancel_futures=True)
+
+
+def _get_scheduler() -> _Scheduler | None:
+    global _scheduler, _broken
     with _lock:
-        if _pool is not None or _broken:
-            return _pool
+        if _scheduler is not None or _broken:
+            return _scheduler
         workers = worker_count()
         if workers < 1:
             return None
-        try:
-            import multiprocessing
-
-            threads = max(1, (os.cpu_count() or 2) // workers)
-            _pool = ProcessPoolExecutor(
-                workers, mp_context=multiprocessing.get_context("spawn"),
-                initializer=_start_worker, initargs=(threads,))
-            atexit.register(_pool.shutdown, wait=False, cancel_futures=True)
-        except Exception:                          # reading falls back to in-line
+    try:
+        scheduler = _Scheduler(workers)
+    except Exception:                              # reading falls back to in-line
+        with _lock:
             _broken = True
-            _pool = None
-        return _pool
+        return None
+    with _lock:
+        if _scheduler is None:
+            _scheduler = scheduler
+            atexit.register(scheduler.shutdown)
+        else:
+            scheduler.shutdown()
+        return _scheduler
+
+
+def shutdown() -> None:
+    """Stop the workers and forget everything - tests and the self-test."""
+    global _scheduler, _broken
+    with _lock:
+        scheduler, _scheduler, _broken = _scheduler, None, False
+        _surveys.clear()
+    if scheduler is not None:
+        scheduler.shutdown()
 
 
 def _file_key(path: Path) -> tuple | None:
@@ -111,57 +245,38 @@ def _file_key(path: Path) -> tuple | None:
     return (str(path.resolve()), stat.st_size, stat.st_mtime_ns)
 
 
-def _survey_of(pool: ProcessPoolExecutor, path: Path) -> Future | None:
+def _survey_of(scheduler: _Scheduler, path: Path) -> Future | None:
     key = _file_key(path)
     if key is None:
         return None
     with _lock:
         found = _surveys.get(key)
         if found is None:
-            found = _surveys[key] = pool.submit(_survey, str(path))
+            try:
+                found = _surveys[key] = scheduler.surveyor.submit(_survey, str(path))
+            except Exception:
+                return None
         return found
 
 
-def _reading_of(pool: ProcessPoolExecutor, path: Path, index: int,
-                names: list[str]) -> Future | None:
-    """The page's reading in flight, started if it is neither cached nor on its way."""
-    from . import pdf_processor
-
-    base = pdf_processor._ocr_key(path, index)
-    if base is None or pdf_processor.ocr_cached(base, names):
-        return None
-    with _lock:
-        found = _pending.get(base)
-        if found is not None:
-            return found
-        found = _pending[base] = pool.submit(_read, str(path), index)
-
-    def keep(future: Future, base=base) -> None:
-        try:
-            pdf_processor.store_ocr(base, future.result())
-        except Exception:                          # the step reads it in-line instead
-            pass
-        finally:
-            with _lock:
-                _pending.pop(base, None)
-
-    found.add_done_callback(keep)
-    return found
-
-
 def read_ahead(paths: Iterable[Path], per_file: int | None = None, wait: bool = True,
-               on_page: Callable[[Path, int], None] | None = None) -> None:
+               on_page: Callable[[Path, int], None] | None = None, rank: int = 0,
+               on_scans: Callable[[Path, int], None] | None = None) -> None:
     """Read the scanned pages of ``paths`` into the OCR cache, a few at once.
 
-    ``per_file`` stops at that many pages of each file. With ``wait`` the call
-    returns once every page is read, telling ``on_page`` of each as it is;
-    without, it starts the reading and returns. Anything that fails here is
-    simply read again, in-line, by the step that needs it.
+    ``per_file`` stops at that many pages of each file. With ``wait`` those
+    pages go to the front of the line and the call returns once every one is
+    read; without, they join the line behind every set of a lower ``rank`` -
+    a file's first pages ahead of the rest - and the call returns at once.
+    Either way ``on_scans`` is told how many of a file's pages are to be read,
+    and ``on_page`` of each the moment it is (a page found already read
+    counts at once). Anything that fails here is simply read again, in-line,
+    by the step that needs it.
     """
-    pool = _get_pool()
-    if pool is None:
+    scheduler = _get_scheduler()
+    if scheduler is None:
         return
-    from . import ocr
+    from . import ocr, pdf_processor
 
     try:
         names = [engine.name for engine in ocr.usable_engines()]
@@ -170,34 +285,72 @@ def read_ahead(paths: Iterable[Path], per_file: int | None = None, wait: bool = 
     if not names:
         return
     pdfs = [Path(p) for p in paths if Path(p).suffix.lower() == ".pdf"]
-    surveys = [(path, _survey_of(pool, path)) for path in pdfs]
-    readings: list[tuple[Future, Path, int]] = []
-    for path, survey in surveys:
-        if survey is None:
-            continue
+    events: "queue.Queue[tuple | None]" = queue.Queue()
+    expected = [0]
+    counting = threading.Lock()
+
+    def surveyed(path: Path, survey: Future | None) -> None:
         try:
-            scanned = survey.result()
+            scanned = survey.result() if survey is not None else []
         except Exception:
-            continue
+            scanned = []
+        readings, already = [], []
         for index in scanned:
             if per_file is not None and index >= per_file:
                 break
-            future = _reading_of(pool, path, index, names)
+            priority = NEEDED_NOW if wait else _ahead(rank, index)
+            future = scheduler.want(path, index, names, priority)
             if future is not None:
-                readings.append((future, path, index))
+                readings.append((future, index))
+            else:
+                already.append(index)
+        if on_scans is not None:
+            on_scans(path, len(readings) + len(already))
+        if wait:
+            with counting:
+                expected[0] += len(readings)
+            for future, index in readings:
+                future.add_done_callback(
+                    lambda _done, path=path, index=index: events.put((path, index)))
+        elif on_page is not None:
+            for future, index in readings:
+                future.add_done_callback(
+                    lambda _done, path=path, index=index: on_page(path, index))
+        if on_page is not None:
+            for index in already:
+                on_page(path, index)
+        events.put(None)                           # this file's pages are all in line
+
+    for path in pdfs:
+        survey = _survey_of(scheduler, path)
+        if survey is None:
+            surveyed(path, None)
+        else:
+            survey.add_done_callback(lambda done, path=path: surveyed(path, done))
     if not wait:
         return
-    where = {id(future): (path, index) for future, path, index in readings}
-    for future in as_completed([future for future, _p, _i in readings]):
+    surveys_done = pages_done = 0
+    while True:
+        with counting:
+            finished = surveys_done == len(pdfs) and pages_done >= expected[0]
+        if finished:
+            return
+        event = events.get()
+        if event is None:
+            surveys_done += 1
+            continue
+        pages_done += 1
         if on_page is not None:
-            path, index = where[id(future)]
-            on_page(path, index)
+            on_page(*event)
 
 
-def read_ahead_in_background(paths: Iterable[Path]) -> None:
-    """Start reading ``paths`` and return at once - for files just added."""
+def read_ahead_in_background(paths: Iterable[Path], rank: int = 0,
+                             on_page: Callable[[Path, int], None] | None = None,
+                             on_scans: Callable[[Path, int], None] | None = None) -> bool:
+    """Start reading ``paths`` and return at once - for files just added.
+    False when there is no reading ahead to do it (turned off, or no engine)."""
     files = list(paths)
-    if not files or worker_count() < 1:
-        return
-    threading.Thread(target=read_ahead, args=(files,), kwargs={"wait": False},
-                     daemon=True, name="ocr-read-ahead").start()
+    if not files or worker_count() < 1 or _get_scheduler() is None:
+        return False
+    read_ahead(files, wait=False, rank=rank, on_page=on_page, on_scans=on_scans)
+    return True

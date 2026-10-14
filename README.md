@@ -45,6 +45,28 @@ internet connection involved at any point.
 The frozen `.app` and `.exe` open the window version by default. Pass
 `--browser` for the browser, or `--tk` for the old desktop interface.
 
+### Several sets, run overnight
+
+The row across the top of the window holds any number of **sets**—separate
+cases, each with its own documents, names, review decisions, invented names
+and mapping-key password (`redactor/sets.py`). Make a set, name it, drop its
+documents in; make the next. The sets' scans are read in the background in
+the order the sets were made, each with its own counter ("Reading 340 of
+1,200 scanned pages"), and a set reads "ready to review" when its reading is
+done. Review it while the next one reads, then **Queue this set to run** on
+the Run step.
+
+Queued sets run one at a time, in the order queued, with no further input,
+into the results folder chosen at the top of the window—a folder per set,
+named after it, holding the archive, the encrypted mapping key and the
+report. Each run happens in a process of its own, so the window stays free
+for reviewing while one runs; it reads its pages from the copy of the
+readings kept on disk in the app's private temporary folder, so no page is
+read twice. Once a set's results are written, its copies of the documents
+and what was read off them are deleted. While anything is reading, queued or
+running, the Mac is kept from idle sleep (`caffeinate -i`; the screen still
+sleeps). Everything is held by the running app: quitting it ends the queue.
+
 ### OCR
 
 Scanned PDFs are pictures of text with no text layer. Two engines read them,
@@ -665,7 +687,7 @@ the language model, and copy the result back into `dist/`.
 ~/.venvs/anonymizer-redactor/bin/python -m pytest tests/ -q
 ```
 
-1,035 tests covering detector accuracy, allowlist protection, judicial-officer
+1,040 tests covering detector accuracy, allowlist protection, judicial-officer
 harvesting in every layout a court prints, child rosters and custody clauses,
 name-variant expansion and merging, overlapping-name folding, typo matching,
 Word's own run and tab structure, surrogate determinism, image redaction,
