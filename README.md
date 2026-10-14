@@ -282,9 +282,15 @@ Radcliffe"), and a **nickname** of somebody already on the list. `Chrissy` is
 pre-ticked and labelled *Short for Christine Annell Vaughn* rather than left
 for you to notice.
 
-Press Scan documents for more names and the offline spaCy model proposes
-people, organizations and places the rules cannot see. It only ever proposes;
-nothing is applied without a tick.
+The documents are scanned in full as the screen opens: the offline spaCy
+model and the rules propose people, organizations and places beyond the
+caption. It only ever proposes; nothing is applied without a tick. **Rescan
+documents** scans again with the names now on the list, which takes them out
+of the proposals; the pages are not read again.
+
+A surname both parties share—both spouses in a divorce are Smiths—ticked on
+its own is folded into them: people sharing a surname share one invented
+surname, so a bare "Smith" becomes that.
 
 ### 3. Review
 
@@ -691,7 +697,7 @@ the language model, and copy the result back into `dist/`.
 ~/.venvs/anonymizer-redactor/bin/python -m pytest tests/ -q
 ```
 
-1,052 tests covering detector accuracy, allowlist protection, judicial-officer
+1,055 tests covering detector accuracy, allowlist protection, judicial-officer
 harvesting in every layout a court prints, child rosters and custody clauses,
 name-variant expansion and merging, overlapping-name folding, typo matching,
 Word's own run and tab structure, surrogate determinism, image redaction,

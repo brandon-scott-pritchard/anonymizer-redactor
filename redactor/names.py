@@ -291,9 +291,14 @@ class Overlap:
     inner: str          # the shorter form, e.g. "Smith"
     outer: str          # the name it is a written form of, e.g. "Jane E. Smith"
     merge: bool         # True when exactly one longer name claims it
+    shared: str = ""    # every name claiming it, when it is their shared surname
 
     @property
     def note(self) -> str:
+        if self.shared:
+            return (f"“{self.inner}” is the surname {self.shared} share. They get one "
+                    f"invented surname between them, so “{self.inner}” on its own "
+                    f"becomes that.")
         if self.merge:
             return (f"“{self.inner}” is already how “{self.outer}” gets "
                     f"written. Kept as one person so both spellings get the same "
@@ -341,8 +346,22 @@ def overlapping_names(entries: Sequence[str]) -> list[Overlap]:
     out: list[Overlap] = []
     for inner, outers in claims.items():
         merge = len(outers) == 1
+        # Both spouses in a divorce are Smiths, and "Smith" ticked on its own
+        # was told it "could be either - gets its own pseudonym", and became a
+        # third person with a full invented name. People sharing a surname
+        # already share an invented one (MappingStore), so a bare surname that
+        # is the surname of every name claiming it is simply theirs.
+        shared = ""
+        if len(outers) > 1 and len(inner.split()) == 1 and all(
+                parsed[o].last and parsed[o].last.casefold() == inner.casefold()
+                for o in outers):
+            merge, shared = True, " and ".join([", ".join(outers[:-1]), outers[-1]])
         for outer in outers:
-            out.append(Overlap(inner=inner, outer=outer, merge=merge))
+            out.append(Overlap(inner=inner, outer=outer, merge=merge, shared=shared))
+    if any(o.shared for o in out):
+        seen: set[str] = set()
+        # one note for the shared surname, not one per spouse
+        out = [o for o in out if not o.shared or not (o.inner in seen or seen.add(o.inner))]
     return out
 
 

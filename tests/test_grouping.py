@@ -58,11 +58,19 @@ def test_a_partial_reads_the_same_as_the_full_names_own_form_of_it():
 
 
 def test_a_partial_that_fits_two_people_stays_on_its_own_row():
-    store = _store(["BRETT H. PRITCHARD", "Jane Pritchard", "PRITCHARD"])
-    alone = _row(store, "PRITCHARD")
+    store = _store(["Jane Pritchard", "Jane Holbrook", "Jane"])
+    alone = _row(store, "Jane")
     assert alone.parent is None
-    assert set(alone.candidates) == {"BRETT H. PRITCHARD", "Jane Pritchard"}
+    assert set(alone.candidates) == {"Jane Pritchard", "Jane Holbrook"}
     assert "Could be" in review.review_note(alone)
+
+
+def test_a_surname_two_people_share_is_folded_into_them():
+    """Not ambiguous where it matters: people sharing a surname share an
+    invented one, so the bare surname becomes the same thing either way."""
+    store = _store(["BRETT H. PRITCHARD", "Jane Pritchard", "PRITCHARD"])
+    assert {e.canonical for e in store.entities.values()} == {"BRETT H. PRITCHARD",
+                                                              "Jane Pritchard"}
 
 
 def test_two_initials_are_not_a_partial_name():
@@ -89,12 +97,12 @@ def test_an_unticked_form_is_left_as_written():
 
 
 def test_a_shared_surname_goes_while_either_person_is_ticked():
-    """Unticking the ambiguous "PRITCHARD" row cannot keep Jane's surname: the
-    same letters are hers, and she is still ticked. The full name goes whole."""
+    """Unticking Brett cannot keep Jane's surname: the same letters are hers,
+    and she is still ticked."""
     store = _store(["BRETT H. PRITCHARD", "Jane Pritchard", "PRITCHARD"])
-    _row(store, "PRITCHARD").enabled = False
-    out = _apply(store, "Brett H. Pritchard wrote; Pritchard agreed.")
-    assert "Pritchard" not in out and "Brett" not in out
+    _row(store, "BRETT H. PRITCHARD").enabled = False
+    out = _apply(store, "Jane Pritchard wrote; Pritchard agreed.")
+    assert "Pritchard" not in out
 
 
 def test_an_initial_matches_with_or_without_its_period():

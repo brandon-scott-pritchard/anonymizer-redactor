@@ -208,11 +208,22 @@ def test_the_fold_gives_both_spellings_one_pseudonym():
     assert out.count(surname) == 2, out
 
 
-def test_an_ambiguous_surname_is_left_alone_and_reported():
+def test_a_surname_both_parties_share_is_folded_without_guessing_which():
+    """Guessing which Smith would be worse - and is not needed: people sharing a
+    surname share an invented one, so a bare "Smith" becomes the same word
+    whichever Smith it means. One note, no third person."""
     entries = [("Jane Elizabeth Smith", "person"),
                ("John Michael Smith", "person"), ("Smith", "person")]
     kept, overlaps = review.resolve_overlaps(entries)
-    assert ("Smith", "person") in kept, "guessing which Smith would be worse"
+    assert ("Smith", "person") not in kept
+    assert len(review.overlap_notes(overlaps)) == 1
+    assert "share" in review.overlap_notes(overlaps)[0]
+
+
+def test_a_first_name_two_people_could_be_is_left_alone_and_reported():
+    entries = [("Jane Pritchard", "person"), ("Jane Holbrook", "person"), ("Jane", "person")]
+    kept, overlaps = review.resolve_overlaps(entries)
+    assert ("Jane", "person") in kept, "guessing which Jane would be worse"
     assert all(not o.merge for o in overlaps)
     assert len(review.overlap_notes(overlaps)) == 2
 

@@ -347,7 +347,8 @@ function NamesStep({ state, set, actions, meta }) {
           <button onClick=${() => actions.tickAllSuggestions(rows, false)}>Untick all</button>
           <span class="spacer"></span>
           <button disabled=${state.busy.active} onClick=${actions.readCaptions}>Re-read captions</button>
-          <button disabled=${state.busy.active} onClick=${actions.scanSuggestions}>Scan documents for more names</button>
+          <button disabled=${state.busy.active} title="Scan again with the names now on the list"
+                  onClick=${actions.scanSuggestions}>Rescan documents</button>
         </div>
       </div>
       <div class="card">
@@ -558,6 +559,7 @@ function Workspace({ setId, visible, meta, info, resultsRoot, refreshSets }) {
   const [guardNotes, setGuardNotes] = useState([]);
   const [overlaps, setOverlaps] = useState([]);
   const [suggestions, setSuggestions] = useState([]);
+  const [scanned, setScanned] = useState(false);
   const [suggChecked, setSuggChecked] = useState(new Set());
   const [suggCats, setSuggCats] = useState({});
   const [skipped, setSkipped] = useState([]);
@@ -660,7 +662,10 @@ function Workspace({ setId, visible, meta, info, resultsRoot, refreshSets }) {
       if (!files.length) throw new Error("Add at least one DOCX or PDF first.");
       if (!password.trim()) throw new Error("Set a password for the mapping key, or press New.");
       setUnlocked((u) => Math.max(u, 1)); setStep(1);
+      // the whole name screen at once: the caption's names, then every
+      // document scanned for the rest - no second button to find
       if (!captions.length) await actions.readCaptions();
+      if (!scanned) await actions.scanSuggestions();
     }),
 
     readCaptions: () => guarded(async () => {
@@ -680,6 +685,7 @@ function Workspace({ setId, visible, meta, info, resultsRoot, refreshSets }) {
     scanSuggestions: () => guarded(async () => {
       const body = { options, names: parseNameLines(namesText) };
       const result = await api.job(api.post("/api/suggestions", body), track);
+      setScanned(true);
       setSuggestions(result.suggestions);
       absorbGuard(result);
       if (!result.suggestions.length && result.notes.length) setFault(result.notes[0]);
