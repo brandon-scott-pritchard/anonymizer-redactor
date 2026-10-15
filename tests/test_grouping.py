@@ -502,3 +502,27 @@ def test_an_address_ocr_glued_together_is_the_same_address():
     head = _row(store, "1734 W GENTILE ST LAYTON UT 84041").replacement
     assert _row(store, "1734W Gentile St,LaytonUT 84041").replacement == head
     assert _row(store, "1734 E GENTILE ST").replacement != head
+
+
+def test_two_documents_with_one_name_are_both_read(tmp_path):
+    """The individual and the joint account's statements shared a file name;
+    keyed by name the second was read over the first, and the people paid
+    only in the first were never proposed - eleven of them shipped."""
+    pymupdf = pytest.importorskip("pymupdf")
+    from redactor import pipeline
+
+    made = []
+    for folder, payee in (("checking_DEREK", "Robert Lopez"), ("joint_checking", "Hailey Cooper")):
+        (tmp_path / folder).mkdir()
+        doc = pymupdf.open()
+        doc.new_page().insert_text((72, 72), f"Jan 4 Zelle to {payee} P2P -$53.51 $2,850.15",
+                                   fontsize=10)
+        path = tmp_path / folder / "Statement_2023-01.pdf"
+        doc.save(path)
+        made.append(path)
+    labels = pipeline.document_labels(made)
+    assert len(set(labels.values())) == 2
+    texts = pipeline.document_texts(made)
+    assert len(texts) == 2
+    joined = "\n".join(texts.values())
+    assert "Robert Lopez" in joined and "Hailey Cooper" in joined

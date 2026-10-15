@@ -200,6 +200,7 @@ def collect_officials(files: Sequence[Path],
     block at the very bottom, and both have to survive the run untouched.
     """
     found: dict[str, str] = {}
+    labels = document_labels(files)
     _read_ahead(files, progress)
     total = max(len(files), 1)
     for index, raw_path in enumerate(files):
@@ -220,13 +221,39 @@ def collect_officials(files: Sequence[Path],
                 # the full part path, not its basename: word/document.xml and
                 # word/glossary/document.xml share a basename, and keying on it
                 # let a 67-byte glossary stub overwrite the entire document body
-                found[f"{path.name} [{part}]"] = text
+                found[f"{labels[path]} [{part}]"] = text
     return officials.harvest_documents(found)
 
 
 # --------------------------------------------------------------------------
 # phase 2 - what the model thinks we missed
 # --------------------------------------------------------------------------
+
+
+def document_labels(files: Sequence[Path]) -> dict[Path, str]:
+    """A label for each file, unique in the set: its name, or its folder and
+    name where the name repeats.
+
+    Keyed by name alone, the individual and the joint checking account's
+    "D7_checking_01_2023-01-05.pdf" were one document - the second read over
+    the first - and the people paid only in the first were never proposed:
+    eleven of them shipped. A client's folders repeat "Statement.pdf" as
+    readily.
+    """
+    paths = [Path(f) for f in files]
+    counts: dict[str, int] = {}
+    for path in paths:
+        counts[path.name] = counts.get(path.name, 0) + 1
+    out: dict[Path, str] = {}
+    taken: set[str] = set()
+    for path in paths:
+        label = path.name if counts[path.name] == 1 else f"{path.parent.name}/{path.name}"
+        unique, n = label, 2
+        while unique in taken:
+            unique, n = f"{label} ({n})", n + 1
+        taken.add(unique)
+        out[path] = unique
+    return out
 
 
 def document_texts(files: Sequence[Path], progress: Progress = _noop,
@@ -236,6 +263,7 @@ def document_texts(files: Sequence[Path], progress: Progress = _noop,
     rules want and the language model does not: it reads "Jenna Harrington
     <column gap> Colton Hughes" as one person."""
     texts: dict[str, str] = {}
+    labels = document_labels(files)
     _read_ahead(files, progress)
     total = max(len(files), 1)
     for index, path in enumerate(files):
@@ -256,7 +284,7 @@ def document_texts(files: Sequence[Path], progress: Progress = _noop,
                      if not label.endswith("(rows)") and "(ocr " not in label}
         joined = "\n".join(text for text in parts.values() if text.strip())
         if joined.strip():
-            texts[path.name] = joined
+            texts[labels[path]] = joined
     return texts
 
 
@@ -294,13 +322,14 @@ def collect_suggestions(
     # invented name and the statement still reads as a statement.
     tables: dict[str, list] = {}
     total = max(len(files), 1)
+    labels = document_labels(files)
     for index, raw_path in enumerate(files):
         path = Path(raw_path)
-        if path.name in texts:
+        if labels[path] in texts:
             # its own message: on a large set this pass went on for hours
             # under "Looking for town and city names"
             progress(f"Reading the tables in {path.name}", 0.55 + 0.05 * index / total)
-            tables[path.name] = tables_in(path)
+            tables[labels[path]] = tables_in(path)
     # a blank line between readings and between columns: joined line to line,
     # the end of one column ran into the start of the next - "Daily Cash"
     # (a description) over "Sent" (the type column's first cell) - and a rule
