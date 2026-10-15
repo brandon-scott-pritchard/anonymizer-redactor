@@ -216,3 +216,211 @@ def test_a_set_given_more_files_is_prepared_again(tmp_path):
     assert not doc_set.should_prepare(10)              # still uploading: wait
     assert doc_set.should_prepare(0)
     assert doc_set.summary()["state"] == "preparing"
+
+
+# --------------------------------------------------------------------------
+# a set is never handed another set's work
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def quiet(monkeypatch):
+    """The window's server with nothing read ahead: the steps alone."""
+    monkeypatch.setenv("REDACTOR_OCR_WORKERS", "0")
+    webapp.SESSION = webapp.Session()
+    with TestClient(webapp.app) as test_client:
+        test_client.cookies.set(webapp.COOKIE, webapp.TOKEN)
+        yield test_client
+
+
+def test_a_set_cannot_be_removed_while_its_step_works(quiet, monkeypatch):
+    from redactor import pipeline
+
+    first = quiet.get("/api/sets").json()["sets"][0]["id"]
+    quiet.post("/api/files", headers={"X-Set": first},
+               files=[("files", ("a.pdf", _typed("Kyle D Harrington"), "application/pdf"))])
+    second = quiet.post("/api/sets", json={"name": "B"}).json()["selected"]
+    real = pipeline.prescan
+    monkeypatch.setattr(pipeline, "prescan",
+                        lambda *a, **k: (time.sleep(1.0), real(*a, **k))[1])
+    body = {"names": [{"name": "Kyle D Harrington", "category": "person"}],
+            "options": {"ner": False}}
+    started = quiet.post("/api/review", headers={"X-Set": first}, json=body)
+    refused = quiet.delete(f"/api/sets/{first}")
+    assert refused.status_code == 409
+    _job(quiet, started, first)
+    assert not webapp.SESSION.sets[second].store.entities     # B never got A's names
+    assert quiet.delete(f"/api/sets/{first}").status_code == 200
+
+
+def test_a_removed_set_is_refused_not_swapped_for_the_selected_one(quiet):
+    first = quiet.get("/api/sets").json()["sets"][0]["id"]
+    quiet.post("/api/files", headers={"X-Set": first},
+               files=[("files", ("a.pdf", _typed("Kyle D Harrington"), "application/pdf"))])
+    gone = quiet.post("/api/sets", json={"name": "Gone"}).json()["selected"]
+    quiet.post(f"/api/sets/{first}/select")
+    assert quiet.delete(f"/api/sets/{gone}").status_code == 200
+    stale = quiet.delete("/api/files/0", headers={"X-Set": gone})
+    assert stale.status_code == 404
+    assert len(webapp.SESSION.sets[first].files) == 1          # the selected set's file stays
+    # a job's thread still naming the removed set cannot write anywhere
+    marker = webapp._current_set.set(gone)
+    try:
+        with pytest.raises(webapp.HTTPException):
+            webapp.SESSION.store = None
+    finally:
+        webapp._current_set.reset(marker)
+
+
+def test_a_running_or_finished_set_is_not_changed_under_it(quiet):
+    set_id = quiet.get("/api/sets").json()["sets"][0]["id"]
+    head = {"X-Set": set_id}
+    quiet.post("/api/files", headers=head,
+               files=[("files", ("a.pdf", _typed("Kyle D Harrington"), "application/pdf"))])
+    doc_set = webapp.SESSION.sets[set_id]
+    for state in ("running", "done"):
+        doc_set.run_state = state
+        assert quiet.post("/api/files", headers=head, files=[
+            ("files", ("b.pdf", _typed("x"), "application/pdf"))]).status_code == 409
+        assert quiet.delete("/api/files/0", headers=head).status_code == 409
+        assert quiet.delete("/api/files", headers=head).status_code == 409
+        assert quiet.patch("/api/entities", headers=head,
+                           json={"key": "x", "enabled": False}).status_code == 409
+        assert quiet.post("/api/entities/all", headers=head,
+                          json={"enabled": False}).status_code == 409
+        assert quiet.post("/api/review", headers=head, json={"names": []}).status_code == 409
+    assert len(doc_set.files) == 1
+    doc_set.run_state = "queued"                 # the run takes it as it is when it starts
+    assert quiet.delete("/api/files/0", headers=head).status_code == 200
+
+
+def test_the_results_folder_must_be_one_that_can_be_written(quiet, tmp_path):
+    locked = tmp_path / "Locked"
+    locked.mkdir()
+    locked.chmod(0o500)
+    try:
+        refused = quiet.post("/api/results-folder", json={"path": str(locked)})
+        assert refused.status_code == 422 and "Cannot write" in refused.json()["detail"]
+    finally:
+        locked.chmod(0o700)
+    for given in ("", ".", "Results"):
+        assert quiet.post("/api/results-folder", json={"path": given}).status_code == 422
+    assert quiet.post("/api/results-folder", json={"path": str(tmp_path)}).status_code == 200
+    assert list(tmp_path.iterdir()) == [locked]               # the probe left nothing
+
+
+def test_runs_stop_cleanly_where_there_are_no_process_groups(monkeypatch):
+    """Windows: no setpgrp, no killpg, no SIGKILL - a queued run still runs."""
+    import os
+    import signal
+
+    for module, name in ((os, "setpgrp"), (os, "killpg"), (signal, "SIGKILL")):
+        monkeypatch.delattr(module, name, raising=False)
+    sets._own_group()
+
+    class Child:
+        pid, alive, stopped = 4242, True, False
+
+        def join(self, timeout=None):
+            pass
+
+        def is_alive(self):
+            return self.alive
+
+        def terminate(self):
+            self.alive, self.stopped = False, True
+
+    child = Child()
+    sets._stop(child)
+    assert child.stopped
+
+
+def test_the_last_word_of_a_child_that_has_just_exited_is_still_heard():
+    """A finished run was marked failed when its "done" came in just after
+    the wait for it gave up and just before the child was seen gone."""
+    import queue as queue_module
+
+    class Late:
+        def __init__(self):
+            self.calls = 0
+
+        def get(self, timeout=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise queue_module.Empty
+            return ("done", "result")
+
+    class Gone:
+        def is_alive(self):
+            return False
+
+    assert sets._next_event(Late(), Gone()) == ("done", "result")
+
+    class Silent:
+        def get(self, timeout=None):
+            raise queue_module.Empty
+
+    assert sets._next_event(Silent(), Gone()) is None
+
+
+def test_a_file_replaced_under_the_same_name_is_prepared_again(tmp_path):
+    doc_set = sets.DocSet(id="a", name="A", rank=1, folder=tmp_path / "a")
+    path = tmp_path / "statement.pdf"
+    path.write_bytes(b"first")
+    doc_set.files = [path]
+    doc_set.prepared, doc_set.prepared_for = {"x": 1}, doc_set._file_set()
+    assert doc_set.ready_prepared() is not None
+    path.write_bytes(b"a different statement")
+    assert doc_set.ready_prepared() is None
+
+
+def test_quitting_mid_run_stops_it_and_says_so_in_its_folder(tmp_path):
+    queue = sets.RunQueue(tmp_path)
+    doc_set = sets.DocSet(id="a", name="A", rank=1, folder=tmp_path / "a")
+    doc_set.results = tmp_path / "Results" / "A"
+    (doc_set.results / "_work-1" / "Case").mkdir(parents=True)
+    (doc_set.results / "_work-1" / "Case" / "half.pdf").write_bytes(b"half")
+    doc_set.run_state = "running"
+
+    class Child:
+        pid, alive = 999999, True
+
+        def is_alive(self):
+            return self.alive
+
+        def join(self, timeout=None):
+            self.alive = False
+
+    queue.running, queue.child = doc_set, Child()
+    queue.stop_now()
+    assert not queue.child.alive
+    left = sorted(p.name for p in doc_set.results.iterdir())
+    assert left == [sets.RunQueue.INTERRUPTED]
+    later = sets.DocSet(id="b", name="B", rank=2, folder=tmp_path / "b")
+    queue.add(later, None, "pw", tmp_path)
+    time.sleep(0.5)
+    assert later.run_state == "queued"                   # nothing more starts
+
+
+def test_a_set_queued_while_still_reading_waits_for_it(tmp_path, monkeypatch):
+    from redactor import audit
+
+    queue = sets.RunQueue(tmp_path)
+    queue.READ_STALL = 1.5
+    doc_set = sets.DocSet(id="a", name="A", rank=1, folder=tmp_path / "a")
+    doc_set.scans = {"/x.pdf": 3}
+    messages = []
+
+    class Started(Exception):
+        pass
+
+    def kev(seconds):
+        messages.append(doc_set.run_message)
+        raise Started
+
+    monkeypatch.setattr(audit, "wait_for_kev", kev)
+    began = time.time()
+    with pytest.raises(Started):
+        queue._run(doc_set, None, "pw", tmp_path)
+    assert time.time() - began >= 1.5                    # waited, then went on
+    assert messages == ["Starting"]

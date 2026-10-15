@@ -21,8 +21,11 @@ from redactor import audit, review  # noqa: E402
 
 FAKE_SERVE = textwrap.dedent('''
     """Answers as Kev does: yes when a glued or plain ticked surname is there."""
-    import json, re, sys
+    import json, os, re, sys, time
     from http.server import BaseHTTPRequestHandler, HTTPServer
+    if os.environ.get("FAKE_KEV_EXIT"):
+        sys.exit(3)                                  # a Kev that crashes on launch
+    time.sleep(float(os.environ.get("FAKE_KEV_DELAY", "0")))   # one slow to load
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -153,3 +156,49 @@ def test_without_kev_the_matcher_still_checks_and_the_report_says_so(tmp_path):
     check = audit.check_archive(_archive(tmp_path), store, None, out, None)
     assert {(f.file, f.page) for f in check.flags} == {("Case/plain.pdf", 1)}
     assert "Kev was not running" in (out / "final-check.txt").read_text()
+
+
+def test_kev_is_started_once_however_often_it_is_asked(fake_kev):
+    assert fake_kev.start() and fake_kev.start()
+    first = fake_kev.process.pid
+    assert fake_kev.start() and fake_kev.process.pid == first
+    assert fake_kev.ready.wait(30)
+    fake_kev.stop()
+    deadline = time.time() + 10
+    while _alive(first) and time.time() < deadline:
+        time.sleep(0.2)
+    assert not _alive(first)
+
+
+def test_a_kev_that_crashed_is_not_waited_for(fake_kev, monkeypatch):
+    monkeypatch.setenv("FAKE_KEV_EXIT", "1")
+    monkeypatch.setattr(audit, "KEV", fake_kev)
+    assert fake_kev.start()
+    began = time.time()
+    assert audit.wait_for_kev(60) is None
+    assert time.time() - began < 15
+    deadline = time.time() + 5
+    while fake_kev.note != "stopped while starting" and time.time() < deadline:
+        time.sleep(0.1)
+    assert fake_kev.note == "stopped while starting"
+
+
+def test_a_kev_slow_to_load_is_still_used_once_up(fake_kev, monkeypatch):
+    monkeypatch.setenv("FAKE_KEV_DELAY", "4")
+    monkeypatch.setattr(audit, "KEV_START_SECONDS", 1)
+    monkeypatch.setattr(audit, "KEV", fake_kev)
+    assert fake_kev.start()
+    assert audit.wait_for_kev(1) is None            # the first set does not wait all night
+    deadline = time.time() + 30
+    while "slow to start" not in fake_kev.note and time.time() < deadline:
+        time.sleep(0.2)
+    assert "slow to start" in fake_kev.note
+    assert audit.wait_for_kev(30) is not None       # a later set gets it
+    assert fake_kev.note.startswith("running")
+
+
+def test_a_kev_that_dies_after_starting_gives_no_address(fake_kev):
+    assert fake_kev.start() and fake_kev.ready.wait(30)
+    fake_kev.process.kill()
+    fake_kev.process.wait(10)
+    assert fake_kev.url is None

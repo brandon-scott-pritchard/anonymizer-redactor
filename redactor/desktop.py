@@ -90,7 +90,7 @@ class Bridge:
             webview.FileDialog.FOLDER, allow_multiple=True)
         if not chosen:
             return None
-        return add_paths(list(chosen))
+        return _plainly(add_paths, list(chosen))
 
     def choose_results_folder(self):
         """The one folder every queued set's results go to, a folder each."""
@@ -101,7 +101,43 @@ class Bridge:
         chosen = webview.windows[0].create_file_dialog(webview.FileDialog.FOLDER)
         if not chosen:
             return None
-        return set_results_root(chosen[0])
+        return _plainly(set_results_root, chosen[0])
+
+
+def _plainly(call, *args):
+    """A refusal reaches the page as its own words, not "422: ..." - the
+    bridge hands the page ``str()`` of whatever is raised."""
+    from fastapi import HTTPException
+
+    try:
+        return call(*args)
+    except HTTPException as exc:
+        raise RuntimeError(exc.detail) from None
+
+
+QUIT_WHILE_WORKING = (
+    "Sets are still being read or run. Quitting now stops them: a set that was "
+    "running is left unfinished and must be run again, and every set's "
+    "documents and readings are deleted with the app. Quit anyway?")
+
+
+def _ask_before_closing_while_working(window) -> None:
+    """Closing the window quits the app, and with it every set's reading and
+    run. While any is going, the window asks first; otherwise it just closes."""
+    import threading
+    import time
+
+    from . import webapp
+
+    def watch() -> None:
+        while True:
+            try:
+                window.confirm_close = webapp.SESSION.anything_going()
+            except Exception:
+                window.confirm_close = True
+            time.sleep(1)
+
+    threading.Thread(target=watch, daemon=True, name="close-guard").start()
 
 
 def main() -> int:
@@ -144,7 +180,9 @@ def main() -> int:
         text_select=True,           # operators need to copy values out
         confirm_close=False,
         js_api=Bridge(),
+        localization={"global.quitConfirmation": QUIT_WHILE_WORKING},
     )
+    _ask_before_closing_while_working(window)
     print(f"{WINDOW_TITLE} {__version__}")
     print("Everything stays on this computer. Close the window to quit.")
     webview.start()                 # blocks until the window closes

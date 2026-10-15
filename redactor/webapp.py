@@ -63,6 +63,7 @@ class Job:
     fraction: float = 0.0
     result: dict | None = None
     error: str = ""
+    set_id: str = ""                   # the set the step works on
     # pages this step has read, of the pages it will read: the time is in
     # the pages, not the files, and a scanned page is the slow one
     pages_done: int = 0
@@ -124,6 +125,9 @@ class Session:
         self.results_root: Path | None = None
         self.jobs: dict[str, Job] = {}
         self.busy = threading.Lock()
+        self.running_job: Job | None = None
+        self._starting = threading.Lock()
+        self.preparer: sets.Preparer | None = None
         self.queue: sets.RunQueue | None = None
         self.awake: sets.KeepAwake | None = None
 
@@ -137,18 +141,30 @@ class Session:
 
     @property
     def current(self) -> sets.DocSet:
+        """The set the request or job is about. One that names a set since
+        removed is refused - never handed another set's names to write over."""
         chosen = _current_set.get()
-        return self.sets.get(chosen) or self.sets.get(self.selected) \
-            or next(iter(self.sets.values()))
+        if chosen is not None:
+            found = self.sets.get(chosen)
+            if found is None:
+                raise HTTPException(404, "That set has been removed.")
+            return found
+        return self.sets.get(self.selected) or next(iter(self.sets.values()))
 
     def run_queue(self) -> sets.RunQueue:
         """Started on first use: a session that never queues never runs a thread."""
-        if self.queue is None:
-            self.queue = sets.RunQueue(self.ocr_dir)
-            self.preparer = sets.Preparer(
-                self.ocr_dir, lambda: sorted(self.sets.values(), key=lambda s: s.rank),
-                lambda doc_set: _settings({}))
-            self.awake = sets.KeepAwake(self.anything_going)
+        with self._starting:
+            if self.queue is None:
+                self.queue = sets.RunQueue(self.ocr_dir)
+                self.preparer = sets.Preparer(
+                    self.ocr_dir, lambda: sorted(self.sets.values(), key=lambda s: s.rank),
+                    lambda doc_set: _settings({}))
+                self.awake = sets.KeepAwake(self.anything_going)
+                # registered after the temporary folder's removal, so run
+                # first: the run and the preparing are stopped before their
+                # documents are deleted under them
+                atexit.register(self.preparer.stop_now)
+                atexit.register(self.queue.stop_now)
         return self.queue
 
     def anything_going(self) -> bool:
@@ -169,9 +185,21 @@ def _start_job(work, pages=None) -> str:
     the page shows by the time it finishes.
     """
     if not SESSION.busy.acquire(blocking=False):
+        other = SESSION.running_job
+        owner = SESSION.sets.get(other.set_id) if other is not None else None
+        here = _current_set.get() or SESSION.selected
+        if owner is not None and owner.id != here:
+            raise HTTPException(409, f'"{owner.name}" is still working on a step - '
+                                     "try again when it finishes.")
         raise HTTPException(409, "Still working on the previous step.")
+    try:
+        set_id = SESSION.current.id
+    except HTTPException:
+        SESSION.busy.release()
+        raise
     job_id = uuid.uuid4().hex
-    job = SESSION.jobs[job_id] = Job()
+    job = SESSION.jobs[job_id] = Job(set_id=set_id)
+    SESSION.running_job = job
     context = contextvars.copy_context()
     seen: set[tuple[str, int]] = set()
 
@@ -193,6 +221,7 @@ def _start_job(work, pages=None) -> str:
             job.status = "error"
             job.error = f"{type(exc).__name__}: {exc}"
         finally:
+            SESSION.running_job = None
             SESSION.busy.release()
 
     threading.Thread(target=lambda: context.run(runner), daemon=True).start()
@@ -331,6 +360,8 @@ async def _require_token(request: Request, call_next):
     if not secrets.compare_digest(supplied or "", TOKEN):
         return JSONResponse({"detail": "unauthorized"}, status_code=401)
     chosen = request.headers.get("x-set") or request.query_params.get("set")
+    if chosen and chosen not in SESSION.sets:
+        return JSONResponse({"detail": "That set has been removed."}, status_code=404)
     marker = _current_set.set(chosen)
     try:
         return await call_next(request)
@@ -441,6 +472,7 @@ async def upload(files: list[UploadFile] = File(default=[]),
     names the files the page did not send because they are not documents or
     photos, so the report can list them.
     """
+    _not_while_run("given more documents")
     added: list[Path] = []
     for index, item in enumerate(files):
         given = paths[index] if index < len(paths) else ""
@@ -470,6 +502,7 @@ def add_paths(paths: list[str | Path]) -> dict:
     "Choose folder" button, which has no browser in the way to upload through.
     The documents are copied into the session; the originals are not touched.
     """
+    _not_while_run("given more documents")
     gathered = pipeline.gather([Path(p) for p in paths])
     added: list[Path] = []
     for source, relative in gathered.files:
@@ -479,6 +512,18 @@ def add_paths(paths: list[str | Path]) -> dict:
     SESSION.skipped.extend(gathered.skipped)
     _read_in_background(added)
     return {"added": len(added), **_files_payload()}
+
+
+def _not_while_run(what: str = "changed") -> None:
+    """A running set's files are being read, and a finished set's are gone:
+    neither is changed under it. A queued one may be - the run takes the
+    set as it is when the run starts."""
+    state = SESSION.current.run_state
+    if state == "running":
+        raise HTTPException(409, f"This set is running - it cannot be {what} now.")
+    if state == "done":
+        raise HTTPException(409, f"This set has been run - it cannot be {what}. "
+                                 "Make a new set to run these documents again.")
 
 
 def _read_in_background(added: list[Path]) -> None:
@@ -499,6 +544,7 @@ def _read_in_background(added: list[Path]) -> None:
 
 @app.delete("/api/files/{index}")
 def remove_file(index: int):
+    _not_while_run()
     if not 0 <= index < len(SESSION.files):
         raise HTTPException(404, "no such file")
     path = SESSION.files.pop(index)
@@ -509,6 +555,7 @@ def remove_file(index: int):
 
 @app.delete("/api/files")
 def remove_all_files():
+    _not_while_run()
     for path in SESSION.files:
         path.unlink(missing_ok=True)
     SESSION.files.clear()
@@ -587,6 +634,7 @@ async def suggestions(request: Request):
 
 @app.post("/api/review")
 async def build_review(request: Request):
+    _not_while_run()
     body = await request.json()
     files = list(SESSION.files)
     carryover = review.snapshot_decisions(SESSION.store)
@@ -608,6 +656,7 @@ async def build_review(request: Request):
 
 @app.patch("/api/entities")
 async def edit_entity(request: Request):
+    _not_while_run()
     body = await request.json()
     entity = SESSION.store.entities.get(body.get("key", ""))
     if entity is None:
@@ -630,6 +679,7 @@ async def edit_entity(request: Request):
 @app.post("/api/entities/split")
 async def split_entity(request: Request):
     """Take one form out of its group: it is not the same thing."""
+    _not_while_run()
     body = await request.json()
     entity = SESSION.store.entities.get(body.get("key", ""))
     if entity is None:
@@ -640,6 +690,7 @@ async def split_entity(request: Request):
 
 @app.post("/api/entities/all")
 async def set_all(request: Request):
+    _not_while_run()
     body = await request.json()
     enabled = bool(body.get("enabled", True))
     for entity in SESSION.store.entities.values():
@@ -718,6 +769,8 @@ async def run(request: Request):
 
 def _kev_note() -> str:
     from . import audit
+    if audit.KEV.note.startswith("running") and audit.KEV.url is None:
+        return "stopped unexpectedly - the final check uses the name matcher alone"
     return audit.KEV.note
 
 
@@ -768,6 +821,9 @@ def remove_set(set_id: str):
     doc_set = _find_set(set_id)
     if doc_set.run_state in ("queued", "running"):
         raise HTTPException(409, "Take it out of the queue first - or wait for it to finish.")
+    job = SESSION.running_job
+    if job is not None and job.set_id == set_id:
+        raise HTTPException(409, "This set's step is still working - wait for it to finish.")
     pdf_processor.forget_ocr(doc_set.files)
     shutil.rmtree(doc_set.folder, ignore_errors=True)
     del SESSION.sets[set_id]
@@ -782,8 +838,16 @@ def set_results_root(path: str | Path) -> dict:
     """Where every set's results go, a folder per set. The app window's
     folder panel calls this; the page posts a typed path in a browser."""
     root = Path(path).expanduser()
+    if not str(path).strip() or not root.is_absolute():
+        raise HTTPException(422, "Give the whole path of the results folder.")
     if not root.is_dir():
         raise HTTPException(422, f"{root} is not a folder.")
+    # found out now, not by every set failing one after another overnight
+    try:
+        probe = Path(tempfile.mkdtemp(prefix=".redactor-write-test-", dir=root))
+        probe.rmdir()
+    except OSError as exc:
+        raise HTTPException(422, f"Cannot write to {root}: {exc.strerror or exc}.")
     SESSION.results_root = root.resolve()
     return _sets_payload()
 
@@ -804,6 +868,9 @@ async def queue_run(request: Request):
     if SESSION.results_root is None:
         raise HTTPException(422, "Choose the folder the results go to first.")
     doc_set = SESSION.current
+    if doc_set.run_state in ("queued", "running"):
+        raise HTTPException(409, "This set is already in the queue.")
+    _not_while_run("queued again")
     if not doc_set.files:
         raise HTTPException(422, "Add at least one document first.")
     if not doc_set.store.entities:

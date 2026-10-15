@@ -86,8 +86,14 @@ def _exit_with(parent: int) -> None:
     force-quit cannot, and its readers - each holding an OCR model - were left
     running with nothing to read for.
     """
+    import multiprocessing
+
+    # Windows keeps answering getppid() with a parent long gone: the parent
+    # process's own handle says whether it still runs, there and here
+    started_by = multiprocessing.parent_process()
+
     def watch() -> None:
-        while os.getppid() == parent:
+        while os.getppid() == parent and (started_by is None or started_by.is_alive()):
             time.sleep(2)
         os._exit(0)
 
@@ -153,6 +159,10 @@ class _Scheduler:
         if base is None or pdf_processor.ocr_cached(base, names):
             return None
         with self.wake:
+            if self.closed:                       # nothing will read it: the step does
+                gone: Future = Future()
+                gone.set_result(None)
+                return gone
             entry = self.pages.get(base)
             if entry is None:
                 entry = self.pages[base] = {"future": Future(), "priority": priority,
@@ -171,7 +181,8 @@ class _Scheduler:
             try:
                 self._feed_one()
             except Exception:                     # never leave a step waiting on a
-                self.shutdown()                   # line nothing will move
+                _forget(self)                     # line nothing will move - and the
+                self.shutdown()                   # next step starts a fresh one
                 return
 
     def _feed_one(self) -> None:
@@ -246,6 +257,15 @@ def _get_scheduler() -> _Scheduler | None:
         return _scheduler
 
 
+def _forget(scheduler: _Scheduler) -> None:
+    """Take a scheduler that stopped by itself out of use."""
+    global _scheduler
+    with _lock:
+        if _scheduler is scheduler:
+            _scheduler = None
+            _surveys.clear()
+
+
 def shutdown(wait: bool = False) -> None:
     """Stop the workers and forget everything. ``wait`` until they have exited -
     which a process started by multiprocessing must, before it can exit itself."""
@@ -298,13 +318,17 @@ def read_ahead(paths: Iterable[Path], per_file: int | None = None, wait: bool = 
         return
     from . import ocr, pdf_processor
 
+    pdfs = [Path(p) for p in paths if Path(p).suffix.lower() == ".pdf"]
     try:
         names = [engine.name for engine in ocr.usable_engines()]
     except Exception:
-        return
+        names = []
     if not names:
+        # nothing to read with: say so for each file, so no set waits on them
+        for path in pdfs:
+            if on_scans is not None:
+                on_scans(path, 0)
         return
-    pdfs = [Path(p) for p in paths if Path(p).suffix.lower() == ".pdf"]
     events: "queue.Queue[tuple | None]" = queue.Queue()
     expected = [0]
     counting = threading.Lock()
@@ -370,7 +394,16 @@ def read_ahead_in_background(paths: Iterable[Path], rank: int = 0,
     """Start reading ``paths`` and return at once - for files just added.
     False when there is no reading ahead to do it (turned off, or no engine)."""
     files = list(paths)
-    if not files or worker_count() < 1 or _get_scheduler() is None:
+    if not files or worker_count() < 1:
+        return False
+    from . import ocr
+
+    try:
+        if not ocr.usable_engines():
+            return False
+    except Exception:
+        return False
+    if _get_scheduler() is None:
         return False
     read_ahead(files, wait=False, rank=rank, on_page=on_page, on_scans=on_scans)
     return True

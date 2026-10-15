@@ -369,13 +369,14 @@ Nothing has been written yet.
 
 ### 4. Run
 
-Produces three things:
+Produces four things, in the set's own folder under the results folder:
 
 | File | Contents |
 | --- | --- |
 | `anonymized-<timestamp>.zip` | The cleaned documents, and nothing else |
 | `mapping-key-<timestamp>.json` | The original → replacement table, AES-encrypted (PBKDF2-SHA256, 480,000 iterations), written outside the archive |
 | `redaction-report-<timestamp>.txt` | Counts by category, warnings, and what was not covered. It never contains a redacted value, but it does name the original files—keep it with the mapping key, not with anything you deliver |
+| `final-check.txt` | The pages the final check flagged for a look - see [the final check](#the-final-check). It names the real people it looked for, so it too stays with the mapping key |
 
 Filenames are anonymized too, since `Smith_Divorce_Petition.docx` names the
 client before anyone opens it.

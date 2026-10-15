@@ -87,12 +87,20 @@ class KevService:
 
     @property
     def url(self) -> str | None:
-        return f"http://127.0.0.1:{self.port}" if self.ready.is_set() and self.port else None
+        alive = self.process is not None and self.process.poll() is None
+        return f"http://127.0.0.1:{self.port}" if alive and self.ready.is_set() and self.port \
+            else None
 
     def start(self) -> bool:
-        """Start Kev in the background; False when there is no Kev to start."""
+        """Start Kev in the background; False when there is no Kev to start.
+        Started once: a second call while it runs or starts changes nothing."""
+        if self.process is not None and self.process.poll() is None:
+            return True
         if os.environ.get("REDACTOR_KEV", "1") == "0":
             self.note = "turned off (REDACTOR_KEV=0)"
+            return False
+        if os.name == "nt":
+            self.note = "not available on Windows"
             return False
         python = _kev_python()
         if python is None:
@@ -116,13 +124,16 @@ class KevService:
             start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         atexit.register(self.stop)
         self.note = "starting"
-        threading.Thread(target=self._wait_until_up, daemon=True, name="kev-start").start()
+        threading.Thread(target=self._wait_until_up, args=(self.process,), daemon=True,
+                         name="kev-start").start()
         return True
 
-    def _wait_until_up(self) -> None:
-        deadline = time.time() + KEV_START_SECONDS
-        while time.time() < deadline:
-            if self.process is None or self.process.poll() is not None:
+    def _wait_until_up(self, process) -> None:
+        """Watch Kev come up. One slow to load - nine gigabytes off a cold
+        disk - is still taken when it does: "slow to start" is not the end."""
+        started = time.time()
+        while self.process is process:
+            if process.poll() is not None:
                 self.note = "stopped while starting"
                 return
             try:
@@ -134,8 +145,15 @@ class KevService:
                         return
             except (urllib.error.URLError, OSError):
                 pass
+            if time.time() - started > KEV_START_SECONDS:
+                self.note = "slow to start - still loading"
             time.sleep(1)
-        self.note = "did not start in time"
+
+    @property
+    def starting(self) -> bool:
+        """Kev is on its way up: running, not answering yet."""
+        return (self.process is not None and self.process.poll() is None
+                and not self.ready.is_set())
 
     def stop(self) -> None:
         process, self.process = self.process, None
@@ -152,7 +170,7 @@ class KevService:
         watcher, self.watcher = self.watcher, None
         if watcher is not None and watcher.poll() is None:
             watcher.terminate()
-        if self.note.startswith("running") or self.note == "starting":
+        if self.note.startswith(("running", "starting", "slow to start")):
             self.note = "stopped"
 
 
@@ -160,10 +178,11 @@ KEV = KevService()
 
 
 def wait_for_kev(seconds: float) -> str | None:
-    """Kev's address once it is up, or None if it is not within ``seconds``."""
-    if KEV.process is None:
-        return None
-    KEV.ready.wait(timeout=seconds)
+    """Kev's address once it is up, or None if it is not within ``seconds``.
+    A Kev that is not running - never started, or gone - is not waited for."""
+    deadline = time.time() + seconds
+    while KEV.starting and time.time() < deadline:
+        KEV.ready.wait(timeout=1.0)
     return KEV.url
 
 

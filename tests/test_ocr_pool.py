@@ -179,3 +179,33 @@ def test_readers_leave_when_the_app_dies_without_closing(tmp_path):
     while any(alive(p) for p in pids) and time.time() < deadline:
         time.sleep(0.5)
     assert not any(alive(p) for p in pids), "a reader outlived the app"
+
+
+def test_a_stopped_line_never_leaves_a_step_waiting(pool, tmp_path):
+    """A line shut down - its feeder failed, say - answers at once, and the
+    next step gets a fresh one instead of the dead one."""
+    path = _scan(tmp_path / "scan.pdf", 2)
+    scheduler = ocr_pool._get_scheduler()
+    names = [engine.name for engine in ocr.usable_engines()]
+    ocr_pool._forget(scheduler)
+    scheduler.shutdown()
+    late = scheduler.want(path, 0, names, ocr_pool.NEEDED_NOW)
+    assert late is None or late.done()
+    fresh = ocr_pool._get_scheduler()
+    assert fresh is not scheduler and not fresh.closed
+    seen = []
+    ocr_pool.read_ahead([path], on_page=lambda p, i: seen.append(i))
+    assert sorted(seen) == [0, 1]
+
+
+def test_with_no_engine_nothing_waits_on_the_reading(monkeypatch, tmp_path):
+    """A set whose reading cannot start is told so, rather than shown
+    "reading" all night with the Mac kept awake for it."""
+    monkeypatch.setenv("REDACTOR_OCR_WORKERS", "2")
+    path = _scan(tmp_path / "scan.pdf", 1)
+    monkeypatch.setattr(ocr, "usable_engines", lambda: [])
+    assert not ocr_pool.read_ahead_in_background([path])
+    told = []
+    monkeypatch.setattr(ocr_pool, "_get_scheduler", lambda: object())
+    ocr_pool.read_ahead([path], wait=False, on_scans=lambda p, n: told.append(n))
+    assert told == [0]

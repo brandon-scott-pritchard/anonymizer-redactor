@@ -123,7 +123,16 @@ class DocSet:
 
     # -------------------------------------------------------- preparing --
     def _file_set(self) -> frozenset:
-        return frozenset(str(Path(f).resolve()) for f in self.files)
+        """The set's files as they are now: a file removed and another added
+        under its name is a different file."""
+        def key(f) -> tuple:
+            path = Path(f).resolve()
+            try:
+                stat = path.stat()
+                return (str(path), stat.st_size, stat.st_mtime_ns)
+            except OSError:
+                return (str(path), -1, -1)
+        return frozenset(key(f) for f in self.files)
 
     def ready_prepared(self) -> dict | None:
         """The name screen worked out ahead - if it is for these very files."""
@@ -175,12 +184,12 @@ class DocSet:
 def _run_set(events, files, store, settings, output_dir, password, relative, skipped,
              spill_dir, kev_url=None) -> None:
     """Child side: one set's run, then its final check, reporting as it goes."""
-    _own_group()
     # everything was read before the set was queued; whatever was not is read
     # in-line here rather than by a second pool of readers
     readers = os.environ.get("REDACTOR_OCR_WORKERS")
     os.environ["REDACTOR_OCR_WORKERS"] = "0"
     try:
+        _own_group()
         from . import audit, pdf_processor, pipeline
 
         pdf_processor.keep_ocr_on_disk(spill_dir)
@@ -188,6 +197,7 @@ def _run_set(events, files, store, settings, output_dir, password, relative, ski
         def progress(message: str, fraction: float) -> None:
             events.put(("progress", message, fraction))
 
+        events.put(("total", pipeline.count_pages(files)))
         with pdf_processor.page_listener(lambda path, index: events.put(("page", path, index))):
             result = pipeline.run_job(files, store, settings, output_dir, password, progress,
                                       relative=relative, skipped=skipped)
@@ -216,19 +226,45 @@ def _run_set(events, files, store, settings, output_dir, password, relative, ski
 
 def _own_group() -> None:
     """Child side: a process group of its own, so the queue can stop it and
-    everything it started at once - see :func:`_stop`."""
+    everything it started at once - see :func:`_stop`. Windows has no
+    process groups of this kind; there the child is stopped on its own."""
+    if not hasattr(os, "setpgrp"):
+        return
     try:
         os.setpgrp()
     except OSError:
         pass
 
 
-def _stop(child) -> None:
+def _next_event(events, child):
+    """The child's next message, or None once it has exited with nothing more
+    to say. A message put just before it exited is still read: one missed
+    here marked a finished run failed."""
+    import queue as queue_module
+
+    while True:
+        try:
+            return events.get(timeout=1.0)
+        except queue_module.Empty:
+            if child.is_alive():
+                continue
+            try:
+                return events.get(timeout=1.0)
+            except queue_module.Empty:
+                return None
+
+
+def _stop(child, patience: float = 30) -> None:
     """Wait for a finished child to exit; then make sure nothing it started
     is left running. Stopping only the child orphaned its OCR readers."""
     import signal
 
-    child.join(timeout=30)
+    child.join(timeout=patience)
+    if not hasattr(os, "killpg"):                  # Windows
+        if child.is_alive():
+            child.terminate()
+            child.join(timeout=10)
+        return
     for sig, grace in ((signal.SIGTERM, 10), (signal.SIGKILL, 5)):
         try:
             os.killpg(child.pid, sig)
@@ -240,9 +276,9 @@ def _stop(child) -> None:
 
 def _prepare_set(events, files, settings, spill_dir) -> None:
     """Child side: everything the name screen shows, worked out ahead."""
-    _own_group()
     os.environ["REDACTOR_OCR_WORKERS"] = "0"
     try:
+        _own_group()
         from . import officials, pdf_processor, pipeline
 
         pdf_processor.keep_ocr_on_disk(spill_dir)
@@ -276,10 +312,19 @@ class Preparer:
         self.spill_dir = spill_dir
         self.candidates = candidates
         self.settings_for = settings_for
+        self.child = None
+        self.stopping = False
         threading.Thread(target=self._loop, daemon=True, name="name-preparer").start()
 
+    def stop_now(self) -> None:
+        """The app is quitting: stop working any set out."""
+        self.stopping = True
+        child = self.child
+        if child is not None and child.is_alive():
+            _stop(child, patience=0)
+
     def _loop(self) -> None:
-        while True:
+        while not self.stopping:
             try:
                 chosen = next((s for s in self.candidates() if s.should_prepare(self.SETTLE)),
                               None)
@@ -292,7 +337,6 @@ class Preparer:
 
     def _prepare(self, doc_set: DocSet) -> None:
         import multiprocessing
-        import queue as queue_module
 
         files = list(doc_set.files)
         covered = doc_set._file_set()
@@ -304,14 +348,11 @@ class Preparer:
                                     args=(events, files, self.settings_for(doc_set),
                                           self.spill_dir))
             child.start()
-            outcome = None
-            while outcome is None:
-                try:
-                    outcome = events.get(timeout=1.0)
-                except queue_module.Empty:
-                    if not child.is_alive():
-                        outcome = ("error", f"stopped (exit code {child.exitcode})")
+            self.child = child
+            outcome = _next_event(events, child) or \
+                ("error", f"stopped (exit code {child.exitcode})")
             _stop(child)
+            self.child = None
             if outcome[0] == "done":
                 doc_set.prepared, doc_set.prepared_for = outcome[1], covered
             else:
@@ -330,7 +371,28 @@ class RunQueue:
         self.running: DocSet | None = None
         self.wake = threading.Condition()
         self.on_change = on_change or (lambda: None)
+        self.child = None
+        self.stopping = False
         threading.Thread(target=self._loop, daemon=True, name="run-queue").start()
+
+    # A run whose app quits under it must not carry on: the set's documents,
+    # in the app's temporary folder, are deleted as it quits, and the run went
+    # on for hours - invisible, every file left failing - into an archive that
+    # looked finished. It is stopped instead, and its folder says so.
+    INTERRUPTED = "RUN INTERRUPTED - NOT COMPLETE.txt"
+
+    def stop_now(self) -> None:
+        """The app is quitting: stop the running set, start no other."""
+        with self.wake:
+            self.stopping = True
+            self.wake.notify_all()
+            doc_set, child = self.running, self.child
+        if child is None:
+            return
+        if child.is_alive():
+            _stop(child, patience=0)
+        if doc_set is not None and doc_set.results is not None and doc_set.run_state != "done":
+            _mark_interrupted(doc_set.results, self.INTERRUPTED)
 
     def add(self, doc_set: DocSet, settings, password: str, results_root: Path) -> None:
         with self.wake:
@@ -358,8 +420,10 @@ class RunQueue:
     def _loop(self) -> None:
         while True:
             with self.wake:
-                while not self.waiting:
+                while not self.waiting and not self.stopping:
                     self.wake.wait()
+                if self.stopping:
+                    return
                 doc_set, settings, password, root = self.waiting.pop(0)
                 self.running = doc_set
             try:
@@ -371,22 +435,38 @@ class RunQueue:
                     self.running = None
                 self.on_change()
 
+    READ_STALL = 600.0     # seconds a set's reading may stand still before a run goes on
+
     def _run(self, doc_set: DocSet, settings, password: str, root: Path) -> None:
         import multiprocessing
-        import queue as queue_module
 
-        from . import pdf_processor, pipeline
+        from . import pdf_processor
 
         results = _unique_folder(root, folder_name(doc_set.name))
         results.mkdir(parents=True)
         doc_set.results = results
         doc_set.run_state, doc_set.run_message = "running", "Starting"
         doc_set.run_pages = set()
-        doc_set.run_pages_total = pipeline.count_pages(doc_set.files)
+        doc_set.run_pages_total = 0
         from . import audit
 
+        # A set queued before its reading finished waits for it: the run would
+        # read the same pages again, beside the readers still at them. A
+        # reading that stops moving for READ_STALL seconds is not waited for.
+        last, moved = None, time.time()
+        while not doc_set.read_through() and not self.stopping \
+                and time.time() - moved < self.READ_STALL:
+            now = doc_set.reading()
+            if now != last:
+                last, moved = now, time.time()
+            doc_set.run_message = (f"Waiting for its reading to finish - page {now[0]:,} "
+                                   f"of {now[1]:,}")
+            time.sleep(1)
+        doc_set.run_message = "Starting"
         # Kev starts with the app; a set queued in its first minutes waits for it
         kev_url = audit.wait_for_kev(audit.KEV_START_SECONDS)
+        if self.stopping:
+            return
         context = multiprocessing.get_context("spawn")
         events = context.Queue()
         child = context.Process(
@@ -394,16 +474,17 @@ class RunQueue:
             args=(events, list(doc_set.files), doc_set.store, settings, results, password,
                   dict(doc_set.relative), list(doc_set.skipped), self.spill_dir, kev_url))
         child.start()
+        self.child = child
         result = error = None
         while result is None and error is None:
-            try:
-                event = events.get(timeout=1.0)
-            except queue_module.Empty:
-                if not child.is_alive():
-                    error = f"the run stopped without finishing (exit code {child.exitcode})"
-                continue
+            event = _next_event(events, child)
+            if event is None:
+                error = f"the run stopped without finishing (exit code {child.exitcode})"
+                break
             kind = event[0]
-            if kind == "progress":
+            if kind == "total":
+                doc_set.run_pages_total = event[1]
+            elif kind == "progress":
                 doc_set.run_message = event[1]
             elif kind == "page":
                 doc_set.run_pages.add((event[1], event[2]))
@@ -414,7 +495,10 @@ class RunQueue:
             elif kind == "error":
                 error = event[1]
         _stop(child)
+        self.child = None
         if error is not None:
+            if self.stopping:
+                error = "the app was closed while it ran - run it again"
             doc_set.run_state, doc_set.run_error = "failed", error
             doc_set.run_message = "Failed"
             return
@@ -426,6 +510,19 @@ class RunQueue:
         # them, are not kept a moment longer than its results need them
         pdf_processor.forget_ocr(doc_set.files)
         shutil.rmtree(doc_set.uploads, ignore_errors=True)
+
+
+def _mark_interrupted(results: Path, marker: str) -> None:
+    """Say, in the set's results folder, that its run did not finish - and
+    take away the half-made documents, so nothing there passes for done."""
+    try:
+        for work in results.glob("_work-*"):
+            shutil.rmtree(work, ignore_errors=True)
+        (results / marker).write_text(
+            "This set's run was stopped when the app was closed, before it finished.\n"
+            "Nothing in this folder is complete. Run the set again.\n", encoding="utf-8")
+    except OSError:
+        pass
 
 
 def _unique_folder(root: Path, name: str) -> Path:

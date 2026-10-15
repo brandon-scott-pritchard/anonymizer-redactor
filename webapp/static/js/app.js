@@ -161,8 +161,31 @@ function folderCount(files) {
 const PHOTO_TYPES = ["avif", "bmp", "dib", "gif", "heic", "heif", "hif", "j2k", "jfif", "jp2", "jpe", "jpeg", "jpf", "jpg", "jpx", "png", "tif", "tiff", "webp"];
 const READABLE = new RegExp(`\\.(pdf|docx|${PHOTO_TYPES.join("|")})$`, "i");
 
+// The set's name, typed into a draft of its own and saved when the field is
+// left or Enter is pressed. Saved on every keystroke, each answer came back
+// trimmed and snapped the field to it mid-word: "Smith v Jones" became
+// "SmithvJones" - and the name is the results folder's.
+function SetName({ name, onSave, disabled }) {
+  const [draft, setDraft] = useState(name);
+  const [editing, setEditing] = useState(false);
+  useEffect(() => { if (!editing) setDraft(name); }, [name, editing]);
+  const save = () => {
+    setEditing(false);
+    if (draft.trim() && draft.trim() !== name) onSave(draft.trim());
+    else setDraft(name);
+  };
+  return html`<input type="text" value=${draft} disabled=${disabled}
+    placeholder="e.g. a client or case - it names the set's results folder"
+    onFocus=${() => setEditing(true)}
+    onInput=${(e) => setDraft(e.target.value)}
+    onBlur=${save}
+    onKeyDown=${(e) => { if (e.key === "Enter") e.target.blur(); }} />`;
+}
+
 function FilesStep({ state, set, actions }) {
   const [over, setOver] = useState(false);
+  // a running set's documents are being read, and a finished set's are gone
+  const locked = ["running", "done"].includes(state.info && state.info.state);
   const pick = () => document.getElementById(`filepick-${state.setId}`).click();
   const onPicked = (list) => list.length && actions.upload(list);
   const asItems = (files) => [...files].map((file) => ({ file, path: file.webkitRelativePath || file.name }));
@@ -170,15 +193,17 @@ function FilesStep({ state, set, actions }) {
   return html`
     <div class="card setname">
       <label>Name of this set
-        <input type="text" value=${state.setName}
-               placeholder="e.g. a client or case - it names the set's results folder"
-               onChange=${(e) => actions.renameSet(e.target.value)} />
+        <${SetName} name=${state.setName} onSave=${actions.renameSet}
+                    disabled=${state.info && ["queued", "running", "done"].includes(state.info.state)} />
       </label>
     </div>
+    ${locked ? html`<div class="card"><p class="hint">${state.info.state === "running"
+      ? "This set is running - its documents cannot be changed until it finishes."
+      : "This set has been run. To run these documents again, make a new set."}</p></div>` : null}
     <div class="columns">
       <div class="card">
         <h2>Documents (Word, PDF, photos)</h2>
-        <div class=${"dropzone" + (over ? " over" : "")}
+        ${locked ? null : html`<div class=${"dropzone" + (over ? " over" : "")}
              onClick=${pick}
              onDragOver=${(e) => { e.preventDefault(); setOver(true); }}
              onDragLeave=${() => setOver(false)}
@@ -196,7 +221,7 @@ function FilesStep({ state, set, actions }) {
         <div class="bar">
           <button onClick=${actions.chooseFolder}>Choose folder…</button>
           ${state.files.length ? html`<button onClick=${actions.removeAll}>Remove all</button>` : null}
-        </div>
+        </div>`}
         ${state.files.length ? html`<p class="hint">${state.files.length} document${
           state.files.length === 1 ? "" : "s"}${folders > 1 || state.files.some((f) => f.name.includes("/"))
           ? ` in ${folders} folder${folders === 1 ? "" : "s"}` : ""}.</p>` : null}
@@ -208,17 +233,17 @@ function FilesStep({ state, set, actions }) {
           ${state.files.map((f, i) => html`<li key=${i}>
             <span class="kind">${(f.kind || "?").toUpperCase()}</span>
             <span class="name">${f.name}</span>
-            <button onClick=${() => actions.removeFile(i)}>Remove</button>
+            ${locked ? null : html`<button onClick=${() => actions.removeFile(i)}>Remove</button>`}
           </li>`)}
         </ul>
       </div>
       <div>
         <div class="card">
           <h2>What to do with DOCX files</h2>
-          <label class="check"><input type="radio" name="mode"
+          <label class="check"><input type="radio" name=${`mode-${state.setId}`}
             checked=${state.options.docx_mode === "anonymize"}
             onChange=${() => set.option("docx_mode", "anonymize")} /> Anonymize (realistic fake names)</label>
-          <label class="check"><input type="radio" name="mode"
+          <label class="check"><input type="radio" name=${`mode-${state.setId}`}
             checked=${state.options.docx_mode === "redact"}
             onChange=${() => set.option("docx_mode", "redact")} /> Redact (black bars, nothing invented)</label>
           <p class=${state.options.docx_mode === "anonymize" ? "warn" : "hint"}>
@@ -226,10 +251,10 @@ function FilesStep({ state, set, actions }) {
         </div>
         <div class="card">
           <h2>What to do with PDF files</h2>
-          <label class="check"><input type="radio" name="pdfmode"
+          <label class="check"><input type="radio" name=${`pdfmode-${state.setId}`}
             checked=${state.options.pdf_mode === "redact"}
             onChange=${() => set.option("pdf_mode", "redact")} /> Redact (black boxes, nothing invented)</label>
-          <label class="check"><input type="radio" name="pdfmode"
+          <label class="check"><input type="radio" name=${`pdfmode-${state.setId}`}
             checked=${state.options.pdf_mode === "anonymize"}
             onChange=${() => set.option("pdf_mode", "anonymize")} /> Anonymize (replacement text in place)</label>
           <p class=${state.options.pdf_mode === "anonymize" ? "warn" : "hint"}>
@@ -524,7 +549,7 @@ function RunStep({ state, actions, meta }) {
       </div>
       ${RUN_STATES[info.state] ? html`
         <p class=${info.state === "failed" ? "status-bad" : info.state === "done" ? "status-ok" : ""}>
-          ${RUN_STATES[info.state]} ${run.message && info.state !== "done" ? `${run.message}.` : ""}
+          ${RUN_STATES[info.state]} ${run.message && !["done", "failed"].includes(info.state) ? `${run.message}.` : ""}
           ${info.state === "running" && run.total ? ` Page ${run.done.toLocaleString()} of ${run.total.toLocaleString()}.` : ""}
           ${run.error ? html`<br />${run.error}` : null}</p>` : null}
       ${finished ? html`
@@ -607,6 +632,30 @@ function Workspace({ setId, visible, meta, info, resultsRoot, refreshSets }) {
     setActive(payload.active); setInstructions(payload.instructions);
   };
 
+  // the two halves of the name screen; unguarded, so a step that runs both
+  // hears when either could not start
+  const readCaptions = async () => {
+    const result = await api.job(api.post("/api/captions"), track);
+    setCaptions(result.captions);
+    absorbGuard(result);
+    setSuggChecked((prev) => {
+      const next = new Set(prev);
+      result.captions.forEach((c, i) => {
+        if (c.confidence === "high" && !prev.has(`cap-${i}-seen`)) next.add(`cap-${i}`);
+        next.add(`cap-${i}-seen`);
+      });
+      return next;
+    });
+  };
+
+  const scanSuggestions = async () => {
+    const body = { options, names: parseNameLines(namesText) };
+    const result = await api.job(api.post("/api/suggestions", body), track);
+    setScanned(true);
+    setSuggestions(result.suggestions);
+    absorbGuard(result);
+  };
+
   const actions = {
     go: (target) => setStep(target),
 
@@ -667,35 +716,23 @@ function Workspace({ setId, visible, meta, info, resultsRoot, refreshSets }) {
     toNames: () => guarded(async () => {
       if (!files.length) throw new Error("Add at least one DOCX or PDF first.");
       if (!password.trim()) throw new Error("Set a password for the mapping key, or press New.");
+      const first = !captions.length && !scanned;
       setUnlocked((u) => Math.max(u, 1)); setStep(1);
       // the whole name screen at once: the caption's names, then every
       // document scanned for the rest - no second button to find
-      if (!captions.length) await actions.readCaptions();
-      if (!scanned) await actions.scanSuggestions();
+      try {
+        if (!captions.length) await readCaptions();
+        if (!scanned) await scanSuggestions();
+      } catch (error) {
+        // another set's step holding the reader, say: back to the documents,
+        // not an empty name screen that looks finished
+        if (first) { setStep(0); setUnlocked(0); }
+        throw error;
+      }
     }),
 
-    readCaptions: () => guarded(async () => {
-      const result = await api.job(api.post("/api/captions"), track);
-      setCaptions(result.captions);
-      absorbGuard(result);
-      setSuggChecked((prev) => {
-        const next = new Set(prev);
-        result.captions.forEach((c, i) => {
-          if (c.confidence === "high" && !prev.has(`cap-${i}-seen`)) next.add(`cap-${i}`);
-          next.add(`cap-${i}-seen`);
-        });
-        return next;
-      });
-    }),
-
-    scanSuggestions: () => guarded(async () => {
-      const body = { options, names: parseNameLines(namesText) };
-      const result = await api.job(api.post("/api/suggestions", body), track);
-      setScanned(true);
-      setSuggestions(result.suggestions);
-      absorbGuard(result);
-      if (!result.suggestions.length && result.notes.length) setFault(result.notes[0]);
-    }),
+    readCaptions: () => guarded(readCaptions),
+    scanSuggestions: () => guarded(scanSuggestions),
 
     toggleSuggestion: (id) => setSuggChecked((prev) => {
       const next = new Set(prev);
@@ -724,11 +761,18 @@ function Workspace({ setId, visible, meta, info, resultsRoot, refreshSets }) {
     },
 
     toReview: () => guarded(async () => {
+      const first = !entities.length;
       setUnlocked((u) => Math.max(u, 2)); setStep(2);
       const body = { options, names: parseNameLines(namesText) };
-      const result = await api.job(api.post("/api/review", body), track);
-      absorbGuard(result);
-      applyReview(result);
+      try {
+        const result = await api.job(api.post("/api/review", body), track);
+        absorbGuard(result);
+        applyReview(result);
+      } catch (error) {
+        // a review list that never got built is not one to run from
+        if (first) { setStep(1); setUnlocked(1); }
+        throw error;
+      }
     }),
 
     setEnabled: (row, enabled) => guarded(async () => {
