@@ -666,6 +666,14 @@ def run_together_hits(text: str, store: MappingStore, redact: bool,
         word = match.group(0)
         if any(match.start() < b and a < match.end() for a, b in protected):
             continue
+        # inside an email address or a link the whole of it goes, as one: a
+        # name swapped in "abigail.okafor98@example.com" left the address
+        # whole but for the name - its digits and domain still there
+        left = text.rfind(" ", 0, match.start()) + 1
+        right = text.find(" ", match.end())
+        chunk = text[left:right if right >= 0 else len(text)]
+        if "@" in chunk or "://" in chunk or "www." in chunk.casefold():
+            continue
         pieces = _read_run_together(word, parts)
         if not pieces:
             continue

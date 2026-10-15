@@ -557,3 +557,17 @@ def test_a_word_holding_a_name_and_something_else_is_left_alone(text):
                                    ("William Smith", "person"), ("NATHAN C BLACKBURN", "person")])
     grouping.group(store)
     assert apply_hits(text, scan_text(text, store, Settings(use_ner=False))) == text
+
+
+def test_a_name_inside_an_email_goes_with_the_whole_address():
+    """The run-together pass swapped the name in "abigail.okafor98@example.com"
+    and left the address, digits and domain, where it had been [EMAIL-1]."""
+    from redactor import grouping, review
+    from redactor.engine import Settings, apply_hits, scan_text
+
+    store, _ = review.build_store([("ABIGAIL N OKAFOR", "person")])
+    grouping.group(store)
+    out = apply_hits("Abigail Okafor abigail.okafor98@example.com",
+                     scan_text("Abigail Okafor abigail.okafor98@example.com", store,
+                               Settings(use_ner=False, pdf_mode="anonymize")))
+    assert "@" not in out and "98" not in out and "[EMAIL-" in out
