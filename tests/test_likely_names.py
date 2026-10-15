@@ -64,3 +64,20 @@ def test_the_model_may_not_drop_an_employer_or_a_first_and_last_name():
     assert llm_names.keeps("Megan Layton", "person", "person")
     assert llm_names.keeps("Mark Store", "person", None) is None
     assert "not only" in llm_names.SYSTEM and "never mark" in llm_names.SYSTEM
+
+
+@pytest.mark.parametrize("text", ["Tran Date", "Date Ps", "Posting Amount"])
+def test_a_name_ending_in_a_column_heading_is_a_table_read_across(text):
+    """Ticked, "Tran Date" took every "Date" heading of a household: 532."""
+    from redactor import llm_names
+
+    assert not ner.likely_name(text, "person")
+    assert llm_names.keeps(text, "person", "person") is False
+
+
+def test_an_everyday_word_is_never_a_payment_handle():
+    from redactor import patterns
+
+    assert not [m for m in patterns.scan("Venmo:\nActivity") if m.category == "payment_handle"]
+    assert [m.text for m in patterns.scan("Venmo\nkaylaruiz88")
+            if m.category == "payment_handle"] == ["kaylaruiz88"]

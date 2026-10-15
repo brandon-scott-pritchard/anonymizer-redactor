@@ -523,6 +523,22 @@ def _plain(word: str) -> str:
     return re.sub(r"(?i)['’]s$", "", word).strip(".,'’()").casefold()
 
 
+# A statement's column headings, which end a "name" the scan read across a
+# table: "Tran Date", "Date Ps", "Posting Amount". Ticked, the person's
+# capitalised surname took every "Date" heading in a household: 532 of them.
+HEADING_WORDS = frozenset("""
+date dates amount amounts total totals balance balances description activity details detail
+type number no period summary statement payment payments posted posting transaction
+transactions credit credits debit debits fee fees charge charges deposit deposits withdrawal
+withdrawals ps
+""".split())
+
+
+def heading_ended(text: str) -> bool:
+    words = [_plain(w) for w in text.split() if _plain(w)]
+    return bool(words) and (words[-1] in HEADING_WORDS or words[0] in HEADING_WORDS)
+
+
 def likely_name(text: str, category: str, known: frozenset[str] = frozenset()) -> bool:
     """Is this suggestion probably a name at all?
 
@@ -537,6 +553,8 @@ def likely_name(text: str, category: str, known: frozenset[str] = frozenset()) -
         return False
     if any(w in known for w in words):
         return True
+    if category in ("person", "minor") and heading_ended(text):
+        return False
     if category == "employer":
         return True
     if category in ("organization", "location"):

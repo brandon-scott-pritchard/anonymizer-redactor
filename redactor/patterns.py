@@ -1092,6 +1092,11 @@ def _handle_from_another_row(value: str, label: str) -> bool:
     or a long run of lower case ("kaylaruiz"). Most Venmo and PayPal handles
     are written without the "@", and a form prints them under the rail's name.
     """
+    if not value.startswith(("@", "$")) and value.isalpha():
+        # an everyday word is a heading, not a handle: "Venmo" over "Activity"
+        from . import names as _names
+        if _names.ordinary_word(value):
+            return True
     return ("\n" in label and not value.startswith(("@", "$"))
             and not _HANDLE_LIKE.search(value))
 

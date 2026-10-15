@@ -74,6 +74,8 @@ def keeps(text: str, category: str, label: str | None) -> bool | None:
 
     if category == "employer":
         return True
+    if category in ("person", "minor") and ner.heading_ended(text):
+        return False                   # "Tran Date": a table read across, whoever says so
     if label is None:
         return None
     if label != "other":
