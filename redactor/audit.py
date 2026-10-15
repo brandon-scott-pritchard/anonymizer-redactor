@@ -475,10 +475,13 @@ PAGE_SYSTEM = (
     "full, by surname or first name alone, by initials, misspelled or misread by OCR "
     "(HARRlNGTON, Harringten), glued into other words (4417IntuPymdHARRINGTON), or in "
     "capitals. Copy each quote character for character from the page, including any "
-    "letters it is glued to. Do not quote invented names, placeholders such as "
-    "[PERSON-1] or [REDACTED], or other people's names. If no listed person is named, "
-    "answer with an empty list.")
-PAGE_SCHEMA = ('{"found": [{"quote": "<the text exactly as on the page>", '
+    "letters it is glued to, and with it the three or four words just before it and "
+    "just after it, also exactly as on the page, so the place can be found. Do not "
+    "quote invented names, placeholders such as [PERSON-1] or [REDACTED], or other "
+    "people's names. If no listed person is named, answer with an empty list.")
+PAGE_SCHEMA = ('{"found": [{"before": "<3-4 words just before it>", '
+               '"quote": "<the text exactly as on the page>", '
+               '"after": "<3-4 words just after it>", '
                '"person": "<which listed person, by number>"}]}')
 
 
@@ -493,8 +496,9 @@ def _forms(store, head) -> list[str]:
     return [m.canonical for m in grouping.members(store, head)][:FORMS_SHOWN]
 
 
-def _ask_page(url: str, text: str, heads: list, store) -> list[tuple[str, str]]:
-    """(quote, person) the model says still names one of ``heads`` on the page."""
+def _ask_page(url: str, text: str, heads: list, store) -> list[tuple[str, str, str, str]]:
+    """(quote, person, before, after) the model says still names one of
+    ``heads`` on the page."""
     from . import llm
 
     listing = "\n".join(
@@ -508,8 +512,13 @@ def _ask_page(url: str, text: str, heads: list, store) -> list[tuple[str, str]]:
     out = []
     for item in found if isinstance(found, list) else []:
         if isinstance(item, dict):
-            out.append((str(item.get("quote") or "").strip(), str(item.get("person") or "")))
+            out.append((str(item.get("quote") or "").strip(), str(item.get("person") or ""),
+                        _trimmed(item.get("before")), _trimmed(item.get("after"))))
     return out
+
+
+def _trimmed(context) -> str:
+    return str(context or "").strip().strip(".…").strip()
 
 
 def _person(said: str, heads: list, store):
@@ -526,6 +535,34 @@ def _person(said: str, heads: list, store):
 
 def _squash(text: str) -> str:
     return " ".join(text.split()).casefold()
+
+
+def _locate(text: str, before: str, quote: str, after: str) -> tuple[int, int] | None:
+    """Where on the page ``quote`` is, with ``before`` and ``after`` either
+    side of it - spaced, or glued on as OCR glues - compared with the
+    whitespace collapsed and case ignored: (start, end) in ``text``, or None
+    when the three are not found together."""
+    squashed, where = [], []                       # the page squashed, and each char's place
+    for index, char in enumerate(text):
+        if char.isspace():
+            if squashed and squashed[-1] != " ":
+                squashed.append(" ")
+                where.append(index)
+            continue
+        squashed.append(char.casefold())
+        where.append(index)
+    page = "".join(squashed)
+    head, body, tail = _squash(before), _squash(quote), _squash(after)
+    if not body:
+        return None
+    for left in ((" ", "") if head else ("",)):
+        for right in ((" ", "") if tail else ("",)):
+            found = page.find(head + left + body + right + tail)
+            if found >= 0:
+                start = found + len(head + left)
+                end = start + len(body)
+                return where[start], where[end - 1] + 1
+    return None
 
 
 def _invented_words(store) -> set[str]:
@@ -570,30 +607,32 @@ def _resembles(quote: str, parts: set[str]) -> bool:
 
 
 def _confirmed(found, text: str, heads: list, store) -> tuple[list, int]:
-    """The quotes that are really on the page and name a listed person:
-    (quote, head) pairs, and how many quotes were not on the page."""
-    page, invented = _squash(text), _invented_words(store)
+    """The quotes that are really on the page, where the model said, and
+    name a listed person: (quote, head, (start, end)), and how many quotes
+    were not on the page."""
+    invented = _invented_words(store)
     out, missing = [], 0
-    for quote, said in found:
+    for quote, said, before, after in found:
         head = _person(said, heads, store)
         if head is None or len(quote) < 2:
             continue
-        if _squash(quote) not in page:
-            missing += 1                        # not on the page: never applied
+        span = _locate(text, before, quote, after)
+        if span is None:
+            missing += 1                        # not on the page as quoted: never applied
             continue
         words = {w.casefold() for w in re.findall(r"[A-Za-z]+", quote)}
         if words and words <= invented:
             continue                            # an invented name, or a placeholder
         if not _resembles(quote, _name_parts(store, head)):
             continue
-        if (quote, head) not in out:
-            out.append((quote, head))
+        if (quote, head, span) not in out:
+            out.append((quote, head, span))
     return out, missing
 
 
-def _register(store, quote: str, head, text: str) -> bool:
-    """The quote, and any word it is glued into, made written forms of the
-    person in ``store``. True when anything new was added."""
+def _register(store, quote: str, head, text: str, span: tuple[int, int]) -> bool:
+    """The quote, and the word it is glued into at ``span``, made written
+    forms of the person in ``store``. True when anything new was added."""
     from . import llm_grouping
 
     added = False
@@ -602,17 +641,14 @@ def _register(store, quote: str, head, text: str) -> bool:
         added |= llm_grouping.add_form(store, head, quote, "found by the final check") \
             is not None
     # the word a glued quote sits in: matched whole, only the name swapped
-    folded, at = text.casefold(), -1
-    while (at := folded.find(quote.casefold(), at + 1)) >= 0:
-        added |= _register_glued(store, quote, head, text, at)
-    return added
+    return _register_glued(store, head, text, *span) or added
 
 
-def _register_glued(store, quote: str, head, text: str, at: int) -> bool:
+def _register_glued(store, head, text: str, at: int, stop: int) -> bool:
     from . import llm_grouping
 
     added = False
-    start, end = at, at + len(quote)
+    start, end = at, stop
     while start > 0 and not text[start - 1].isspace():
         start -= 1
     while end < len(text) and not text[end].isspace():
@@ -621,7 +657,7 @@ def _register_glued(store, quote: str, head, text: str, at: int) -> bool:
         word = token.group(0).strip(".,;:()[]\"'")
         lo = start + token.start() + token.group(0).find(word)
         hi = lo + len(word)
-        inner_lo, inner_hi = max(lo, at), min(hi, at + len(quote))
+        inner_lo, inner_hi = max(lo, at), min(hi, stop)
         if inner_lo >= inner_hi or (lo, hi) == (inner_lo, inner_hi):
             continue
         piece = text[inner_lo:inner_hi]
@@ -736,12 +772,12 @@ def read_flagged(check: Check, result, store, settings, out_dir: Path, kev_url: 
                     check.still.append(flag)
                     continue
                 if round_ == LLM_ROUNDS:                 # no more making again
-                    flag.quotes = [(q, h.canonical) for q, h in found]
+                    flag.quotes = [(q, h.canonical) for q, h, _at in found]
                     check.still.append(flag)
                     continue
-                if not any([_register(fixed_store, q, fixed_store.entities[h.key], flag.text)
-                            for q, h in found]):
-                    flag.quotes = [(q, h.canonical) for q, h in found]
+                if not any([_register(fixed_store, q, fixed_store.entities[h.key], flag.text,
+                                      at) for q, h, at in found]):
+                    flag.quotes = [(q, h.canonical) for q, h, _at in found]
                     flag.note = "its names are already forms the run replaces"
                     check.still.append(flag)
                     continue
@@ -754,12 +790,12 @@ def read_flagged(check: Check, result, store, settings, out_dir: Path, kev_url: 
             failed = _rerun(members, result, fixed_store, settings, archive)
             for page, (flag, found) in to_fix.items():
                 applied.setdefault(page, []).extend(
-                    (q, h.canonical) for q, h in found
+                    (q, h.canonical) for q, h, _at in found
                     if (q, h.canonical) not in applied.get(page, []))
             pending = []
             for page, (flag, found) in list(to_fix.items()):
                 if page[0] in failed:
-                    flag.quotes = [(q, h.canonical) for q, h in found]
+                    flag.quotes = [(q, h.canonical) for q, h, _at in found]
                     flag.note = failed[page[0]]
                     check.still.append(flag)
                     del to_fix[page]

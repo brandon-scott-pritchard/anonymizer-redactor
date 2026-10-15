@@ -37,16 +37,19 @@ PEOPLE = grouping.PEOPLE
 ORGS = grouping.ORGS
 CHILD_CATEGORIES = {"minor", "minor_initials"}
 # items asked about in one request; a family is never cut in two, and each
-# request repeats the families at the end of the one before it
+# request repeats the families at the end of the one before it. The snippets
+# count too: a request is also kept to about this many characters.
 CHUNK = 150
 OVERLAP = 25
+CHUNK_CHARS = 16000
 NOTE = "merged by the local model"
 
 SYSTEM = (
     "You are helping anonymize the documents of one family-law case. Each numbered line "
     "below is one written form of a name that a scan found in the documents: its text, "
-    "its type, how many times it was found, and sometimes its role in the case or the "
-    "item it is already listed under.\n\n"
+    "its type, how many times it was found, sometimes its role in the case or the "
+    "item it is already listed under, and a few words from where it was found with the "
+    "name in [brackets].\n\n"
     "Group the items that are the same real person, or the same business:\n"
     "- OCR misreadings of one name (HARRlNGTON, Harringten, Srnith for Smith, letters "
     "run together);\n"
@@ -246,15 +249,22 @@ def _families(items: list[Entity]) -> list[list[Entity]]:
     return out
 
 
-def chunks(items: list[Entity], size: int = CHUNK, overlap: int = OVERLAP) -> list[list[Entity]]:
-    """The list in requests of about ``size``, a family never cut in two, each
-    request opening with the last families of the one before."""
+def _cost(entities: list[Entity]) -> int:
+    return sum(40 + len(e.canonical) + sum(len(c) + 4 for c in e.contexts) for e in entities)
+
+
+def chunks(items: list[Entity], size: int = CHUNK, overlap: int = OVERLAP,
+           budget: int = CHUNK_CHARS) -> list[list[Entity]]:
+    """The list in requests of about ``size`` items and ``budget`` characters,
+    a family never cut in two, each request opening with the last families of
+    the one before."""
     out: list[list[Entity]] = []
     current: list[Entity] = []
     fresh = 0
     families = _families(items)
     for family in families:
-        if fresh and len(current) + len(family) > size:
+        if fresh and (len(current) + len(family) > size
+                      or _cost(current) + _cost(family) > budget):
             out.append(current)
             tail: list[Entity] = []
             for previous in reversed(_families(current)):
@@ -279,6 +289,8 @@ def _line(number: int, entity: Entity, numbers: dict[str, int], store: MappingSt
         head = grouping.head_of(store, entity)
         parts.append(f"listed under {numbers[head.key]}" if head.key in numbers
                      else f"listed under {head.canonical}")
+    if entity.contexts:
+        parts.append("seen: " + "; ".join(f'"{c}"' for c in entity.contexts))
     return " | ".join(parts)
 
 

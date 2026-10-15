@@ -52,6 +52,10 @@ class Entity:
     # registered apart on purpose - a child named after a parent - and never
     # folded into another person's group, however alike the names look
     distinct: bool = False
+    # a few words either side of where the review scan found it, the find in
+    # brackets - for the local model to tell a business from a person and a
+    # misreading from another family. Never written into the key or report.
+    contexts: list[str] = field(default_factory=list)
 
     @property
     def is_person(self) -> bool:
@@ -323,6 +327,28 @@ class MappingStore:
     def record_hit(self, entity: Entity, document: str, count: int = 1) -> None:
         entity.occurrences += count
         entity.documents.add(document)
+
+    CONTEXTS = 2                   # snippets kept per entity
+    CONTEXT_WORDS = 4              # words either side of the find
+
+    def record_context(self, entity: Entity, text: str, start: int, end: int) -> None:
+        """Keep a snippet of where ``entity`` was found: "...paid to [Harrington
+        Enterprises] on 03/02...", at most twelve words, whitespace collapsed."""
+        if len(entity.contexts) >= self.CONTEXTS:
+            return
+        found = " ".join(text[start:end].split())
+        before = text[:start].split()[-self.CONTEXT_WORDS:]
+        after = text[end:].split()[:self.CONTEXT_WORDS]
+        spare = max(0, 12 - len(found.split()))
+        before = before[len(before) - min(len(before), spare // 2 + spare % 2):]
+        after = after[:max(0, spare - len(before))]
+        glued_left = start > 0 and not text[start - 1].isspace()
+        glued_right = end < len(text) and not text[end].isspace()
+        snippet = (("..." + " ".join(before) + ("" if glued_left else " ")) if before else "") \
+            + f"[{found}]" + (((" " if not glued_right else "") + " ".join(after) + "...")
+                              if after else "")
+        if snippet not in entity.contexts:
+            entity.contexts.append(snippet)
 
     def register_filename(self, original: str, replacement: str) -> None:
         self.filenames[original] = replacement

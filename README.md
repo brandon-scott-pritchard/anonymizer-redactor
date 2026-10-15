@@ -115,7 +115,9 @@ the rules cannot settle alone:
 - **At review**, after the scan, which of the people and businesses found are
   the same real person or business—OCR misreadings ("HARRlNGTON",
   "Harringten"), nicknames, initials, hyphenated or maiden forms
-  (`redactor/llm_grouping.py`). Each form it merges takes the person's
+  (`redactor/llm_grouping.py`). It sees each name with up to two snippets of
+  where the scan found it ("...paid to [Harrington Enterprises] on
+  03/02..."); the snippets are never written into the mapping key or report. Each form it merges takes the person's
   invented name in its own shape, is marked "merged by the local model" in
   the review list, and comes out again with **Split out** like any other
   form. What it says is checked first: two parties who share a surname, a
@@ -124,7 +126,8 @@ the rules cannot settle alone:
   person's name keeps its business words and takes their invented surname
   ("Harrington Enterprises" becomes "<invented surname> Enterprises").
 - **After the final check**, what on each flagged page still names a ticked
-  person, quoted word for word. A quote that is really on the page becomes
+  person, quoted word for word with the few words either side of it. A quote
+  found on the page with those words around it becomes
   one more written form of that person, the file is made again from its
   original, and the page is read back by the matcher and the model—at most
   twice. `final-check.txt` then lists what was fixed and rechecked, and what

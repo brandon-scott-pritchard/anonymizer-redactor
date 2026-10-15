@@ -26,7 +26,7 @@ from redactor.mapping import MappingStore  # noqa: E402
 
 FAKE_SERVER = textwrap.dedent('''
     """Answers as mlx_lm.server does, from the answers file the test wrote."""
-    import json, os, sys, time
+    import json, os, re, sys, time
     from http.server import BaseHTTPRequestHandler, HTTPServer
     if os.environ.get("FAKE_LLM_EXIT"):
         sys.exit(3)
@@ -48,9 +48,17 @@ FAKE_SERVER = textwrap.dedent('''
         if "Group the items" in system:
             return plan.get("review", '{"groups": []}')
         page = user.split("The page:\\n", 1)[-1]
-        found = [{"quote": q, "person": p} for q, p in plan.get("quotes", [])
-                 if q.lower() in page.lower()]
+        found = []
+        for q, p in plan.get("quotes", []):          # quoted with the words around it
+            at = page.lower().find(q.lower())
+            if at >= 0:
+                before = re.search(r"(?:\\S+\\s+){0,2}\\S*$", page[:at]).group(0)
+                after = re.match(r"\\S*(?:\\s+\\S+){0,2}", page[at + len(q):]).group(0)
+                found.append({"before": before, "quote": page[at:at + len(q)],
+                              "after": after, "person": p})
         found += [{"quote": q, "person": p} for q, p in plan.get("always", [])]
+        found += [{"before": b, "quote": q, "after": a, "person": p}
+                  for b, q, a, p in plan.get("placed", [])]
         return "<think>reading</think>" + json.dumps({"found": found})
 
     class Handler(BaseHTTPRequestHandler):
@@ -465,6 +473,67 @@ def test_a_name_glued_into_a_bank_line_is_fixed_keeping_the_rest(fake_llm, answe
     assert "HARRINGTON" not in text.upper().replace(head.surrogate.last.upper(), "")
     assert "4417IntuPymd" in text and "2,485.81" in text
     assert len(check.fixed) == 1
+
+
+def test_a_quote_is_found_by_the_words_around_it_spaced_or_glued():
+    text = "Paid Harrlngton 20.00\nRef   ABCHarrlngton9 done"
+    second = text.index("ABC") + 3
+    assert audit._locate(text, "Ref ABC", "harrlngton", "9 done") == (second, second + 10)
+    assert audit._locate(text, "Paid", "Harrlngton", "20.00 Ref") == (5, 15)
+    assert audit._locate(text, "", "Harrlngton", "") == (5, 15)
+    # the right name in the wrong place is not on the page as quoted
+    assert audit._locate(text, "Letter to", "Harrlngton", "about") is None
+
+
+def test_of_a_name_written_twice_the_one_the_model_placed_is_fixed(fake_llm, answers,
+                                                                   tmp_path):
+    source, store, settings, out, result = _run(
+        tmp_path, ["Kyle Harrlngton signed below", "Memo paid ToHarrlngton for gifts"])
+    check = _flagged(result, out, store)
+    # the second, glued in: the quote is a form everywhere, the word it is
+    # glued into only where the model placed it
+    answers(placed=[["Memo paid To", "Harrlngton", "for gifts", "1"]])
+    audit.read_flagged(check, result, store, settings, out, None, _up(fake_llm))
+    text = _delivered(result)
+    assert "harrlngton" not in text.casefold() and len(check.fixed) == 1
+    head = store.entities["person:kyle d harrington"]
+    assert f"To{head.surrogate.last}" in text
+    asked = answers.log()[0]["messages"]
+    assert '"before"' in asked[0]["content"] and '"after"' in asked[0]["content"]
+
+
+def test_a_quote_whose_words_around_it_are_not_on_the_page_is_never_applied(
+        fake_llm, answers, tmp_path):
+    source, store, settings, out, result = _run(tmp_path, ["Letter to Kyle Harrlngton"])
+    before = Path(result.archive).read_bytes()
+    check = _flagged(result, out, store)
+    answers(placed=[["Paid to", "Harrlngton", "on 03/02", "1"]])
+    assert audit.read_flagged(check, result, store, settings, out, None,
+                              _up(fake_llm)) is None
+    assert Path(result.archive).read_bytes() == before and len(check.still) == 1
+
+
+def test_the_review_scan_keeps_a_few_words_of_where_each_name_was_found(fake_llm, answers,
+                                                                       tmp_path):
+    source, store, settings, out, result = _run(
+        tmp_path, ["Letter to Kyle Harrington about the house and the car"])
+    head = store.entities["person:kyle d harrington"]
+    assert "...Letter to [Kyle Harrington] about the house and..." in head.contexts
+    assert all(len(c.split()) <= 12 for c in head.contexts) and len(head.contexts) <= 2
+    assert "about the house" not in store.to_json() + store.to_csv()
+    store.add_person("Harringten").occurrences = 1
+    llm_grouping.propose_merges(store, _up(fake_llm))
+    assert "[Kyle Harrington] about the house" in answers.log()[0]["messages"][-1]["content"]
+
+
+def test_snippets_count_toward_the_size_of_a_request():
+    store = _store(*[(f"Alma {chr(66 + i // 6)}{'aeiou'[i % 5]}{chr(98 + i % 6)}stone",)
+                     for i in range(30)])
+    items = llm_grouping.candidates(store)
+    assert len(llm_grouping.chunks(items)) == 1
+    for entity in items:
+        entity.contexts = ["...a few words either side of [the name] as found..."] * 2
+    assert len(llm_grouping.chunks(items, budget=2000)) > 1
 
 
 def test_a_quote_that_is_not_on_the_page_is_never_applied(fake_llm, answers, tmp_path):
