@@ -403,8 +403,6 @@ def test_quitting_mid_run_stops_it_and_says_so_in_its_folder(tmp_path):
 
 
 def test_a_set_queued_while_still_reading_waits_for_it(tmp_path, monkeypatch):
-    from redactor import audit
-
     queue = sets.RunQueue(tmp_path)
     queue.READ_STALL = 1.5
     doc_set = sets.DocSet(id="a", name="A", rank=1, folder=tmp_path / "a")
@@ -414,11 +412,11 @@ def test_a_set_queued_while_still_reading_waits_for_it(tmp_path, monkeypatch):
     class Started(Exception):
         pass
 
-    def kev(seconds):
+    def start(*args):
         messages.append(doc_set.run_message)
         raise Started
 
-    monkeypatch.setattr(audit, "wait_for_kev", kev)
+    monkeypatch.setattr(queue, "_start_child", start)
     began = time.time()
     with pytest.raises(Started):
         queue._run(doc_set, None, "pw", tmp_path)

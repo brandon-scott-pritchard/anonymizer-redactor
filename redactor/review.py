@@ -140,6 +140,7 @@ def retype_entity(store: MappingStore, entity: Entity, new_category: str) -> Ent
     fresh.enabled = entity.enabled
     fresh.occurrences = entity.occurrences
     fresh.documents = entity.documents
+    fresh.contexts = list(entity.contexts)
     if store.grouped:
         grouping.group(store)
     return fresh

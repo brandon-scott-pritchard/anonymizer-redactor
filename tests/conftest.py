@@ -7,6 +7,12 @@ import pytest
 # Each test reads its pages in-line, so it stands alone; the read-ahead pool of
 # worker processes has tests of its own that switch it on.
 os.environ.setdefault("REDACTOR_OCR_WORKERS", "0")
+# The local model is twenty gigabytes: a test never starts the real one. Its
+# own tests switch it on against a stand-in.
+os.environ.setdefault("REDACTOR_LLM", "0")
+# Kev, started on demand now, is ten: a test that needs it points this at a
+# stand-in; every other finds none installed.
+os.environ["REDACTOR_KEV_DIR"] = str(Path(__file__).resolve().parent / "no-kev-here")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 

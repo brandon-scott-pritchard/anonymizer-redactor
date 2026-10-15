@@ -266,6 +266,13 @@ def _forget(scheduler: _Scheduler) -> None:
             _surveys.clear()
 
 
+def busy() -> bool:
+    """Whether the readers have pages waiting or being read."""
+    with _lock:
+        scheduler = _scheduler
+        return scheduler is not None and (bool(scheduler.pages) or scheduler.running > 0)
+
+
 def shutdown(wait: bool = False) -> None:
     """Stop the workers and forget everything. ``wait`` until they have exited -
     which a process started by multiprocessing must, before it can exit itself."""

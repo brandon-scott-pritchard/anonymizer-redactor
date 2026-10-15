@@ -141,11 +141,9 @@ def _ask_before_closing_while_working(window) -> None:
 
 
 def main() -> int:
-    from . import audit
-
-    # the final check's model: started now, so it is up long before the first
-    # set finishes its run, and stopped when the app is (see audit.KevService)
-    audit.KEV.start()
+    # Kev, the final check's model, is not started now: it and the local model
+    # are never loaded together, so each is started when a step needs it
+    # (see models.py), and stopped when the app is (see audit.KevService)
     port = _free_port()
     _serve(port)
     if not _wait_until_up(port):

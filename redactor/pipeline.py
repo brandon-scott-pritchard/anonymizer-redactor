@@ -581,6 +581,7 @@ def prescan(
                     entity = store.entities.get(hit.entity_key)
                     if entity is not None:
                         store.record_hit(entity, path.name)
+                        store.record_context(entity, text, hit.start, hit.end)
         except Exception:
             continue
     # one row per person, address or account however many ways it was written

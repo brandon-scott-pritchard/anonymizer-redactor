@@ -52,6 +52,10 @@ class Entity:
     # registered apart on purpose - a child named after a parent - and never
     # folded into another person's group, however alike the names look
     distinct: bool = False
+    # a few words either side of where the review scan found it, the find in
+    # brackets - for the local model to tell a business from a person and a
+    # misreading from another family. Never written into the key or report.
+    contexts: list[str] = field(default_factory=list)
 
     @property
     def is_person(self) -> bool:
@@ -81,6 +85,13 @@ class MappingStore:
         # once the review scan has grouped the store, a value first met during
         # the run joins its group instead of minting a new placeholder
         self.grouped = False
+        # what the local model merged at review (see llm_grouping.py), kept so
+        # a regrouping that starts from scratch can fold it back in:
+        # form key -> (head key, why, the row it came in with), and business
+        # key -> (person key, why, the replacement it was given)
+        self.merged: dict[str, tuple[str, str, str]] = {}
+        self.named_after: dict[str, tuple[str, str, str]] = {}
+        self.merge_note = ""
 
     # ------------------------------------------------------------- people --
     def add_person(
@@ -222,7 +233,7 @@ class MappingStore:
                     out.add(entity.person.last.casefold())
         return out
 
-    def _shared_surrogate_surname(self, last: str) -> str | None:
+    def _shared_surrogate_surname(self, last: str, misread: bool = True) -> str | None:
         """People who share a surname must share a fake surname.
 
         Two parties named Smith are the common case in family law, and if they
@@ -236,14 +247,18 @@ class MappingStore:
         for entity in self.entities.values():
             if not entity.is_person or not entity.person or not entity.surrogate:
                 continue
-            # the same surname misread on a scan is still this family's
-            if entity.person.last and _names.alike(entity.person.last, last):
+            # the same surname misread on a scan is still this family's -
+            # unless the operator split it out as someone else (``misread``)
+            if entity.person.last and (
+                    _names.alike(entity.person.last, last) if misread
+                    else entity.person.last.casefold() == last.casefold()):
                 return entity.surrogate.last
         return None
 
-    def _unique_person_surrogate(self, parsed: _names.PersonName) -> _names.PersonName:
+    def _unique_person_surrogate(self, parsed: _names.PersonName,
+                                 misread: bool = True) -> _names.PersonName:
         want_middle = bool(parsed.middles)
-        shared_last = self._shared_surrogate_surname(parsed.last)
+        shared_last = self._shared_surrogate_surname(parsed.last, misread)
         real = self._real_person_names()
         real_first = self._real_first_names()
         for attempt in range(64):
@@ -317,6 +332,28 @@ class MappingStore:
     def record_hit(self, entity: Entity, document: str, count: int = 1) -> None:
         entity.occurrences += count
         entity.documents.add(document)
+
+    CONTEXTS = 2                   # snippets kept per entity
+    CONTEXT_WORDS = 4              # words either side of the find
+
+    def record_context(self, entity: Entity, text: str, start: int, end: int) -> None:
+        """Keep a snippet of where ``entity`` was found: "...paid to [Harrington
+        Enterprises] on 03/02...", at most twelve words, whitespace collapsed."""
+        if len(entity.contexts) >= self.CONTEXTS:
+            return
+        found = " ".join(text[start:end].split())
+        before = text[:start].split()[-self.CONTEXT_WORDS:]
+        after = text[end:].split()[:self.CONTEXT_WORDS]
+        spare = max(0, 12 - len(found.split()))
+        before = before[len(before) - min(len(before), spare // 2 + spare % 2):]
+        after = after[:max(0, spare - len(before))]
+        glued_left = start > 0 and not text[start - 1].isspace()
+        glued_right = end < len(text) and not text[end].isspace()
+        snippet = (("..." + " ".join(before) + ("" if glued_left else " ")) if before else "") \
+            + f"[{found}]" + (((" " if not glued_right else "") + " ".join(after) + "...")
+                              if after else "")
+        if snippet not in entity.contexts:
+            entity.contexts.append(snippet)
 
     def register_filename(self, original: str, replacement: str) -> None:
         self.filenames[original] = replacement

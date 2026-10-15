@@ -159,11 +159,51 @@ def score(store, secrets: truth.Secrets) -> dict:
                 forms.append(f"{entity.canonical} -> {stand_in} ({entity.category})")
         if forms:
             businesses[org] = {"stand_ins": len(stand_ins), "forms": forms[:20]}
+    addresses = {}
+    for address in secrets.addresses:
+        number = re.match(r"\s*(\d+)", address)
+        words = [t for t in _tokens(address)[1:] if len(t) > 2 and not t.isdigit()]
+        if not number or not words:
+            continue
+        stand_ins = Counter()
+        forms = []
+        for entity in store.entities.values():
+            if not entity.enabled or entity.category != "street_address":
+                continue
+            mine = re.match(r"\s*(\d+)", entity.canonical)
+            if not mine or mine.group(1) != number.group(1):
+                continue
+            theirs = [t for t in _tokens(entity.canonical)[1:] if len(t) > 2]
+            if not any(_close(a, b) for a in words for b in theirs):
+                continue
+            kind, stand_in = _stand_in(entity, store)
+            stand_ins[re.sub(r"\d+", "#", stand_in) if kind == "bracket" else stand_in] += 1
+            forms.append(f"{entity.canonical} -> {stand_in}")
+        if forms:
+            addresses[address] = {"stand_ins": len(_head_replacements(store, address, number.group(1), words)),
+                                  "forms": forms[:20]}
     return {
+        "addresses": addresses,
         "people": out_people,
         "surnames": {s: dict(c) for s, c in per_surname.items()},
         "businesses": businesses,
     }
+
+
+def _head_replacements(store, address: str, number: str, words: list[str]) -> set[str]:
+    """The distinct placeholders one labelled address was given."""
+    out = set()
+    for entity in store.entities.values():
+        if not entity.enabled or entity.category != "street_address":
+            continue
+        mine = re.match(r"\s*(\d+)", entity.canonical)
+        if not mine or mine.group(1) != number:
+            continue
+        theirs = [t for t in _tokens(entity.canonical)[1:] if len(t) > 2]
+        if any(_close(a, b) for a in words for b in theirs):
+            head = store.entities.get(entity.parent) if entity.parent else entity
+            out.add((head or entity).replacement)
+    return out
 
 
 def _same_business(written: str, org: str) -> bool:

@@ -27,6 +27,7 @@ def summary(record: dict) -> dict:
     mixed = {n: p for n, p in people.items() if p["mixed"]}
     drift = {s: v for s, v in c.get("surnames", {}).items() if len([k for k in v if k]) > 1}
     biz = {b: v for b, v in c.get("businesses", {}).items() if v["stand_ins"] > 1}
+    addr = {a: v for a, v in c.get("addresses", {}).items() if v["stand_ins"] > 1}
     files = record.get("files", [])
     words = sum(f.get("words", 0) for f in files)
     lost = Counter()
@@ -36,6 +37,7 @@ def summary(record: dict) -> dict:
         dates += sum(f.get("lost_dates", {}).values())
     return {
         "people": len(people), "split": split, "mixed": mixed, "drift": drift, "biz": biz,
+        "addr": addr, "addresses": len(c.get("addresses", {})),
         "leaks": sum(len(f["leaks"]) for f in files if f.get("leaks")),
         "hard_leaks": sum(1 for f in files for l in f.get("leaks", [])
                           if l["category"] != "household_first_name"),
@@ -70,6 +72,7 @@ def main(argv=None) -> int:
         print(f"   one person, invented name and bracket: {len(s['mixed'])}{was('mixed')}")
         print(f"   one surname, several invented surnames: {len(s['drift'])}{was('drift')}")
         print(f"   one business, several stand-ins: {len(s['biz'])}{was('biz')}")
+        print(f"   one address, several placeholders: {len(s['addr'])} of {s['addresses']}{was('addr')}")
         print(f"   leaks (hard): {s['hard_leaks']}{was('hard_leaks')}   all: {s['leaks']}{was('leaks')}")
         print(f"   figures lost, typed: {s['money']}{was('money')}   scans painted: "
               f"{s['scan_money']}{was('scan_money')}")
@@ -84,6 +87,10 @@ def main(argv=None) -> int:
                     print(f"        {form}")
         for surname, fakes in list(s["drift"].items())[:args.show]:
             print(f"   [surname drift] {surname}: {fakes}")
+        for name, p in list(s["addr"].items())[:args.show]:
+            print(f"   [address] {name}:")
+            for form in p["forms"][:8]:
+                print(f"        {form}")
         for name, p in list(s["biz"].items())[:args.show]:
             print(f"   [business] {name}:")
             for form in p["forms"][:8]:

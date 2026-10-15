@@ -110,7 +110,8 @@ def _one_replacement_per_head(store: MappingStore) -> None:
                          key=lambda e: (e.key in store.split_out, e.key)):
         if entity.replacement and entity.replacement in seen:
             if entity.is_person and entity.person is not None:
-                entity.surrogate = store._unique_person_surrogate(entity.person)
+                entity.surrogate = store._unique_person_surrogate(
+                    entity.person, misread=entity.key not in store.split_out)
                 entity.replacement = entity.surrogate.canonical
             else:
                 entity.replacement = store.fresh_placeholder(entity.category)
@@ -216,7 +217,8 @@ def split(store: MappingStore, entity: Entity) -> None:
     store.split_out.add(entity.key)
     entity.parent = None
     if entity.is_person:
-        entity.surrogate = store._unique_person_surrogate(entity.person)
+        # someone else: no longer a misreading of this family's surname
+        entity.surrogate = store._unique_person_surrogate(entity.person, misread=False)
         entity.replacement = entity.surrogate.canonical
     else:
         entity.replacement = store.fresh_placeholder(entity.category)
