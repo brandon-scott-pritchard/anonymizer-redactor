@@ -175,10 +175,12 @@ def run_flow(files: list[Path], out_dir: Path, mode: str, operator_names: list[s
         except Exception:
             labels = {}
     for s in suggestions:
+        from redactor import llm_names
+        kept = llm_names.keeps(s.text, s.category, labels.get(s.text))
         if s.nickname_for or any(ner._plain(t) in known for t in s.text.split()):
             pass
-        elif s.text in labels:
-            if labels[s.text] == "other":
+        elif kept is not None:
+            if not kept:
                 continue
         elif not ner.likely_name(s.text, s.category, known):
             continue

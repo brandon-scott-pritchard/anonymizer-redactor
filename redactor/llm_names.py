@@ -22,13 +22,17 @@ SYSTEM = (
     "You sort a list of strings that a scanner proposed as names in a family-law case's "
     "financial documents: bank and card statements, pay stubs, receipts, court filings. "
     "Label each one:\n"
-    '- "person": a real individual, written in any form (full name, surname, first name, '
-    "initials, misspelled or in capitals);\n"
-    '- "family_business": a business, trust or account named after one of the listed parties;\n'
-    '- "other": anything else - a store, merchant, restaurant, bank, employer that is not named '
-    "after a party, government agency, school, city, town, place, product, payment service, "
-    "column heading, form label or ordinary words.\n"
-    "When a string could be a person's name, say person: a missed name is worse than an extra one.")
+    '- "person": ANY real individual human being, whoever they are - not only the case\'s '
+    "parties: people paid or paying, senders and recipients of transfers, employees, "
+    "landlords, tenants, children, relatives, lawyers, doctors, anyone - written in any form "
+    "(full name, surname, first name, initials, misspelled or in capitals);\n"
+    '- "family_business": a business, trust or account named after one of the case\'s parties;\n'
+    '- "other": not a person at all - a store, merchant, restaurant, bank, company, government '
+    "agency, school, city, town, place, product, payment service, column heading, form label "
+    "or ordinary words.\n"
+    "The parties are listed only so you can recognise a business named after them; never mark "
+    "someone \"other\" because they are not a party. When a string could be a person's name, "
+    "say person: a missed name is worse than an extra one.")
 
 SCHEMA = '{"labels": {"<number>": "person" | "family_business" | "other"}}'
 
@@ -41,7 +45,8 @@ def classify(texts: list[str], parties: list[str], url: str, progress=None) -> d
         if progress is not None:
             progress("Asking the local model which suggestions are names",
                      start / max(len(texts), 1))
-        user = ("The case's parties: " + ("; ".join(parties) if parties else "(none listed yet)")
+        user = ("The case's parties (for spotting a business named after them): "
+                + ("; ".join(parties) if parties else "(none listed yet)")
                 + "\n\nStrings:\n" + "\n".join(f"{i}. {t}" for i, t in enumerate(part, 1)))
         answer = llm.chat(url, SYSTEM, user, SCHEMA, max_tokens=12 * len(part) + 64)
         labels = answer.get("labels", {}) if isinstance(answer, dict) else {}
@@ -59,4 +64,21 @@ def describe(labels: dict[str, str]) -> str:
     others = sum(1 for v in labels.values() if v == "other")
     return (f"The local model sorted the suggestions: {others} that are not names "
             "(stores, places, headings) are listed apart." if labels else "")
+
+
+def keeps(text: str, category: str, label: str | None) -> bool | None:
+    """The model's sort, with the two things it may not overrule: an employer
+    the scan found is the household's own, and a common first name before a
+    surname is a person. None when the model did not label the suggestion."""
+    from . import ner
+
+    if category == "employer":
+        return True
+    if label is None:
+        return None
+    if label != "other":
+        return True
+    words = [ner._plain(w) for w in text.split()]
+    _common, given = ner._lists()
+    return len(words) >= 2 and words[0] in given and words[-1] not in ner._RAILS_AND_BRANDS
 

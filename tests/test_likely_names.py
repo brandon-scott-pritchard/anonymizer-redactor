@@ -51,3 +51,16 @@ def test_the_local_model_sorts_the_suggestions_and_only_sorts(monkeypatch):
     assert labels == {"Dollar Tree Layton": "other", "Megan Layton": "person",
                       "Okonkwo Landscaping": "family_business"}
     assert "Brittany Okonkwo" in asked[0]
+
+
+def test_the_model_may_not_drop_an_employer_or_a_first_and_last_name():
+    """Given the parties, the model once called every other real person
+    "other" - 412 of 421 suggestions - and 217 names shipped."""
+    from redactor import llm_names
+
+    assert llm_names.keeps("Brightline Tutoring LLC", "employer", "other")
+    assert llm_names.keeps("WILLIAM SMITH", "person", "other")
+    assert not llm_names.keeps("Dollar Tree Layton", "person", "other")
+    assert llm_names.keeps("Megan Layton", "person", "person")
+    assert llm_names.keeps("Mark Store", "person", None) is None
+    assert "not only" in llm_names.SYSTEM and "never mark" in llm_names.SYSTEM

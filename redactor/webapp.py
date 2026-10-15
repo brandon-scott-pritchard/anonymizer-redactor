@@ -32,7 +32,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import (__version__, caption, categories, feedback, grouping, llm_grouping,
+from . import (__version__, caption, categories, feedback, grouping, llm_grouping, llm_names,
                names as _names, ner, ocr_pool, officials, pdf_processor, pipeline, review, sets)
 from .engine import Settings
 from .mapping import MappingStore
@@ -701,9 +701,9 @@ async def suggestions(request: Request):
         def likely(s) -> bool:
             if s.nickname_for or any(ner._plain(t) in known for t in s.text.split()):
                 return True
-            label = labels.get(s.text)
-            if label is not None:
-                return label != "other"
+            kept = llm_names.keeps(s.text, s.category, labels.get(s.text))
+            if kept is not None:
+                return kept
             return ner.likely_name(s.text, s.category, known)
         return {"suggestions": [
             {"text": s.text, "category": s.category, "count": s.count,
