@@ -81,7 +81,8 @@ class Bridge:
     ``window.pywebview.api.choose_folder()`` and gets the file list back.
     """
 
-    def choose_folder(self):
+    def choose_folder(self, set_id=None):
+        """Every set's card has this button; ``set_id`` is the card's set."""
         import webview
 
         if not webview.windows:
@@ -90,7 +91,7 @@ class Bridge:
             webview.FileDialog.FOLDER, allow_multiple=True)
         if not chosen:
             return None
-        return _plainly(add_paths, list(chosen))
+        return _plainly(add_paths, list(chosen), set_id)
 
     def choose_results_folder(self):
         """The one folder every queued set's results go to, a folder each."""

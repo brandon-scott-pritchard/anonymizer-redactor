@@ -3,9 +3,10 @@
 Eleven large sets, one after another through the four steps, kept the operator
 at the keyboard for days: every set's scans had to be read before its names
 could be reviewed, and every run had to be started by hand when the last one
-finished. Here each set is read in the background in the order it was made,
-reviewed when its reading is done, and queued; the queue runs the sets one
-after another, unattended, into a folder of results.
+finished. Here each set is read in the background in the order it was made
+and its name screen worked out ahead; the window then takes every set
+through names and review together, and queues them all at once; the queue
+runs the sets one after another, unattended, into a folder of results.
 
 Each set is a separate case - its own documents, names, review decisions,
 invented names and mapping-key password - exactly as if it had been run alone.

@@ -1,7 +1,18 @@
-/* The four-step wizard, mirroring the desktop app's flow. */
+/* The window's four stages, every set taken through each stage together.
+
+   Five to eleven cases a night were each walked through all four steps on
+   their own: click into the set, choose the options again, wait for its
+   names, review it, queue it, then the next set. Here the stages are the
+   window's, not the set's. Every set's documents go in on one screen and are
+   read in the background, in the order the sets were made; once every set is
+   read, the names are worked through set after set; every review list is
+   built in one go and looked over set after set; and one button queues them
+   all, to run one at a time. The options are chosen once, for every set.
+   Each set keeps its own documents, names, review decisions and mapping-key
+   password, exactly as if it had been run alone. */
 /* global React, ReactDOM, htm, api */
 
-const { useState, useEffect, useMemo } = React;
+const { useState, useEffect, useMemo, useRef } = React;
 const html = htm.bind(React.createElement);
 
 const ANONYMIZE_NOTE =
@@ -76,15 +87,42 @@ function nameLine(name, category) {
   return category === "person" ? name : `${name} | ${category}`;
 }
 
+// The clipboard: the modern call where the web view allows it, the old
+// select-and-copy where it does not - an embedded web view can refuse the
+// first outright, and a copy button that silently copies nothing loses a
+// mapping-key password.
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (error) {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    let copied = false;
+    try { copied = document.execCommand("copy"); } catch (e) { copied = false; }
+    area.remove();
+    return copied;
+  }
+}
+
+const n = (value) => (value || 0).toLocaleString();
+const plural = (count, word) => `${n(count)} ${word}${count === 1 ? "" : "s"}`;
+
 /* ------------------------------------------------------------ components -- */
 
-function Stepper({ step, unlocked, go }) {
-  const labels = ["Documents & options", "Names", "Review", "Run"];
+const STAGES = ["Documents & options", "Names", "Review", "Run"];
+
+function Stepper({ stage, reachable, go }) {
   return html`<nav class="stepper">
-    ${labels.map((label, index) => html`
+    ${STAGES.map((label, index) => html`
       <div key=${index}
-           class=${"step" + (index === step ? " active" : "") + (index > unlocked ? " locked" : "")}
-           onClick=${() => index <= unlocked && go(index)}>
+           class=${"step" + (index === stage ? " active" : "") + (reachable[index] ? "" : " locked")}
+           onClick=${() => reachable[index] && go(index)}>
         <span class="n">${index + 1}</span> ${label}
       </div>`)}
   </nav>`;
@@ -175,6 +213,7 @@ function SetName({ name, onSave, disabled }) {
     else setDraft(name);
   };
   return html`<input type="text" value=${draft} disabled=${disabled}
+    aria-label="Name of this set"
     placeholder="e.g. a client or case - it names the set's results folder"
     onFocus=${() => setEditing(true)}
     onInput=${(e) => setDraft(e.target.value)}
@@ -182,120 +221,169 @@ function SetName({ name, onSave, disabled }) {
     onKeyDown=${(e) => { if (e.key === "Enter") e.target.blur(); }} />`;
 }
 
-function FilesStep({ state, set, actions }) {
+function setStatus(info) {
+  const read = info.reading || {};
+  const run = info.run || {};
+  switch (info.state) {
+    case "empty": return "No documents yet - a set left empty is left out";
+    case "reading": return read.total ? `Reading ${n(read.done)} of ${n(read.total)} scanned pages`
+      : "Looking for scanned pages";
+    case "preparing": return "Read - working out the name lists";
+    case "ready": return "Ready";
+    case "queued": return "Queued to run";
+    case "running": return run.total ? `Running - page ${n(run.done)} of ${n(run.total)}` : "Running";
+    case "done": return run.failed ? `Done - ${run.failed} file(s) refused` : "Done";
+    case "failed": return "Run failed";
+    default: return "";
+  }
+}
+
+/* ------------------------------------------------------- 1. documents -- */
+
+// One set of documents on the Documents screen: its name, its own drop
+// area and file list, and how far its reading has got.
+function SetCard({ info, number, work, actions, canRemove }) {
   const [over, setOver] = useState(false);
   // a running set's documents are being read, and a finished set's are gone
-  const locked = ["running", "done"].includes(state.info && state.info.state);
-  const pick = () => document.getElementById(`filepick-${state.setId}`).click();
+  const locked = ["running", "done"].includes(info.state);
+  const pick = () => document.getElementById(`filepick-${info.id}`).click();
   const onPicked = (list) => list.length && actions.upload(list);
   const asItems = (files) => [...files].map((file) => ({ file, path: file.webkitRelativePath || file.name }));
-  const folders = folderCount(state.files);
-  return html`
-    <div class="card setname">
-      <label>Name of this set
-        <${SetName} name=${state.setName} onSave=${actions.renameSet}
-                    disabled=${state.info && ["queued", "running", "done"].includes(state.info.state)} />
-      </label>
+  const files = work.files;
+  const folders = folderCount(files);
+  const read = info.reading || {};
+  return html`<div class=${"card setcard " + info.state}>
+    <div class="sethead">
+      <span class="setnum">${number}</span>
+      <${SetName} name=${info.name} onSave=${actions.rename}
+                  disabled=${["queued", "running", "done"].includes(info.state)} />
+      ${canRemove ? html`<button title="Remove this set and its documents from the window"
+                                 onClick=${actions.remove}>Remove set</button>` : null}
     </div>
-    ${locked ? html`<div class="card"><p class="hint">${state.info.state === "running"
+    <p class=${"setstate " + info.state}>${setStatus(info)}</p>
+    ${info.state === "reading" && read.total ? html`<span class="setbar"><span
+       style=${{ width: `${Math.round(100 * read.done / read.total)}%` }}></span></span>` : null}
+    ${work.adding ? html`<p class="hint">${work.adding}…</p>` : null}
+    ${locked ? html`<p class="hint">${info.state === "running"
       ? "This set is running - its documents cannot be changed until it finishes."
-      : "This set has been run. To run these documents again, make a new set."}</p></div>` : null}
-    <div class="columns">
-      <div class="card">
-        <h2>Documents (Word, PDF, photos)</h2>
-        ${locked ? null : html`<div class=${"dropzone" + (over ? " over" : "")}
+      : "This set has been run. To run these documents again, make a new set."}</p>`
+      : html`<div class=${"dropzone" + (over ? " over" : "")}
              onClick=${pick}
              onDragOver=${(e) => { e.preventDefault(); setOver(true); }}
              onDragLeave=${() => setOver(false)}
              onDrop=${(e) => { e.preventDefault(); setOver(false);
                                actions.dropped(takeDrop(e.dataTransfer)); }}>
-          Drop documents, photos of documents or whole folders here, or click to
-          choose files. A photo comes back as a PDF, straightened and cropped to the
-          page. Folders keep their layout. Everything stays on this computer.
-          <input id=${`filepick-${state.setId}`} type="file" multiple hidden
+          Drop this set's documents, photos of documents or whole folders here,
+          or click to choose files. Folders keep their layout.
+          <input id=${`filepick-${info.id}`} type="file" multiple hidden
                  accept=${[".docx", ".pdf", ...PHOTO_TYPES.map((t) => "." + t)].join(",")}
                  onChange=${(e) => { onPicked(asItems(e.target.files)); e.target.value = ""; }} />
-          <input id=${`folderpick-${state.setId}`} type="file" multiple hidden webkitdirectory=${true}
+          <input id=${`folderpick-${info.id}`} type="file" multiple hidden webkitdirectory=${true}
                  onChange=${(e) => { onPicked(asItems(e.target.files)); e.target.value = ""; }} />
         </div>
         <div class="bar">
           <button onClick=${actions.chooseFolder}>Choose folder…</button>
-          ${state.files.length ? html`<button onClick=${actions.removeAll}>Remove all</button>` : null}
+          ${files.length ? html`<button onClick=${actions.removeAll}>Remove all</button>` : null}
         </div>`}
-        ${state.files.length ? html`<p class="hint">${state.files.length} document${
-          state.files.length === 1 ? "" : "s"}${folders > 1 || state.files.some((f) => f.name.includes("/"))
-          ? ` in ${folders} folder${folders === 1 ? "" : "s"}` : ""}.</p>` : null}
-        ${state.skipped.length ? html`<details class="skipped">
-          <summary class="warn">${`${state.skipped.length} other file${state.skipped.length === 1 ? "" : "s"} will be left out - not documents or photos. They are listed in the run report and nothing from them is delivered.`}</summary>
-          <ul>${state.skipped.map((name, i) => html`<li key=${i}>${name}</li>`)}</ul>
-        </details>` : null}
-        <ul class="files">
-          ${state.files.map((f, i) => html`<li key=${i}>
-            <span class="kind">${(f.kind || "?").toUpperCase()}</span>
-            <span class="name">${f.name}</span>
-            ${locked ? null : html`<button onClick=${() => actions.removeFile(i)}>Remove</button>`}
-          </li>`)}
-        </ul>
-      </div>
-      <div>
-        <div class="card">
-          <h2>What to do with DOCX files</h2>
-          <label class="check"><input type="radio" name=${`mode-${state.setId}`}
-            checked=${state.options.docx_mode === "anonymize"}
-            onChange=${() => set.option("docx_mode", "anonymize")} /> Anonymize (realistic fake names)</label>
-          <label class="check"><input type="radio" name=${`mode-${state.setId}`}
-            checked=${state.options.docx_mode === "redact"}
-            onChange=${() => set.option("docx_mode", "redact")} /> Redact (black bars, nothing invented)</label>
-          <p class=${state.options.docx_mode === "anonymize" ? "warn" : "hint"}>
-            ${state.options.docx_mode === "anonymize" ? ANONYMIZE_NOTE : REDACT_NOTE}</p>
-        </div>
-        <div class="card">
-          <h2>What to do with PDF files</h2>
-          <label class="check"><input type="radio" name=${`pdfmode-${state.setId}`}
-            checked=${state.options.pdf_mode === "redact"}
-            onChange=${() => set.option("pdf_mode", "redact")} /> Redact (black boxes, nothing invented)</label>
-          <label class="check"><input type="radio" name=${`pdfmode-${state.setId}`}
-            checked=${state.options.pdf_mode === "anonymize"}
-            onChange=${() => set.option("pdf_mode", "anonymize")} /> Anonymize (replacement text in place)</label>
-          <p class=${state.options.pdf_mode === "anonymize" ? "warn" : "hint"}>
-            ${state.options.pdf_mode === "anonymize" ? PDF_ANONYMIZE_NOTE : PDF_REDACT_NOTE}</p>
-        </div>
-        <div class="card">
-          <h2>Also scrub</h2>
-          ${OPTION_LABELS.map(([key, label]) => html`
-            <label class="check" key=${key}>
-              <input type="checkbox" checked=${state.options[key]}
-                     onChange=${(e) => set.option(key, e.target.checked)} /> ${label}
-            </label>`)}
-        </div>
-        <div class="card">
-          <h2>Mapping key password</h2>
-          <div style=${{ display: "flex", gap: "8px" }}>
-            <input type=${state.showPassword ? "text" : "password"} value=${state.password}
-                   onInput=${(e) => set.password(e.target.value)} />
-            <button onClick=${() => set.password(generatePassword())}>New</button>
-          </div>
-          <label class="check"><input type="checkbox" checked=${state.showPassword}
-                 onChange=${(e) => set.showPassword(e.target.checked)} /> Show</label>
-          <p class="hint">The original-to-replacement table is encrypted with this
-            password and offered as its own download, never inside the archive.
-            Copy it somewhere safe - without it the mapping cannot be recovered.</p>
-        </div>
-        <div class="card">
-          <h2>Never change these terms (one per line)</h2>
-          <textarea rows="3" value=${state.options.allowlist}
-                    onInput=${(e) => set.option("allowlist", e.target.value)}></textarea>
-          <p class="hint">Courts, judges, commissioners, statutes, rules and
-            reported citations are already protected automatically.</p>
-        </div>
-      </div>
+    ${files.length ? html`<p class="hint">${plural(files.length, "document")}${
+      folders > 1 || files.some((f) => f.name.includes("/"))
+        ? ` in ${plural(folders, "folder")}` : ""}.</p>` : null}
+    ${work.skipped.length ? html`<details class="skipped">
+      <summary class="warn">${`${work.skipped.length} other file${work.skipped.length === 1 ? "" : "s"} will be left out - not documents or photos. They are listed in the run report and nothing from them is delivered.`}</summary>
+      <ul>${work.skipped.map((name, i) => html`<li key=${i}>${name}</li>`)}</ul>
+    </details>` : null}
+    ${files.length ? html`<ul class="files">
+      ${files.map((f, i) => html`<li key=${i}>
+        <span class="kind">${(f.kind || "?").toUpperCase()}</span>
+        <span class="name">${f.name}</span>
+        ${locked ? null : html`<button onClick=${() => actions.removeFile(i)}>Remove</button>`}
+      </li>`)}
+    </ul>` : null}
+  </div>`;
+}
+
+// The one set of options every set is run with.
+function OptionsPanel({ options, setOption }) {
+  return html`
+    <div class="card">
+      <h2>Settings for every set</h2>
+      <p class="hint">Chosen once: every set in this window is read, scanned for
+        names and run with these. A set already queued keeps the settings it was
+        queued with.</p>
     </div>
-    <div class="bar">
-      <span class="spacer"></span>
-      <button class="primary" disabled=${state.busy.active}
-              onClick=${actions.toNames}>Continue to names →</button>
+    <div class="card">
+      <h2>What to do with DOCX files</h2>
+      <label class="check"><input type="radio" name="docx-mode"
+        checked=${options.docx_mode === "anonymize"}
+        onChange=${() => setOption("docx_mode", "anonymize")} /> Anonymize (realistic fake names)</label>
+      <label class="check"><input type="radio" name="docx-mode"
+        checked=${options.docx_mode === "redact"}
+        onChange=${() => setOption("docx_mode", "redact")} /> Redact (black bars, nothing invented)</label>
+      <p class=${options.docx_mode === "anonymize" ? "warn" : "hint"}>
+        ${options.docx_mode === "anonymize" ? ANONYMIZE_NOTE : REDACT_NOTE}</p>
+    </div>
+    <div class="card">
+      <h2>What to do with PDF files</h2>
+      <label class="check"><input type="radio" name="pdf-mode"
+        checked=${options.pdf_mode === "redact"}
+        onChange=${() => setOption("pdf_mode", "redact")} /> Redact (black boxes, nothing invented)</label>
+      <label class="check"><input type="radio" name="pdf-mode"
+        checked=${options.pdf_mode === "anonymize"}
+        onChange=${() => setOption("pdf_mode", "anonymize")} /> Anonymize (replacement text in place)</label>
+      <p class=${options.pdf_mode === "anonymize" ? "warn" : "hint"}>
+        ${options.pdf_mode === "anonymize" ? PDF_ANONYMIZE_NOTE : PDF_REDACT_NOTE}</p>
+    </div>
+    <div class="card">
+      <h2>Also scrub</h2>
+      ${OPTION_LABELS.map(([key, label]) => html`
+        <label class="check" key=${key}>
+          <input type="checkbox" checked=${options[key]}
+                 onChange=${(e) => setOption(key, e.target.checked)} /> ${label}
+        </label>`)}
+    </div>
+    <div class="card">
+      <h2>Never change these terms (one per line)</h2>
+      <textarea rows="3" value=${options.allowlist}
+                onInput=${(e) => setOption("allowlist", e.target.value)}></textarea>
+      <p class="hint">Courts, judges, commissioners, statutes, rules and
+        reported citations are already protected automatically.</p>
+    </div>
+    <div class="card">
+      <h2>Mapping-key passwords</h2>
+      <p class="hint">Each set's original-to-replacement table is encrypted with
+        a password of its own, made for it automatically. They are shown on the
+        Run step, where each can be copied or changed before the sets are queued.</p>
     </div>`;
 }
+
+function ResultsLine({ sets, chooseResults }) {
+  return html`<div class="resultsroot">
+    Results go to: <strong>${sets.results_root || "not chosen yet"}</strong>
+    <button onClick=${chooseResults}>${sets.results_root ? "Change…" : "Choose folder…"}</button>
+    <span class="kevnote">Final check model (Kev): ${sets.kev || "not started"}</span>
+  </div>`;
+}
+
+// Where the reading is, across every set: the sets are read one after
+// another, in the order they were made, so one line says it.
+function readingLine(filled) {
+  const at = filled.findIndex((s) => s.state === "reading");
+  if (at >= 0) {
+    const read = filled[at].reading || {};
+    const where = `Reading set ${at + 1} of ${filled.length} (${filled[at].name})`;
+    return read.total
+      ? { message: `${where} - page ${n(read.done)} of ${n(read.total)}`, fraction: read.done / read.total }
+      : { message: `${where} - looking for scanned pages`, fraction: 0 };
+  }
+  const prep = filled.findIndex((s) => s.state === "preparing");
+  if (prep >= 0) {
+    return { message: `Working out the name lists for set ${prep + 1} of ${filled.length} (${filled[prep].name})`,
+             fraction: 0 };
+  }
+  return null;
+}
+
+/* ----------------------------------------------------------- 2. names -- */
 
 // What the run will deliberately leave alone, and which ticked names were
 // folded into a longer one. Both are decisions made for the operator, so both
@@ -322,7 +410,7 @@ function GuardPanel({ state }) {
     </div>`;
 }
 
-function NamesStep({ state, set, actions, meta }) {
+function NamesStep({ state, actions, meta, busy }) {
   const rows = useMemo(() => [
     ...state.captions.map((c, i) => ({
       id: `cap-${i}`, name: c.name, category: state.suggCats[`cap-${i}`] || c.category,
@@ -388,27 +476,23 @@ function NamesStep({ state, set, actions, meta }) {
           <button onClick=${() => actions.tickAllSuggestions(likely, true)}>Tick all</button>
           <button onClick=${() => actions.tickAllSuggestions(rows, false)}>Untick all</button>
           <span class="spacer"></span>
-          <button disabled=${state.busy.active} onClick=${actions.readCaptions}>Re-read captions</button>
-          <button disabled=${state.busy.active} title="Scan again with the names now on the list"
+          <button disabled=${busy.active} onClick=${actions.readCaptions}>Re-read captions</button>
+          <button disabled=${busy.active} title="Scan again with the names now on the list"
                   onClick=${actions.scanSuggestions}>Rescan documents</button>
         </div>
       </div>
       <div class="card">
         <h2>Name list - one full name per line</h2>
         <textarea rows="18" spellcheck="false" value=${state.namesText}
-                  onInput=${(e) => set.namesText(e.target.value)}></textarea>
+                  onInput=${(e) => actions.namesText(e.target.value)}></textarea>
         <p class="hint">Mark special types after a pipe: <code>Tommy Smith | minor</code>,
           <code>Zions Bank | organization</code>, <code>Sandy | location</code>.</p>
       </div>
     </div>
-    <${GuardPanel} state=${state} />
-    <div class="bar">
-      <button onClick=${() => actions.go(0)}>← Back</button>
-      <span class="spacer"></span>
-      <button class="primary" disabled=${state.busy.active}
-              onClick=${actions.toReview}>Continue to review →</button>
-    </div>`;
+    <${GuardPanel} state=${state} />`;
 }
+
+/* ---------------------------------------------------------- 3. review -- */
 
 function RowEditor({ row, meta, onClose, onSave }) {
   const [category, setCategory] = useState(row.category);
@@ -437,8 +521,9 @@ function RowEditor({ row, meta, onClose, onSave }) {
   </div>`;
 }
 
-function ReviewStep({ state, actions, meta }) {
+function ReviewStep({ state, actions, meta, busy }) {
   const [sort, setSort] = useState({ key: null, desc: false });
+  const [editing, setEditing] = useState(null);
   const rows = useMemo(() => {
     const out = [...state.entities];
     if (sort.key) {
@@ -497,7 +582,7 @@ function ReviewStep({ state, actions, meta }) {
                        onChange=${(e) => actions.setEnabled(row, e.target.checked)} /></td>
               ${cells(row, false)}
               <td><button title="Edit type or replacement"
-                          onClick=${() => actions.openEditor(row)}>✎ Edit</button></td>
+                          onClick=${() => setEditing(row)}>✎ Edit</button></td>
             </tr>
             ${open.has(row.key) ? (row.forms || []).map((form) => html`
               <tr key=${form.key} class="form-row">
@@ -509,434 +594,163 @@ function ReviewStep({ state, actions, meta }) {
                 <td><button title="Not the same thing - give it its own row and replacement"
                             onClick=${() => actions.split(form)}>Split out</button>
                     <button title="Edit type or replacement"
-                            onClick=${() => actions.openEditor(form)}>✎</button></td>
+                            onClick=${() => setEditing(form)}>✎</button></td>
               </tr>`) : null}`)}
         </tbody>
       </table></div>
       <div class="bar">
         <button onClick=${() => actions.setAll(true)}>Tick all</button>
         <button onClick=${() => actions.setAll(false)}>Untick all</button>
-        <button disabled=${state.busy.active} onClick=${actions.toReview}>Rescan documents</button>
+        <button disabled=${busy.active} onClick=${actions.rescan}>Rescan documents</button>
       </div>
     </div>
-    <div class="bar">
-      <button onClick=${() => actions.go(1)}>← Back</button>
-      <span class="spacer"></span>
-      <button class="primary" disabled=${state.busy.active}
-              onClick=${actions.toRun}>Continue to run →</button>
-    </div>
-    ${state.editing ? html`<${RowEditor} row=${state.editing} meta=${meta}
-        onClose=${() => actions.closeEditor()}
-        onSave=${(changes) => actions.saveEditor(state.editing, changes)} />` : null}`;
+    ${editing ? html`<${RowEditor} row=${editing} meta=${meta}
+        onClose=${() => setEditing(null)}
+        onSave=${async (changes) => { if (await actions.saveEditor(editing, changes)) setEditing(null); }} />` : null}`;
 }
 
-// The run is queued, not run here: the queue runs every queued set one after
-// another, unattended, into the results folder - a folder per set - so the
-// next set can be reviewed while this one runs.
-const RUN_STATES = {
-  queued: "Queued - it runs when every set queued before it has.",
-  running: "Running now.",
-  done: "Done.",
-  failed: "Failed.",
-};
+/* ------------------------------------------------------------- 4. run -- */
 
-function RunStep({ state, actions, meta }) {
-  const info = state.info || { run: {} };
+// The run is queued, not run here: the queue runs every queued set one after
+// another, unattended, into the results folder - a folder per set.
+function RunStatus({ info, download, unqueue }) {
   const run = info.run || {};
-  const waiting = info.state === "queued";
-  const going = waiting || info.state === "running";
-  const finished = info.state === "done";
+  const audit = run.audit || {};
   // pages still to look at once the local model has fixed what it could
-  const toLook = run.audit && run.audit.still !== undefined ? run.audit.still
-    : run.audit ? run.audit.flagged : 0;
-  const dl = (kind) => `/api/download/${kind}?set=${encodeURIComponent(state.setId)}` +
-    (meta && meta.download_token ? `&token=${encodeURIComponent(meta.download_token)}` : "");
+  const toLook = audit.still !== undefined ? audit.still : audit.flagged || 0;
+  switch (info.state) {
+    case "queued":
+      return html`<div>Queued - it runs when every set before it has.
+        ${run.message && run.message !== "Waiting to run" ? html`<br /><span class="hint">${run.message}</span>` : null}
+        <div><button onClick=${unqueue}>Take out of the queue</button></div></div>`;
+    case "running":
+      return html`<div><strong>Running</strong>${run.total ? ` - page ${n(run.done)} of ${n(run.total)}` : ""}
+        ${run.message ? html`<br /><span class="hint">${run.message}</span>` : null}
+        ${run.total ? html`<span class="setbar"><span
+           style=${{ width: `${Math.round(100 * run.done / run.total)}%` }}></span></span>` : null}</div>`;
+    case "failed":
+      return html`<div class="status-bad">Failed.${run.error ? html`<br /><span class="small">${run.error}</span>` : null}</div>`;
+    case "done":
+      return html`<div>
+        <span class=${run.failed ? "status-bad" : "status-ok"}>${run.failed
+          ? `${run.failed} of ${run.files} file(s) were refused or failed and are NOT in the archive - the report says why.`
+          : `Done - ${run.files} file(s).`}</span>
+        ${audit.error ? html`<br /><span class="status-bad">The final check did not finish (${audit.error}).
+            Look the archive over yourself before it goes anywhere.</span>`
+          : audit.file ? html`<br /><span class=${toLook ? "status-bad" : "status-ok"}>
+            Final check: ${n(audit.pages)} page(s) read back by ${audit.kev}.
+            ${audit.fixed ? ` ${n(audit.fixed)} page(s) fixed by the local model and rechecked.` : ""}
+            ${audit.cleared ? ` ${n(audit.cleared)} page(s) cleared by the local model.` : ""}
+            ${toLook ? ` ${n(toLook)} page(s) to look at - listed in final-check.txt.`
+              : audit.flagged ? " Nothing is left to look at - final-check.txt lists what was fixed."
+              : " No page was flagged."}</span>` : null}
+        <br /><span class="hint">Saved in ${run.results}</span>
+        <div class="downloads">
+          <a href=${download("archive")} download><button>Archive</button></a>
+          <a href=${download("key")} download><button>Mapping key</button></a>
+          <a href=${download("report")} download><button>Report</button></a>
+        </div></div>`;
+    default:
+      return html`<span class="hint">Not queued</span>`;
+  }
+}
+
+function RunStage({ filled, todo, work, options, sets, meta, busy, actions, notice }) {
+  const anyDone = filled.some((info) => info.state === "done");
   return html`
     <div class="card">
-      <h2>Run</h2>
-      <p>${state.files.length} document(s), ${state.active} item(s) will be replaced.
-         DOCX: ${state.options.docx_mode}. PDF: ${state.options.pdf_mode}.</p>
-      <p class="hint">Results go to
-        ${state.resultsRoot ? html` <strong>${state.resultsRoot}</strong>, in a folder named after this set`
-          : html` the results folder - choose it at the top of the window first`}.
-        Queued sets run one at a time, in the order they were queued, with no
-        further input: review the next set while this one runs.</p>
+      <h2>Run every set</h2>
+      <p>${plural(filled.length, "set")}. DOCX: ${options.docx_mode}. PDF: ${options.pdf_mode}.
+        ${todo.length ? ` ${plural(todo.length, "set")} to queue.` : " Nothing left to queue."}</p>
+      <${ResultsLine} sets=${sets} chooseResults=${actions.chooseResults} />
+      <p class="hint">Run all queues every set below in order. The queue runs them one at
+        a time, with no further input, each into a folder of its own in the results
+        folder, named after the set.</p>
+      <p class="warn">Keep the window open until every set is done. Quitting the app
+        stops the queue: a set that was running is left unfinished and must be run
+        again, and every set's documents are deleted with the app. While sets run the
+        Mac is kept from idle sleep; the screen still sleeps.</p>
+      <div class="runtable"><table>
+        <thead><tr><th>Set</th><th>Documents</th><th>Items to replace</th>
+          <th>Mapping-key password</th><th>Status</th></tr></thead>
+        <tbody>
+          ${filled.map((info) => {
+            const w = work(info.id);
+            // once queued the password has gone with it: changing it here
+            // would show a password the mapping key was not made with
+            const fixed = ["queued", "running", "done"].includes(info.state);
+            return html`<tr key=${info.id}>
+              <td><strong>${info.name}</strong></td>
+              <td class="num">${n(info.files)}</td>
+              <td class="num">${w.reviewState === "built" ? n(w.active) : "-"}</td>
+              <td>${fixed && !w.queued ? html`<span class="hint">Queued before this window
+                was opened again - it is the password copied then.</span>` : html`<div class="pwrow">
+                <input type=${w.showPassword ? "text" : "password"} value=${w.password}
+                       aria-label=${`Mapping-key password for ${info.name}`}
+                       disabled=${fixed} onInput=${(e) => actions.password(info.id, e.target.value)} />
+                <button onClick=${() => actions.showPassword(info.id, !w.showPassword)}>
+                  ${w.showPassword ? "Hide" : "Show"}</button>
+                <button onClick=${() => actions.copyPassword(info)}>Copy</button>
+                <button disabled=${fixed} title="Make a new password for this set"
+                        onClick=${() => actions.password(info.id, generatePassword())}>New</button>
+              </div>`}</td>
+              <td><${RunStatus} info=${info} unqueue=${() => actions.unqueue(info)}
+                    download=${(kind) => actions.download(info.id, kind)} /></td>
+            </tr>`;
+          })}
+        </tbody>
+      </table></div>
       <div class="bar">
-        ${waiting ? html`<button onClick=${actions.unqueue}>Take out of the queue</button>`
-          : html`<button class="primary" disabled=${state.busy.active || going || finished}
-                         onClick=${actions.queue}>Queue this set to run</button>`}
-        <button onClick=${() => navigator.clipboard.writeText(state.password)}>
-          Copy mapping-key password</button>
+        <button class="primary" disabled=${busy.active || !todo.length} onClick=${actions.runAll}>
+          Run all${todo.length ? ` (${plural(todo.length, "set")})` : ""}</button>
+        <button onClick=${actions.copyAll}>Copy all passwords</button>
+        ${notice ? html`<span class="status-ok">${notice}</span>` : null}
       </div>
-      ${RUN_STATES[info.state] ? html`
-        <p class=${info.state === "failed" ? "status-bad" : info.state === "done" ? "status-ok" : ""}>
-          ${RUN_STATES[info.state]} ${run.message && !["done", "failed"].includes(info.state) ? `${run.message}.` : ""}
-          ${info.state === "running" && run.total ? ` Page ${run.done.toLocaleString()} of ${run.total.toLocaleString()}.` : ""}
-          ${run.error ? html`<br />${run.error}` : null}</p>` : null}
-      ${finished ? html`
-        <p class=${run.failed ? "status-bad" : "status-ok"}>
-          ${run.failed ? `${run.failed} of ${run.files} file(s) were refused or failed and are NOT in the archive - the report says why.`
-            : `${run.files} file(s) done.`} Saved in <strong>${run.results}</strong>.</p>
-        <div class="downloads">
-          <a href=${dl("archive")} download><button>Download archive</button></a>
-          <a href=${dl("key")} download><button>Download mapping key</button></a>
-          <a href=${dl("report")} download><button>Download report</button></a>
-        </div>
-        ${run.audit && run.audit.error ? html`<p class="status-bad">The final check did not
-            finish (${run.audit.error}). Look the archive over yourself before it goes anywhere.</p>`
-          : run.audit && run.audit.file ? html`<p class=${toLook ? "status-bad" : "status-ok"}>
-            Final check: ${run.audit.pages.toLocaleString()} page(s) read back by ${run.audit.kev}.
-            ${run.audit.fixed ? ` ${run.audit.fixed} page(s) fixed by the local model and rechecked.` : ""}
-            ${run.audit.cleared ? ` ${run.audit.cleared} page(s) cleared by the local model.` : ""}
-            ${toLook ? ` ${toLook} page(s) to look at - listed in final-check.txt in the set's folder.`
-              : run.audit.flagged ? " Nothing is left to look at - final-check.txt lists what was fixed."
-              : " No page was flagged."}</p>` : null}
-        <p class="warn">Keep the mapping key, the report and final-check.txt away from anything you deliver.</p>` : null}
-    </div>
-    <div class="bar">
-      <button onClick=${() => actions.go(2)}>← Back</button>
+      <p class="hint">Copy the passwords somewhere safe before you leave: each set's
+        mapping key is offered as its own download, never inside the archive, and
+        without its password it cannot be opened.</p>
+      ${anyDone ? html`<p class="warn">Keep the mapping keys, the reports and
+        final-check.txt away from anything you deliver.</p>` : null}
     </div>`;
 }
 
 /* ------------------------------------------------------------------- app -- */
 
-function Workspace({ setId, visible, meta, info, resultsRoot, refreshSets }) {
-  const api = useMemo(() => window.makeApi(setId), [setId]);
-  const [step, setStep] = useState(0);
-  const [unlocked, setUnlocked] = useState(0);
-  const [files, setFiles] = useState([]);
-  const [options, setOptions] = useState(DEFAULT_OPTIONS);
-  const [password, setPassword] = useState(generatePassword());
-  const [showPassword, setShowPassword] = useState(false);
-  const [namesText, setNamesText] = useState("");
-  const [captions, setCaptions] = useState([]);
-  const [officials, setOfficials] = useState([]);
-  const [guardNotes, setGuardNotes] = useState([]);
-  const [overlaps, setOverlaps] = useState([]);
-  const [suggestions, setSuggestions] = useState([]);
-  const [scanned, setScanned] = useState(false);
-  const [suggChecked, setSuggChecked] = useState(new Set());
-  const [suggCats, setSuggCats] = useState({});
-  const [skipped, setSkipped] = useState([]);
-  const [entities, setEntities] = useState([]);
-  const [active, setActive] = useState(0);
-  const [instructions, setInstructions] = useState("");
-  const [risky, setRisky] = useState([]);
-  const [unused, setUnused] = useState(0);
-  const [llm, setLlm] = useState(null);
-  const [editing, setEditing] = useState(null);
-  const [runInfo, setRunInfo] = useState(null);
-  const [busy, setBusy] = useState({ active: false, message: "", fraction: 0 });
-  const [fault, setFault] = useState("");
-
-  const track = (message, fraction, pages) => setBusy({ active: true, message, fraction, pages });
-  const settle = () => setBusy({ active: false, message: "", fraction: 0 });
-
-  // Every step that touches the name list gets a fresh read of what the run
-  // will shield and what it folded together; the server recomputes both, since
-  // a judge sharing a party's surname changes the answer.
-  const absorbGuard = (result) => {
-    if (result.officials) setOfficials(result.officials);
-    if (result.guard_notes) setGuardNotes(result.guard_notes);
-    if (result.overlaps) setOverlaps(result.overlaps);
+// What the window holds for one set beyond what the server says about it.
+function blankWork() {
+  return {
+    files: [], skipped: [], adding: "",
+    password: generatePassword(), showPassword: false, queued: false,  // queued from here
+    namesText: "", captions: [], captionsRead: false, officials: [], guardNotes: [], overlaps: [],
+    suggestions: [], scanned: false, namesTried: false, suggChecked: new Set(), suggCats: {},
+    // "" not built | waiting | building | built | failed
+    reviewState: "", entities: [], active: 0, instructions: "", risky: [], unused: 0,
+    llm: null,                        // what the local model merged, said at review
   };
-
-  async function guarded(work) {
-    setFault("");
-    try { return await work(); }
-    catch (error) { setFault(error.message); }
-    finally { settle(); }
-  }
-
-  const applyFiles = (payload) => {
-    setFiles(payload.files); setSkipped(payload.skipped || []);
-  };
-
-  const applyReview = (payload) => {
-    setEntities(payload.entities); setRisky(payload.risky); setUnused(payload.unused);
-    setActive(payload.active); setInstructions(payload.instructions);
-    setLlm(payload.llm || null);
-  };
-
-  // the two halves of the name screen; unguarded, so a step that runs both
-  // hears when either could not start
-  const readCaptions = async () => {
-    const result = await api.job(api.post("/api/captions"), track);
-    setCaptions(result.captions);
-    absorbGuard(result);
-    setSuggChecked((prev) => {
-      const next = new Set(prev);
-      result.captions.forEach((c, i) => {
-        if (c.confidence === "high" && !prev.has(`cap-${i}-seen`)) next.add(`cap-${i}`);
-        next.add(`cap-${i}-seen`);
-      });
-      return next;
-    });
-  };
-
-  const scanSuggestions = async () => {
-    const body = { options, names: parseNameLines(namesText) };
-    const result = await api.job(api.post("/api/suggestions", body), track);
-    setScanned(true);
-    setSuggestions(result.suggestions);
-    absorbGuard(result);
-  };
-
-  const actions = {
-    go: (target) => setStep(target),
-
-    // Documents go up a batch at a time - a case folder runs to hundreds -
-    // each with its path inside the folder it was dropped in. The rest are
-    // only named, so the report can list them; their contents never leave.
-    upload: (items) => guarded(async () => {
-      const quiet = (name) => name.startsWith(".") || name.startsWith("~$")
-        || ["thumbs.db", "desktop.ini"].includes(name.toLowerCase());
-      const leaf = (path) => path.slice(path.lastIndexOf("/") + 1);
-      const kept = items.filter((item) => !quiet(leaf(item.path)));
-      const docs = kept.filter((item) => READABLE.test(item.path));
-      const others = kept.filter((item) => !READABLE.test(item.path));
-      let result = null;
-      const BATCH = 20;
-      for (let start = 0; start < Math.max(docs.length, 1); start += BATCH) {
-        const form = new FormData();
-        for (const item of docs.slice(start, start + BATCH)) {
-          form.append("files", item.file);
-          form.append("paths", item.path);
-        }
-        if (start === 0) for (const item of others) form.append("skipped", item.path);
-        track(docs.length > BATCH
-          ? `Adding documents ${Math.min(start + BATCH, docs.length)} of ${docs.length}`
-          : "Adding documents", docs.length ? start / docs.length : 1);
-        result = await api.post("/api/files", form);
-      }
-      applyFiles(result);
-    }),
-
-    // a folder that cannot be read says so, like every other failure
-    dropped: (taken) => guarded(async () => {
-      track("Reading the folder", 0);
-      const items = await readDrop(taken);
-      if (items.length) await actions.upload(items);
-    }),
-
-    chooseFolder: () => guarded(async () => {
-      // the app window: a native folder panel, read straight from disk
-      const bridge = window.pywebview && window.pywebview.api;
-      if (bridge && bridge.choose_folder) {
-        track("Reading the folder", 0);
-        const result = await bridge.choose_folder();
-        if (result) applyFiles(result);
-        return;
-      }
-      document.getElementById(`folderpick-${setId}`).click();   // a browser's own
-    }),
-
-    removeFile: (index) => guarded(async () => {
-      applyFiles(await api.del(`/api/files/${index}`));
-    }),
-
-    removeAll: () => guarded(async () => {
-      applyFiles(await api.del("/api/files"));
-    }),
-
-    toNames: () => guarded(async () => {
-      if (!files.length) throw new Error("Add at least one DOCX or PDF first.");
-      if (!password.trim()) throw new Error("Set a password for the mapping key, or press New.");
-      const first = !captions.length && !scanned;
-      setUnlocked((u) => Math.max(u, 1)); setStep(1);
-      // the whole name screen at once: the caption's names, then every
-      // document scanned for the rest - no second button to find
-      try {
-        if (!captions.length) await readCaptions();
-        if (!scanned) await scanSuggestions();
-      } catch (error) {
-        // another set's step holding the reader, say: back to the documents,
-        // not an empty name screen that looks finished
-        if (first) { setStep(0); setUnlocked(0); }
-        throw error;
-      }
-    }),
-
-    readCaptions: () => guarded(readCaptions),
-    scanSuggestions: () => guarded(scanSuggestions),
-
-    toggleSuggestion: (id) => setSuggChecked((prev) => {
-      const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
-      return next;
-    }),
-
-    tickAllSuggestions: (rows, on) => setSuggChecked((prev) => {
-      const next = new Set(prev);
-      rows.forEach((row) => (on ? next.add(row.id) : next.delete(row.id)));
-      return next;
-    }),
-
-    retypeSuggestion: (row, category) =>
-      setSuggCats((prev) => ({ ...prev, [row.id]: category })),
-
-    addTicked: (rows) => {
-      const existing = new Set(namesText.split("\n").map((l) => l.trim().toLowerCase()));
-      const added = [];
-      for (const row of rows) {
-        if (!suggChecked.has(row.id)) continue;
-        const line = nameLine(row.name, row.category);
-        if (!existing.has(line.toLowerCase())) added.push(line);
-      }
-      if (added.length) setNamesText((t) => (t.trim() ? t.replace(/\s+$/, "") + "\n" : "") + added.join("\n"));
-    },
-
-    toReview: () => guarded(async () => {
-      const first = !entities.length;
-      setUnlocked((u) => Math.max(u, 2)); setStep(2);
-      const body = { options, names: parseNameLines(namesText) };
-      try {
-        const result = await api.job(api.post("/api/review", body), track);
-        absorbGuard(result);
-        applyReview(result);
-      } catch (error) {
-        // a review list that never got built is not one to run from
-        if (first) { setStep(1); setUnlocked(1); }
-        throw error;
-      }
-    }),
-
-    setEnabled: (row, enabled) => guarded(async () => {
-      applyReview(await api.patch("/api/entities", { key: row.key, enabled }));
-    }),
-
-    setAll: (enabled) => guarded(async () => {
-      applyReview(await api.post("/api/entities/all", { enabled }));
-    }),
-
-    split: (row) => guarded(async () => {
-      applyReview(await api.post("/api/entities/split", { key: row.key }));
-    }),
-
-    openEditor: (row) => setEditing(row),
-    closeEditor: () => setEditing(null),
-
-    saveEditor: (row, changes) => guarded(async () => {
-      const noError = meta.error_types[0];
-      if (!changes.replacement.trim()) throw new Error("The replacement cannot be empty.");
-      applyReview(await api.patch("/api/entities", {
-        key: row.key,
-        category: changes.category,
-        replacement: changes.replacement !== row.replacement ? changes.replacement : null,
-      }));
-      setEditing(null);
-      if (changes.errorType !== noError) {
-        const logged = await api.post("/api/feedback", {
-          error_type: changes.errorType,
-          text: row.canonical,
-          predicted_category: row.category,
-          corrected_category: changes.category,
-          corrected_replacement:
-            changes.replacement !== row.replacement ? changes.replacement : null,
-          source: row.source,
-          occurrences: row.occurrences,
-          documents: files.map((f) => f.name),
-          origin: "review",
-        });
-        const send = window.confirm(
-          `The report was saved to\n${logged.logged_to}\n(stored unencrypted on ` +
-          "this computer - it contains the flagged text).\n\nOpen an email to " +
-          `${logged.address} with this report? You will see the draft before ` +
-          "anything is sent.");
-        if (send) window.location.href = logged.mailto;
-      }
-    }),
-
-    toRun: () => { setUnlocked((u) => Math.max(u, 3)); setStep(3); },
-
-    queue: () => guarded(async () => {
-      if (!password.trim()) throw new Error("Set a mapping-key password first.");
-      refreshSets(await api.post("/api/queue", { options, password }));
-    }),
-
-    unqueue: () => guarded(async () => {
-      refreshSets(await api.post("/api/queue/cancel"));
-    }),
-
-    renameSet: (name) => guarded(async () => {
-      if (name.trim()) refreshSets(await api.patch(`/api/sets/${setId}`, { name }));
-    }),
-  };
-
-  const set = {
-    option: (key, value) => setOptions((o) => ({ ...o, [key]: value })),
-    password: setPassword, showPassword: setShowPassword, namesText: setNamesText,
-  };
-
-  const state = { setId, setName: info ? info.name : "", info, resultsRoot,
-                  files, options, password, showPassword, namesText, captions,
-                  officials, guardNotes, overlaps,
-                  suggestions, suggChecked, suggCats, entities, risky, unused, llm, active, instructions, skipped,
-                  editing, runInfo, busy };
-
-  // every set's workspace stays mounted, so switching sets loses nothing -
-  // the names typed, the ticks, the review list, the step it was on
-  return html`<div style=${{ display: visible ? "block" : "none" }}>
-    <${Stepper} step=${step} unlocked=${unlocked} go=${actions.go} />
-    ${fault ? html`<div class="card"><p class="error">${fault}</p></div>` : null}
-    ${step === 0 ? html`<${FilesStep} state=${state} set=${set} actions=${actions} />` : null}
-    ${step === 1 ? html`<${NamesStep} state=${state} set=${set} actions=${actions} meta=${meta} />` : null}
-    ${step === 2 ? html`<${ReviewStep} state=${state} actions=${actions} meta=${meta} />` : null}
-    ${step === 3 ? html`<${RunStep} state=${state} actions=${actions} meta=${meta} />` : null}
-    ${visible ? html`<${Progress} busy=${busy} />` : null}
-  </div>`;
 }
+const NO_WORK = { ...blankWork(), password: "" };
 
-/* ------------------------------------------------------------------ sets -- */
-
-function setStatus(info) {
-  const read = info.reading || {};
-  const run = info.run || {};
-  const n = (value) => (value || 0).toLocaleString();
-  switch (info.state) {
-    case "empty": return "No documents yet";
-    case "reading": return `Reading ${n(read.done)} of ${n(read.total)} scanned pages`;
-    case "preparing": return "Read - working out the name lists";
-    case "ready": return `${n(info.files)} document(s) read - ready to review`;
-    case "queued": return "Queued to run";
-    case "running": return run.total ? `Running - page ${n(run.done)} of ${n(run.total)}` : "Running";
-    case "done": return run.failed ? `Done - ${run.failed} file(s) refused` : "Done";
-    case "failed": return "Run failed";
-    default: return "";
-  }
-}
-
-function SetsBar({ sets, actions }) {
-  return html`<div class="sets">
-    <div class="setlist">
-      ${sets.sets.map((info) => html`
-        <div key=${info.id}
-             class=${"setchip " + info.state + (info.id === sets.selected ? " selected" : "")}
-             onClick=${() => actions.select(info.id)}>
-          <span class="setname">${info.name}</span>
-          <span class="setstate">${setStatus(info)}</span>
-          ${info.state === "reading" && info.reading.total ? html`<span class="setbar"><span
-             style=${{ width: `${Math.round(100 * info.reading.done / info.reading.total)}%` }}></span></span>` : null}
-          ${info.state === "running" && info.run.total ? html`<span class="setbar"><span
-             style=${{ width: `${Math.round(100 * info.run.done / info.run.total)}%` }}></span></span>` : null}
-          ${sets.sets.length > 1 && !["queued", "running"].includes(info.state) ? html`<button
-             class="setremove" title="Remove this set"
-             onClick=${(e) => { e.stopPropagation(); actions.remove(info); }}>×</button>` : null}
-        </div>`)}
-      <button class="setadd" onClick=${actions.add}>+ New set</button>
-    </div>
-    <div class="resultsroot">
-      Results go to: <strong>${sets.results_root || "not chosen yet"}</strong>
-      <button onClick=${actions.chooseResults}>${sets.results_root ? "Change…" : "Choose folder…"}</button>
-      <span class="kevnote">Final check model (Kev): ${sets.kev || "not started"}</span>
-    </div>
-  </div>`;
-}
+// a review list built before a change to the names, the files or the
+// options is not the one to run from: it is built again on the Review step
+const restale = (state) => (["built", "failed"].includes(state) ? "" : state);
 
 function App() {
   const [meta, setMeta] = useState(null);
   const [sets, setSets] = useState({ sets: [], selected: null, results_root: "" });
+  const [options, setOptions] = useState(DEFAULT_OPTIONS);
+  const [work, setWork] = useState({});
+  const [stage, setStage] = useState(0);
+  const [unlocked, setUnlocked] = useState(0);
+  const [namesAt, setNamesAt] = useState(null);
+  const [reviewAt, setReviewAt] = useState(null);
+  const [busy, setBusy] = useState({ active: false, message: "", fraction: 0 });
   const [fault, setFault] = useState("");
+  const [notice, setNotice] = useState("");
+  const apis = useRef({});
+  const optionsLoaded = useRef(false);
+
+  const apiFor = (id) => apis.current[id] || (apis.current[id] = window.makeApi(id));
+  const refresh = () => api.get("/api/sets").then(setSets).catch(() => {});
 
   useEffect(() => {
     // the launch token did its job at load; the session cookie carries auth
@@ -944,27 +758,385 @@ function App() {
     if (window.location.search.includes("token=")) {
       window.history.replaceState({}, "", window.location.pathname);
     }
-    api.get("/api/state").then((state) => { setMeta(state); setSets(state); })
-      .catch((e) => setFault(e.message));
+    api.get("/api/state").then((state) => {
+      setMeta(state); setSets(state);
+      if (state.options) setOptions({ ...DEFAULT_OPTIONS, ...state.options });
+      optionsLoaded.current = true;
+      // a window opened again over sets already filled shows their documents
+      for (const info of state.sets) {
+        if (info.files) apiFor(info.id).get("/api/files")
+          .then((payload) => patch(info.id, { files: payload.files, skipped: payload.skipped || [] }))
+          .catch(() => {});
+      }
+    }).catch((e) => setFault(e.message));
     // the sets read and run in the background: their counters move on their own
-    const timer = setInterval(() => {
-      api.get("/api/sets").then(setSets).catch(() => {});
-    }, 2000);
+    const timer = setInterval(refresh, 2000);
     return () => clearInterval(timer);
   }, []);
 
-  async function guarded(work) {
+  // every set has its own password from the moment it appears
+  const ids = sets.sets.map((s) => s.id).join(",");
+  useEffect(() => {
+    setWork((all) => {
+      let changed = false;
+      const next = { ...all };
+      for (const info of sets.sets) {
+        if (!next[info.id]) { next[info.id] = blankWork(); changed = true; }
+      }
+      return changed ? next : all;
+    });
+  }, [ids]);
+
+  // the options live on the server too: the name lists are worked out ahead
+  // with them, before any step sends them
+  useEffect(() => {
+    if (!optionsLoaded.current) return undefined;
+    const timer = setTimeout(() => {
+      api.put("/api/options", options).catch((e) => setFault(e.message));
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [options]);
+
+  const w = (id) => work[id] || NO_WORK;
+  const patch = (id, change) => setWork((all) => {
+    const was = all[id] || blankWork();
+    return { ...all, [id]: { ...was, ...(typeof change === "function" ? change(was) : change) } };
+  });
+  const nameOf = (id) => (sets.sets.find((s) => s.id === id) || { name: "This set" }).name;
+
+  const track = (prefix) => (message, fraction, pages) =>
+    setBusy({ active: true, message: prefix ? `${prefix} - ${message}` : message, fraction, pages });
+  const settle = () => setBusy({ active: false, message: "", fraction: 0 });
+
+  async function guarded(task) {
     setFault("");
-    try { return await work(); } catch (error) { setFault(error.message); }
+    try { return await task(); } catch (error) { setFault(error.message); return undefined; }
   }
 
-  const actions = {
-    add: () => guarded(async () => setSets(await api.post("/api/sets", {}))),
-    select: (id) => guarded(async () => setSets(await api.post(`/api/sets/${id}/select`))),
-    remove: (info) => guarded(async () => {
-      if (!window.confirm(`Remove "${info.name}" and its documents from this window?`)) return;
-      setSets(await api.del(`/api/sets/${info.id}`));
-    }),
+  // One step on the server for one set, polled to the end. The server works
+  // one step at a time, so the steps of a stage go one after another.
+  async function runJob(id, path, body, prefix) {
+    const one = apiFor(id);
+    try {
+      track(prefix)("Starting", 0);
+      return await one.job(one.post(path, body), track(prefix));
+    } finally {
+      settle();
+    }
+  }
+
+  // ------------------------------------------------------------ the sets --
+  const filled = sets.sets.filter((s) => s.state !== "empty");
+  // the sets still to name, review and queue: a set queued or run is past it
+  const workable = filled.filter((s) => !["queued", "running", "done"].includes(s.state));
+
+  // Every set read and its name lists worked out, or the reason not yet.
+  function namesGate() {
+    if (!filled.length) return "Add documents to at least one set first.";
+    const adding = sets.sets.find((s) => w(s.id).adding);
+    if (adding) return `Still adding documents to ${adding.name}.`;
+    const reading = filled.find((s) => s.state === "reading");
+    if (reading) {
+      const read = reading.reading || {};
+      return read.total
+        ? `Waiting for every set to be read - ${reading.name} is at page ${n(read.done)} of ${n(read.total)}.`
+        : `Waiting for every set to be read - ${reading.name} is being looked over for scanned pages.`;
+    }
+    const preparing = filled.find((s) => s.state === "preparing");
+    if (preparing) return `Waiting for ${preparing.name}'s name lists to be worked out.`;
+    if (!workable.length) return "Every set with documents is already queued or run - add another set.";
+    return "";
+  }
+  const gate = namesGate();
+  const empties = sets.sets.filter((s) => s.state === "empty");
+
+  // ------------------------------------------------- one set's actions --
+  const forSet = (id) => {
+    const one = apiFor(id);
+    const state = w(id);
+    const applyFiles = (payload) => patch(id, (was) => ({
+      files: payload.files, skipped: payload.skipped || [],
+      // new documents: the name screen and the review list are made again
+      captionsRead: false, scanned: false, namesTried: false,
+      reviewState: restale(was.reviewState),
+    }));
+    const absorbGuard = (result) => ({
+      ...(result.officials ? { officials: result.officials } : {}),
+      ...(result.guard_notes ? { guardNotes: result.guard_notes } : {}),
+      ...(result.overlaps ? { overlaps: result.overlaps } : {}),
+    });
+    const reviewPayload = (payload) => ({
+      entities: payload.entities, risky: payload.risky, unused: payload.unused,
+      active: payload.active, instructions: payload.instructions,
+      ...(payload.llm ? { llm: payload.llm } : {}),
+    });
+    const named = (task) => async () => {
+      try { return await task(); } catch (error) { throw new Error(`${nameOf(id)}: ${error.message}`); }
+    };
+
+    // the two halves of the name screen, each a step on the server
+    const readCaptions = async () => {
+      const result = await runJob(id, "/api/captions", undefined, `Names for ${nameOf(id)}`);
+      patch(id, (was) => {
+        const checked = new Set(was.suggChecked);
+        result.captions.forEach((c, i) => {
+          if (c.confidence === "high" && !was.suggChecked.has(`cap-${i}-seen`)) checked.add(`cap-${i}`);
+          checked.add(`cap-${i}-seen`);
+        });
+        return { captions: result.captions, captionsRead: true, suggChecked: checked, ...absorbGuard(result) };
+      });
+    };
+    const scanSuggestions = async () => {
+      const body = { options, names: parseNameLines(state.namesText) };
+      const result = await runJob(id, "/api/suggestions", body, `Names for ${nameOf(id)}`);
+      patch(id, { scanned: true, suggestions: result.suggestions, ...absorbGuard(result) });
+    };
+
+    const actions = {
+      // Documents go up a batch at a time - a case folder runs to hundreds -
+      // each with its path inside the folder it was dropped in. The rest are
+      // only named, so the report can list them; their contents never leave.
+      upload: (items) => guarded(named(async () => {
+        const quiet = (name) => name.startsWith(".") || name.startsWith("~$")
+          || ["thumbs.db", "desktop.ini"].includes(name.toLowerCase());
+        const leaf = (path) => path.slice(path.lastIndexOf("/") + 1);
+        const kept = items.filter((item) => !quiet(leaf(item.path)));
+        const docs = kept.filter((item) => READABLE.test(item.path));
+        const others = kept.filter((item) => !READABLE.test(item.path));
+        let result = null;
+        const BATCH = 20;
+        try {
+          for (let start = 0; start < Math.max(docs.length, 1); start += BATCH) {
+            const form = new FormData();
+            for (const item of docs.slice(start, start + BATCH)) {
+              form.append("files", item.file);
+              form.append("paths", item.path);
+            }
+            if (start === 0) for (const item of others) form.append("skipped", item.path);
+            patch(id, { adding: docs.length > BATCH
+              ? `Adding documents ${Math.min(start + BATCH, docs.length)} of ${docs.length}`
+              : "Adding documents" });
+            result = await one.post("/api/files", form);
+          }
+          applyFiles(result);
+        } finally {
+          patch(id, { adding: "" });
+          refresh();              // its state, at once: not a stale "empty"
+        }
+      })),
+
+      // a folder that cannot be read says so, like every other failure
+      dropped: (taken) => guarded(named(async () => {
+        patch(id, { adding: "Reading the folder" });
+        let items;
+        try { items = await readDrop(taken); } finally { patch(id, { adding: "" }); }
+        if (items.length) await actions.upload(items);
+      })),
+
+      chooseFolder: () => guarded(named(async () => {
+        // the app window: a native folder panel, read straight from disk
+        const bridge = window.pywebview && window.pywebview.api;
+        if (bridge && bridge.choose_folder) {
+          patch(id, { adding: "Reading the folder" });
+          try {
+            const result = await bridge.choose_folder(id);
+            if (result) applyFiles(result);
+          } finally {
+            patch(id, { adding: "" });
+            refresh();
+          }
+          return;
+        }
+        document.getElementById(`folderpick-${id}`).click();   // a browser's own
+      })),
+
+      removeFile: (index) => guarded(named(async () => {
+        applyFiles(await one.del(`/api/files/${index}`));
+        refresh();
+      })),
+
+      removeAll: () => guarded(named(async () => {
+        applyFiles(await one.del("/api/files"));
+        refresh();
+      })),
+
+      rename: (name) => guarded(named(async () => {
+        if (name.trim()) setSets(await api.patch(`/api/sets/${id}`, { name }));
+      })),
+
+      remove: () => guarded(named(async () => {
+        if (!window.confirm(`Remove "${nameOf(id)}" and its documents from this window?`)) return;
+        setSets(await api.del(`/api/sets/${id}`));
+      })),
+
+      // the whole name screen at once: the caption's names, then every
+      // document scanned for the rest - worked out ahead, so it opens at once
+      loadNames: named(async () => {
+        patch(id, { namesTried: true });
+        if (!state.captionsRead) await readCaptions();
+        if (!state.scanned) await scanSuggestions();
+      }),
+
+      readCaptions: () => guarded(named(readCaptions)),
+      scanSuggestions: () => guarded(named(scanSuggestions)),
+
+      namesText: (text) => patch(id, (was) => ({ namesText: text, reviewState: restale(was.reviewState) })),
+
+      toggleSuggestion: (rowId) => patch(id, (was) => {
+        const next = new Set(was.suggChecked);
+        next.has(rowId) ? next.delete(rowId) : next.add(rowId);
+        return { suggChecked: next };
+      }),
+
+      tickAllSuggestions: (rows, on) => patch(id, (was) => {
+        const next = new Set(was.suggChecked);
+        rows.forEach((row) => (on ? next.add(row.id) : next.delete(row.id)));
+        return { suggChecked: next };
+      }),
+
+      retypeSuggestion: (row, category) =>
+        patch(id, (was) => ({ suggCats: { ...was.suggCats, [row.id]: category } })),
+
+      addTicked: (rows) => patch(id, (was) => {
+        const existing = new Set(was.namesText.split("\n").map((l) => l.trim().toLowerCase()));
+        const added = [];
+        for (const row of rows) {
+          if (!was.suggChecked.has(row.id)) continue;
+          const line = nameLine(row.name, row.category);
+          if (!existing.has(line.toLowerCase())) added.push(line);
+        }
+        if (!added.length) return {};
+        return { namesText: (was.namesText.trim() ? was.namesText.replace(/\s+$/, "") + "\n" : "")
+                   + added.join("\n"),
+                 reviewState: restale(was.reviewState) };
+      }),
+
+      // this set's review list, built with the names as they are now
+      buildReview: (prefix) => named(async () => {
+        patch(id, { reviewState: "building" });
+        try {
+          const body = { options, names: parseNameLines(state.namesText) };
+          const result = await runJob(id, "/api/review", body,
+                                      typeof prefix === "string" ? prefix : `Review list for ${nameOf(id)}`);
+          patch(id, { ...absorbGuard(result), ...reviewPayload(result), reviewState: "built" });
+        } catch (error) {
+          patch(id, { reviewState: "failed" });
+          throw error;
+        }
+      })(),
+
+      rescan: () => guarded(() => actions.buildReview()),
+
+      setEnabled: (row, enabled) => guarded(named(async () => {
+        patch(id, reviewPayload(await one.patch("/api/entities", { key: row.key, enabled })));
+      })),
+
+      setAll: (enabled) => guarded(named(async () => {
+        patch(id, reviewPayload(await one.post("/api/entities/all", { enabled })));
+      })),
+
+      split: (row) => guarded(named(async () => {
+        patch(id, reviewPayload(await one.post("/api/entities/split", { key: row.key })));
+      })),
+
+      // true once saved, so the editor closes
+      saveEditor: (row, changes) => guarded(named(async () => {
+        const noError = meta.error_types[0];
+        if (!changes.replacement.trim()) throw new Error("The replacement cannot be empty.");
+        patch(id, reviewPayload(await one.patch("/api/entities", {
+          key: row.key,
+          category: changes.category,
+          replacement: changes.replacement !== row.replacement ? changes.replacement : null,
+        })));
+        if (changes.errorType !== noError) {
+          const logged = await one.post("/api/feedback", {
+            error_type: changes.errorType,
+            text: row.canonical,
+            predicted_category: row.category,
+            corrected_category: changes.category,
+            corrected_replacement:
+              changes.replacement !== row.replacement ? changes.replacement : null,
+            source: row.source,
+            occurrences: row.occurrences,
+            documents: state.files.map((f) => f.name),
+            origin: "review",
+          });
+          const send = window.confirm(
+            `The report was saved to\n${logged.logged_to}\n(stored unencrypted on ` +
+            "this computer - it contains the flagged text).\n\nOpen an email to " +
+            `${logged.address} with this report? You will see the draft before ` +
+            "anything is sent.");
+          if (send) window.location.href = logged.mailto;
+        }
+        return true;
+      })),
+    };
+    return actions;
+  };
+
+  // ------------------------------------------------------ the stages --
+  // Every set's review list, one after another - the server builds one at a
+  // time. A set that fails says so and the rest are still built.
+  const buildReviews = (list) => guarded(async () => {
+    const todo = list.filter((info) => !["waiting", "building"].includes(w(info.id).reviewState));
+    for (const info of todo) patch(info.id, { reviewState: "waiting" });
+    const failed = [];
+    for (const info of todo) {
+      const at = workable.findIndex((s) => s.id === info.id) + 1;
+      try {
+        await forSet(info.id).buildReview(
+          `Building the review list for set ${at} of ${workable.length} (${info.name})`);
+      } catch (error) {
+        failed.push(error.message);
+      }
+    }
+    if (failed.length) throw new Error(`Could not build every review list. ${failed.join(" ")}`);
+  });
+
+  // the Review step builds what it has not got, however it was reached
+  useEffect(() => {
+    if (stage !== 2 || busy.active) return;
+    const missing = workable.filter((info) => w(info.id).reviewState === "");
+    if (missing.length) buildReviews(missing);
+  }, [stage, busy.active, workable.map((s) => `${s.id}:${w(s.id).reviewState}`).join(",")]);
+
+  // each set's name screen is opened as it is reached
+  const namesList = workable;
+  const namesSet = namesList.find((s) => s.id === namesAt) || namesList[0];
+  useEffect(() => {
+    if (stage !== 1 || !namesSet || busy.active) return;
+    const state = w(namesSet.id);
+    if (state.namesTried || (state.captionsRead && state.scanned)) return;
+    guarded(forSet(namesSet.id).loadNames);
+  }, [stage, namesSet && namesSet.id, busy.active, namesSet && w(namesSet.id).namesTried]);
+
+  const reviewSet = workable.find((s) => s.id === reviewAt) || workable[0];
+  const allBuilt = workable.length > 0 && workable.every((s) => w(s.id).reviewState === "built");
+
+  // the Run step is open whenever a set has been queued: a window opened
+  // again over a night's runs still shows them, and their downloads
+  const queuedAny = sets.sets.some((s) => ["queued", "running", "done", "failed"].includes(s.state));
+  const reachable = [true, !gate, !gate && unlocked >= 2, unlocked >= 3 || queuedAny];
+  const go = (target) => {
+    setFault("");
+    setStage(target);
+    setUnlocked((u) => Math.max(u, target));
+    window.scrollTo(0, 0);
+  };
+
+  const flash = (message) => {
+    setNotice(message);
+    setTimeout(() => setNotice(""), 2500);
+  };
+  const copy = (text, message) => guarded(async () => {
+    if (!(await copyText(text))) {
+      throw new Error("Could not copy - press Show and copy the password by hand.");
+    }
+    flash(message);
+  });
+
+  const stageActions = {
+    addSet: () => guarded(async () => setSets(await api.post("/api/sets", {}))),
     chooseResults: () => guarded(async () => {
       const bridge = window.pywebview && window.pywebview.api;
       if (bridge && bridge.choose_results_folder) {
@@ -974,6 +1146,52 @@ function App() {
       }
       const typed = window.prompt("Folder for the results (a full path):", sets.results_root || "");
       if (typed) setSets(await api.post("/api/results-folder", { path: typed }));
+    }),
+    setOption: (key, value) => {
+      setOptions((o) => ({ ...o, [key]: value }));
+      // what the scan proposes and what the review list holds both follow
+      // the options: made again when next reached
+      setWork((all) => Object.fromEntries(Object.entries(all).map(([id, one]) => [id, {
+        ...one, reviewState: restale(one.reviewState),
+        ...(key === "ner" ? { scanned: false, namesTried: false } : {}),
+      }])));
+    },
+    password: (id, value) => patch(id, { password: value }),
+    showPassword: (id, on) => patch(id, { showPassword: on }),
+    copyPassword: (info) => copy(w(info.id).password, `Copied the password for ${info.name}.`),
+    // the passwords this window knows: a set queued before the window was
+    // opened again has a password only the operator kept
+    copyAll: () => {
+      const known = filled.filter((info) =>
+        !["queued", "running", "done"].includes(info.state) || w(info.id).queued);
+      return copy(known.map((info) => `${info.name}\t${w(info.id).password}`).join("\n"),
+                  `Copied ${plural(known.length, "password")}.`);
+    },
+    download: (id, kind) => `/api/download/${kind}?set=${encodeURIComponent(id)}` +
+      (meta && meta.download_token ? `&token=${encodeURIComponent(meta.download_token)}` : ""),
+    unqueue: (info) => guarded(async () => {
+      setSets(await apiFor(info.id).post("/api/queue/cancel"));
+    }),
+    // every set to the queue, in order, with its own password and the one
+    // set of options; checked first, so a night's queue is not half made
+    runAll: () => guarded(async () => {
+      if (!sets.results_root) throw new Error("Choose the folder the results go to first.");
+      for (const info of workable) {
+        if (!w(info.id).password.trim()) throw new Error(`Give ${info.name} a mapping-key password, or press New.`);
+        if (w(info.id).reviewState !== "built") {
+          throw new Error(`${info.name} has no review list yet - open the Review step first.`);
+        }
+      }
+      await api.put("/api/options", options);
+      for (const info of workable) {
+        try {
+          setSets(await apiFor(info.id).post("/api/queue", { options, password: w(info.id).password }));
+          patch(info.id, { queued: true });
+        } catch (error) {
+          throw new Error(`${info.name} was not queued: ${error.message}` +
+            " The sets before it are queued.");
+        }
+      }
     }),
   };
 
@@ -986,17 +1204,133 @@ function App() {
         : html`<p class="hint">Loading…</p>`}</div></div></div>`;
   }
 
+  const position = (list, info) => `Set ${list.findIndex((s) => s.id === info.id) + 1} of ${list.length}`;
+  const neighbours = (list, info) => {
+    const at = list.findIndex((s) => s.id === info.id);
+    return [list[at - 1] || null, list[at + 1] || null];
+  };
+
+  let body = null;
+  if (stage === 0) {
+    const line = readingLine(filled);
+    body = html`
+      <div class="card">
+        <p class="hint intro">One set per case. Each set's documents are read in the
+          background as soon as they are added, set after set in the order the sets
+          were made, and its name lists are worked out once it is read. The names
+          come when every set is read; everything stays on this computer.</p>
+        <${ResultsLine} sets=${sets} chooseResults=${stageActions.chooseResults} />
+      </div>
+      <div class="columns">
+        <div>
+          ${sets.sets.map((info, index) => html`<${SetCard} key=${info.id} info=${info}
+              number=${index + 1} work=${w(info.id)} actions=${forSet(info.id)}
+              canRemove=${sets.sets.length > 1 && !["queued", "running"].includes(info.state)} />`)}
+          <div class="bar"><button onClick=${stageActions.addSet}>+ Add another set</button></div>
+        </div>
+        <div><${OptionsPanel} options=${options} setOption=${stageActions.setOption} /></div>
+      </div>
+      ${line && !busy.active ? html`<${Progress} busy=${{ active: true, ...line }} />` : null}
+      <div class="bar">
+        <span class=${"spacer gate" + (gate ? " waiting" : "")}>${gate ||
+          `${plural(workable.length, "set")} read and ready.`}${empties.length && filled.length
+          ? ` ${empties.map((s) => s.name).join(", ")} ${empties.length === 1 ? "has" : "have"} no documents and ${empties.length === 1 ? "is" : "are"} left out.` : ""}</span>
+        <button class="primary" disabled=${!!gate}
+                onClick=${() => { setNamesAt(workable[0] && workable[0].id); go(1); }}>
+          Continue to names →</button>
+      </div>`;
+  } else if (stage === 1) {
+    if (!namesSet) {
+      body = html`<div class="card"><p>Nothing to name - every set with documents is queued or run.</p>
+        <div class="bar"><button onClick=${() => go(0)}>← Back to documents</button></div></div>`;
+    } else {
+      const state = w(namesSet.id);
+      const [before, after] = neighbours(namesList, namesSet);
+      const opened = state.captionsRead && state.scanned;
+      body = html`
+        <div class="card stagehead">
+          <h2>Names - ${position(namesList, namesSet)}: ${namesSet.name}</h2>
+          <p class="hint">Name every set in turn; what is typed and ticked here is kept
+            when you move between sets. The review lists are built once the last set is named.</p>
+        </div>
+        ${!opened && !busy.active && state.namesTried ? html`<div class="card">
+          <p class="warn">This set's name lists did not open.</p>
+          <div class="bar"><button onClick=${() => guarded(forSet(namesSet.id).loadNames)}>Try again</button></div>
+        </div>` : null}
+        <${NamesStep} key=${namesSet.id} state=${state} actions=${forSet(namesSet.id)} meta=${meta} busy=${busy} />
+        <div class="bar">
+          ${before ? html`<button disabled=${busy.active} onClick=${() => { setNamesAt(before.id); window.scrollTo(0, 0); }}>
+              ← Previous set</button>`
+            : html`<button onClick=${() => go(0)}>← Back to documents</button>`}
+          <span class="spacer"></span>
+          ${after ? html`<button class="primary" disabled=${busy.active}
+                onClick=${() => { setNamesAt(after.id); window.scrollTo(0, 0); }}>Next set →</button>`
+            : html`<button class="primary" disabled=${busy.active}
+                onClick=${() => { setReviewAt(workable[0] && workable[0].id); go(2); }}>
+                Continue to review →</button>`}
+        </div>`;
+    }
+  } else if (stage === 2) {
+    if (!reviewSet) {
+      body = html`<div class="card"><p>Nothing to review - every set with documents is queued or run.</p>
+        <div class="bar"><button onClick=${() => go(3)}>Go to the run →</button></div></div>`;
+    } else {
+      const state = w(reviewSet.id);
+      const [before, after] = neighbours(workable, reviewSet);
+      const waiting = workable.filter((s) => w(s.id).reviewState !== "built");
+      body = html`
+        <div class="card stagehead">
+          <h2>Review - ${position(workable, reviewSet)}: ${reviewSet.name}</h2>
+          <ul class="buildlist">
+            ${workable.map((info) => html`<li key=${info.id} class=${w(info.id).reviewState || "none"}>
+              ${info.name}: ${{ waiting: "waiting its turn", building: "building the review list",
+                               built: `${plural(w(info.id).active, "item")} to replace`,
+                               failed: "the review list could not be built" }[w(info.id).reviewState]
+                              || "no review list yet"}</li>`)}
+          </ul>
+        </div>
+        ${state.reviewState === "built"
+          ? html`<${ReviewStep} key=${reviewSet.id} state=${state} actions=${forSet(reviewSet.id)}
+                   meta=${meta} busy=${busy} />`
+          : html`<div class="card">
+              <p class=${state.reviewState === "failed" ? "warn" : "hint"}>${{
+                waiting: "This set's review list is built after the ones before it - step through those meanwhile.",
+                building: "This set's review list is being built now.",
+                failed: "This set's review list could not be built - the message above says why.",
+              }[state.reviewState] || "This set has no review list yet."}</p>
+              ${["", "failed"].includes(state.reviewState) ? html`<div class="bar">
+                <button disabled=${busy.active} onClick=${() => buildReviews([reviewSet])}>
+                  Build its review list</button></div>` : null}
+            </div>`}
+        <div class="bar">
+          ${before ? html`<button onClick=${() => { setReviewAt(before.id); window.scrollTo(0, 0); }}>← Previous set</button>`
+            : html`<button onClick=${() => { setNamesAt(namesList[namesList.length - 1].id); go(1); }}>
+                ← Back to names</button>`}
+          <span class="spacer"></span>
+          ${after ? html`<button class="primary" onClick=${() => { setReviewAt(after.id); window.scrollTo(0, 0); }}>
+              Next set →</button>`
+            : html`${!allBuilt ? html`<span class="gate waiting">Waiting for the review list of ${
+                waiting.map((s) => s.name).join(", ")}.</span>` : null}
+              <button class="primary" disabled=${busy.active || !allBuilt}
+                onClick=${() => go(3)}>Continue to run →</button>`}
+        </div>`;
+    }
+  } else {
+    body = html`<${RunStage} filled=${filled} todo=${workable} work=${w} options=${options}
+      sets=${sets} meta=${meta} busy=${busy} actions=${stageActions} notice=${notice} />
+      <div class="bar"><button onClick=${() => go(2)}>← Back to review</button></div>`;
+  }
+
   return html`<div>
     <header class="topbar"><div class="topbar-inner">
       <h1>Document Redactions & Anonymization</h1>
       <span class="version">${meta.version} · everything stays on this computer</span>
     </div></header>
     <div class="shell">
-      <${SetsBar} sets=${sets} actions=${actions} />
+      <${Stepper} stage=${stage} reachable=${reachable} go=${go} />
       ${fault ? html`<div class="card"><p class="error">${fault}</p></div>` : null}
-      ${sets.sets.map((info) => html`<${Workspace} key=${info.id} setId=${info.id}
-          visible=${info.id === sets.selected} meta=${meta} info=${info}
-          resultsRoot=${sets.results_root} refreshSets=${setSets} />`)}
+      ${body}
+      <${Progress} busy=${busy} />
     </div>
   </div>`;
 }

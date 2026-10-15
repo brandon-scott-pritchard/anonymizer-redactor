@@ -24,6 +24,7 @@ window.makeApi = (setId) => {
   const get = (path) => request("GET", path);
   const post = (path, body) => request("POST", path, body);
   const patch = (path, body) => request("PATCH", path, body);
+  const put = (path, body) => request("PUT", path, body);
   const del = (path) => request("DELETE", path);
 
   /* Start a job-returning endpoint and poll it to completion. The pages
@@ -43,7 +44,7 @@ window.makeApi = (setId) => {
     }
   }
 
-  return { get, post, patch, del, job };
+  return { get, post, patch, put, del, job };
 };
 
 window.api = window.makeApi(null);
