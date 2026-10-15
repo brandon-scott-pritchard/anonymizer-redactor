@@ -76,6 +76,15 @@ def sync(store: MappingStore) -> None:
         if head is entity:
             continue
         if entity.is_person and head.is_person:
+            core = _without_line_word(entity)
+            if core is not None and head.surrogate is not None and _same_name(core, head.person):
+                # the head's stand-in, its line word kept: "Otto Noll Cont"
+                mapping = _partial_mapping(core, head.person)
+                stand_in = (_shaped_surrogate(core, head.surrogate, mapping, head.person)
+                            if mapping is not None else head.surrogate)
+                word = entity.canonical.split()[-1]
+                entity.replacement = f"{_names.match_case(core.canonical, stand_in.canonical)} {word}"
+                continue
             if _glued_into(entity.person, head.person) and head.surrogate is not None:
                 # glued back the way it was found, in its own capitals
                 stand_in = head.surrogate
@@ -338,16 +347,20 @@ def _group_people(store: MappingStore) -> None:
     people = [e for e in store.entities.values()
               if e.category in PEOPLE and e.person is not None]
     # richest first: a head is decided before anything that could hang off it
-    people.sort(key=lambda e: (-len(e.person.ordered), -len(e.canonical)))
+    # a name with a payment line's word on its end never leads its group
+    people.sort(key=lambda e: (_without_line_word(e) is not None,
+                               -len(e.person.ordered), -len(e.canonical)))
     heads: list[Entity] = []
     for entity in people:
         if entity.key in store.split_out or entity.distinct:
             heads.append(entity)
             continue
+        core = _without_line_word(entity)
         candidates = [h for h in heads
                       if h.category == entity.category and not h.candidates
                       and (_partial_mapping(entity.person, h.person) is not None
-                           or _glued_into(entity.person, h.person))]
+                           or _glued_into(entity.person, h.person)
+                           or (core is not None and _same_name(core, h.person)))]
         if len(candidates) > 1 and _one_family(entity, candidates):
             # a bare surname the whole family shares: whichever of them it
             # is, it reads as the family's one invented surname - left on its
@@ -359,6 +372,31 @@ def _group_people(store: MappingStore) -> None:
             entity.candidates = tuple(h.canonical for h in candidates)
         else:
             heads.append(entity)
+
+
+# A payment line's word read onto the end of a name: "Whitney Lewis Cont",
+# "Whitney Lewis Conf" - each proposed, and each given, a person of its own
+LINE_WORDS = frozenset({"cont", "conf", "confirmation", "ref", "memo", "pmt", "payment",
+                        "id", "p2p"})
+
+
+def _without_line_word(entity: Entity) -> _names.PersonName | None:
+    """The name without the payment line's word on its end, or None."""
+    if entity.person is None:
+        return None
+    words = entity.canonical.split()
+    if len(words) < 3 or words[-1].strip(".:#").casefold() not in LINE_WORDS:
+        return None
+    return _names.parse(" ".join(words[:-1]))
+
+
+def _same_name(part: _names.PersonName, whole: _names.PersonName | None) -> bool:
+    if whole is None:
+        return False
+    if [v.strip(".").casefold() for _k, v in part.ordered] == \
+            [v.strip(".").casefold() for _k, v in whole.ordered]:
+        return True
+    return _partial_mapping(part, whole) is not None
 
 
 def _one_family(entity: Entity, heads: list[Entity]) -> bool:

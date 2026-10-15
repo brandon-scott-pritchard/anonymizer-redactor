@@ -525,3 +525,35 @@ def test_a_year_like_tail_is_never_searched_for_and_a_date_is_never_an_account()
     text = "Statement 08/31/2021 card ending 4417; paid 2021 taxes"
     out = apply_hits(text, scan_text(text, store, Settings(use_ner=False)))
     assert "08/31/2021" in out and "paid 2021 taxes" in out and "4417" not in out
+
+
+@pytest.mark.parametrize("text,kept", [
+    ("Zelle toABIGAILOKAFOR Conf 12", "Zelle to"),
+    ("fromWhitneyLewisCont487333789 $40.00", "Cont487333789 $40.00"),
+    ("toNOAHOKAFORConf", "Conf"),
+    ("NATHANCBLACKBURN", ""),
+])
+def test_a_name_run_together_with_a_payment_line_is_the_person(text, kept):
+    """"toABIGAILOKAFOR" read as a payment handle and got a bracket, where the
+    same person was an invented name everywhere else."""
+    from redactor import grouping, review
+    from redactor.engine import Settings, apply_hits, scan_text
+
+    store, _ = review.build_store([("NOAH OKAFOR", "person"), ("ABIGAIL N OKAFOR", "person"),
+                                   ("Whitney Lewis", "person"), ("NATHAN C BLACKBURN", "person")])
+    grouping.group(store)
+    out = apply_hits(text, scan_text(text, store, Settings(use_ner=False, pdf_mode="anonymize")))
+    for real in ("ABIGAIL", "OKAFOR", "NOAH", "Whitney", "Lewis", "BLACKBURN"):
+        assert real.casefold() not in out.casefold()
+    assert kept in out and "[" not in out
+
+
+@pytest.mark.parametrize("text", ["Annual Market report", "Smithfield Annex", "Conference Center"])
+def test_a_word_holding_a_name_and_something_else_is_left_alone(text):
+    from redactor import grouping, review
+    from redactor.engine import Settings, apply_hits, scan_text
+
+    store, _ = review.build_store([("Ann Lee", "person"), ("Mark Hill", "person"),
+                                   ("William Smith", "person"), ("NATHAN C BLACKBURN", "person")])
+    grouping.group(store)
+    assert apply_hits(text, scan_text(text, store, Settings(use_ner=False))) == text

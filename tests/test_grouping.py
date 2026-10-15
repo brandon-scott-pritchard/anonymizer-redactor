@@ -526,3 +526,15 @@ def test_two_documents_with_one_name_are_both_read(tmp_path):
     assert len(texts) == 2
     joined = "\n".join(texts.values())
     assert "Robert Lopez" in joined and "Hailey Cooper" in joined
+
+
+def test_a_name_with_a_payment_lines_word_on_its_end_is_the_person():
+    """"Whitney Lewis Cont" and "Whitney Lewis Conf" were proposed - and
+    given - an invented person each."""
+    store = _store(["Whitney Lewis", "Whitney Lewis Cont", "Whitney Lewis Conf", "WHITNEY LEWIS REF"])
+    head = _row(store, "Whitney Lewis")
+    assert head.parent is None
+    for form, word in (("Whitney Lewis Cont", "Cont"), ("Whitney Lewis Conf", "Conf"),
+                       ("WHITNEY LEWIS REF", "REF")):
+        assert _head(store, form) == "Whitney Lewis"
+        assert _row(store, form).replacement.casefold() == f"{head.replacement} {word}".casefold()

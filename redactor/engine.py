@@ -556,12 +556,134 @@ def scan_text(
     # Last, because the pattern pass above is what registers new values, and a
     # bare recurrence of one must be matched in this same piece of text.
     hits.extend(matcher.find_values(text, protected, redact))
+    hits.extend(run_together_hits(text, store, redact, protected))
 
     hits = matcher.held_back(text, hits)
     return _resolve(hits)
 
 
 _PEOPLE = {"person", "minor"}
+
+
+# --------------------------------------------------------------------------
+# names run together with each other and with a payment line's words
+# --------------------------------------------------------------------------
+
+# A payment app prints its line as one word: "toABIGAILOKAFOR",
+# "fromWhitneyLewisCont487333789". The name matcher wants a word boundary
+# either side of a name and found none; the payment-handle detector took the
+# word whole, and the person read as "[PAYHANDLE-3]" there and an invented
+# name everywhere else. A word made entirely of a ticked person's name parts
+# and these few pieces of the line around them is that person, and only the
+# name parts are swapped. Entirely: "Annual", "Market" and "Smithfield" hold
+# a name and something else, and are left alone.
+RUN_TOGETHER_PRIORITY = 91           # above the payment-handle detector's
+_LINE_PREFIXES = ("from", "to", "pmt", "pymt", "paid", "payment", "zelle", "venmo",
+                  "paypal", "cashapp", "xfer", "transfer")
+_LINE_SUFFIXES = ("conf", "cont", "confirmation", "ref", "memo", "pmt", "payment", "id")
+_RUN_TOGETHER_WORD = re.compile(r"(?<![A-Za-z0-9])[A-Za-z][A-Za-z0-9]{5,}(?![A-Za-z0-9])")
+
+
+def _person_parts(store: MappingStore) -> dict[str, list[tuple[Entity, str]]]:
+    """Each ticked person's name part, casefolded -> (group head, component)."""
+    out: dict[str, list[tuple[Entity, str]]] = {}
+    for entity in store.persons():
+        if not entity.enabled or entity.person is None:
+            continue
+        head = grouping.head_of(store, entity)
+        if head.person is None or head.surrogate is None or not head.enabled:
+            continue
+        mapping = (grouping._partial_mapping(entity.person, head.person)
+                   if head is not entity else None)
+        for key, value in entity.person.ordered:
+            word = value.strip(".").casefold()
+            if not word.isalpha():
+                continue
+            component = (mapping or {}).get(key, key)
+            pair = (head, component)
+            if pair not in out.setdefault(word, []):
+                out[word].append(pair)
+    return out
+
+
+def _read_run_together(word: str, parts: dict) -> list[tuple[int, int, Entity, str]] | None:
+    """[(start, end, head, component)] for the name parts of ``word``, when
+    the word is nothing but them and a payment line's pieces; else None."""
+    folded = word.casefold()
+    at = 0
+    for prefix in sorted(_LINE_PREFIXES, key=len, reverse=True):
+        if folded.startswith(prefix) and len(folded) > len(prefix) + 2:
+            at = len(prefix)
+            break
+    found: list[tuple[int, int, Entity, str]] = []
+    while at < len(folded):
+        best = None
+        for length in range(min(len(folded) - at, 30), 0, -1):
+            piece = folded[at:at + length]
+            owners = parts.get(piece)
+            # an initial counts only between two name parts: the "C" of
+            # "CBLACKBURN", never the "C" of "Conf"
+            if owners and (length > 1 or (found and any(
+                    folded[at + 1:].startswith(p) for p in parts if len(p) > 1))):
+                best = (length, owners)
+                break
+        if best is None:
+            break
+        length, owners = best
+        head, component = owners[0]
+        if found and not any(h is found[0][2] for h, _c in owners):
+            # every part one person's - or, for a surname, one family's
+            same = [(h, c) for h, c in owners if h.surrogate and found[0][2].surrogate
+                    and h.surrogate.last == found[0][2].surrogate.last]
+            if not same:
+                return None
+            head, component = same[0]
+        elif found:
+            head, component = next((h, c) for h, c in owners if h is found[0][2])
+        found.append((at, at + length, head, component))
+        at += length
+    rest = folded[at:]
+    rest_words = re.sub(r"\d+$", "", rest)
+    if rest_words and rest_words not in _LINE_SUFFIXES:
+        return None
+    if not found:
+        return None
+    letters = sum(e - s for s, e, _h, _c in found)
+    # one part alone must be long and stand at an edge it was not glued past:
+    # "toKyle" yes, a bare "Smiths" is the matcher's
+    if len(found) == 1 and (letters < 4 or (at == letters and not rest)):
+        return None
+    return found
+
+
+def run_together_hits(text: str, store: MappingStore, redact: bool,
+                      protected=()) -> list[Hit]:
+    parts = _person_parts(store)
+    if not parts:
+        return []
+    hits = []
+    for match in _RUN_TOGETHER_WORD.finditer(text):
+        word = match.group(0)
+        if any(match.start() < b and a < match.end() for a, b in protected):
+            continue
+        pieces = _read_run_together(word, parts)
+        if not pieces:
+            continue
+        out, cursor = [], 0
+        for start, end, head, component in pieces:
+            out.append(word[cursor:start])
+            original = word[start:end]
+            fake = dict(head.surrogate.ordered).get(component) or head.surrogate.last or ""
+            if len(original) == 1:
+                fake = fake[:1]
+            out.append(_names.match_case(original, fake.replace(" ", "")))
+            cursor = end
+        out.append(word[cursor:])
+        head = pieces[0][2]
+        hits.append(Hit(match.start(), match.end(), word, head.category,
+                        REDACTION_TEXT if redact else "".join(out), head.key,
+                        RUN_TOGETHER_PRIORITY))
+    return hits
 
 
 def _resolve(hits: list[Hit]) -> list[Hit]:
