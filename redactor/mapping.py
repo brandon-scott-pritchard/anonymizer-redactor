@@ -81,6 +81,13 @@ class MappingStore:
         # once the review scan has grouped the store, a value first met during
         # the run joins its group instead of minting a new placeholder
         self.grouped = False
+        # what the local model merged at review (see llm_grouping.py), kept so
+        # a regrouping that starts from scratch can fold it back in:
+        # form key -> (head key, why, the row it came in with), and business
+        # key -> (person key, why, the replacement it was given)
+        self.merged: dict[str, tuple[str, str, str]] = {}
+        self.named_after: dict[str, tuple[str, str, str]] = {}
+        self.merge_note = ""
 
     # ------------------------------------------------------------- people --
     def add_person(

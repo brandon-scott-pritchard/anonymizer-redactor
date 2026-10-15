@@ -460,6 +460,7 @@ function ReviewStep({ state, actions, meta }) {
       ${state.risky.length ? html`<p class="warn">Common words used as names -
         check these did not over-match: ${state.risky.join(", ")}</p>` : null}
       ${state.unused ? html`<p class="warn">${`${state.unused} ${state.unused === 1 ? "entry" : "entries"} did not appear in any document.`}</p>` : null}
+      ${state.llm && state.llm.note ? html`<p class="hint">${state.llm.note}</p>` : null}
       <div class="tablewrap"><table>
         <thead><tr><th title="Ticked = will be changed">Change?</th>${header("label", "Type")}
           ${header("canonical", "Found")}
@@ -528,6 +529,9 @@ function RunStep({ state, actions, meta }) {
   const waiting = info.state === "queued";
   const going = waiting || info.state === "running";
   const finished = info.state === "done";
+  // pages still to look at once the local model has fixed what it could
+  const toLook = run.audit && run.audit.still !== undefined ? run.audit.still
+    : run.audit ? run.audit.flagged : 0;
   const dl = (kind) => `/api/download/${kind}?set=${encodeURIComponent(state.setId)}` +
     (meta && meta.download_token ? `&token=${encodeURIComponent(meta.download_token)}` : "");
   return html`
@@ -563,9 +567,12 @@ function RunStep({ state, actions, meta }) {
         </div>
         ${run.audit && run.audit.error ? html`<p class="status-bad">The final check did not
             finish (${run.audit.error}). Look the archive over yourself before it goes anywhere.</p>`
-          : run.audit && run.audit.file ? html`<p class=${run.audit.flagged ? "status-bad" : "status-ok"}>
+          : run.audit && run.audit.file ? html`<p class=${toLook ? "status-bad" : "status-ok"}>
             Final check: ${run.audit.pages.toLocaleString()} page(s) read back by ${run.audit.kev}.
-            ${run.audit.flagged ? ` ${run.audit.flagged} page(s) to look at - listed in final-check.txt in the set's folder.`
+            ${run.audit.fixed ? ` ${run.audit.fixed} page(s) fixed by the local model and rechecked.` : ""}
+            ${run.audit.cleared ? ` ${run.audit.cleared} page(s) cleared by the local model.` : ""}
+            ${toLook ? ` ${toLook} page(s) to look at - listed in final-check.txt in the set's folder.`
+              : run.audit.flagged ? " Nothing is left to look at - final-check.txt lists what was fixed."
               : " No page was flagged."}</p>` : null}
         <p class="warn">Keep the mapping key, the report and final-check.txt away from anything you deliver.</p>` : null}
     </div>
@@ -599,6 +606,7 @@ function Workspace({ setId, visible, meta, info, resultsRoot, refreshSets }) {
   const [instructions, setInstructions] = useState("");
   const [risky, setRisky] = useState([]);
   const [unused, setUnused] = useState(0);
+  const [llm, setLlm] = useState(null);
   const [editing, setEditing] = useState(null);
   const [runInfo, setRunInfo] = useState(null);
   const [busy, setBusy] = useState({ active: false, message: "", fraction: 0 });
@@ -630,6 +638,7 @@ function Workspace({ setId, visible, meta, info, resultsRoot, refreshSets }) {
   const applyReview = (payload) => {
     setEntities(payload.entities); setRisky(payload.risky); setUnused(payload.unused);
     setActive(payload.active); setInstructions(payload.instructions);
+    setLlm(payload.llm || null);
   };
 
   // the two halves of the name screen; unguarded, so a step that runs both
@@ -845,7 +854,7 @@ function Workspace({ setId, visible, meta, info, resultsRoot, refreshSets }) {
   const state = { setId, setName: info ? info.name : "", info, resultsRoot,
                   files, options, password, showPassword, namesText, captions,
                   officials, guardNotes, overlaps,
-                  suggestions, suggChecked, suggCats, entities, risky, unused, active, instructions, skipped,
+                  suggestions, suggChecked, suggCats, entities, risky, unused, llm, active, instructions, skipped,
                   editing, runInfo, busy };
 
   // every set's workspace stays mounted, so switching sets loses nothing -

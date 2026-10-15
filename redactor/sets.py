@@ -182,17 +182,25 @@ class DocSet:
 
 
 def _run_set(events, files, store, settings, output_dir, password, relative, skipped,
-             spill_dir, kev_url=None) -> None:
-    """Child side: one set's run, then its final check, reporting as it goes."""
+             spill_dir, kev_url=None, models=None) -> None:
+    """Child side: one set's run, then its final check, reporting as it goes.
+
+    The models live in the parent, one at a time (see models.py): the child
+    asks for Kev once the run is done - ``("need", "kev")`` on ``events`` -
+    and for the local model only if a page was flagged, and is answered on
+    ``models`` with (address or None, note). ``("done_models",)`` lets go.
+    Without ``models`` it uses ``kev_url`` as given and no local model."""
     # everything was read before the set was queued; whatever was not is read
     # in-line here rather than by a second pool of readers
     readers = os.environ.get("REDACTOR_OCR_WORKERS")
     os.environ["REDACTOR_OCR_WORKERS"] = "0"
     try:
         _own_group()
-        from . import audit, pdf_processor, pipeline
+        from . import audit, llm_grouping, pdf_processor, pipeline
 
         pdf_processor.keep_ocr_on_disk(spill_dir)
+        if store.merged or store.named_after:
+            llm_grouping.settle(store)             # the model's merges, in their shape
 
         def progress(message: str, fraction: float) -> None:
             events.put(("progress", message, fraction))
@@ -208,11 +216,23 @@ def _run_set(events, files, store, settings, output_dir, password, relative, ski
         else:
             os.environ["REDACTOR_OCR_WORKERS"] = readers
         try:
+            kev_note = ""
+            if models is not None and result.archive is not None:
+                kev_url, kev_note = _need(events, models, "kev", progress)
             check = audit.check_archive(result.archive, store, settings, output_dir, kev_url,
                                         progress)
+            if kev_note and not kev_url and check.path is not None:
+                check.kev_note += f" ({kev_note})"
+                audit._write(check)
+            if check.flags:
+                _read_flagged(events, models, check, result, store, settings, output_dir,
+                              password, progress)
             events.put(("audit", check.summary()))
         except Exception as exc:                   # the run is delivered either way
             events.put(("audit", {"error": f"{type(exc).__name__}: {exc}"}))
+        finally:
+            if models is not None:
+                events.put(("done_models",))
         events.put(("done", result))
     except BaseException as exc:                   # the parent marks the set failed
         events.put(("error", f"{type(exc).__name__}: {exc}"))
@@ -222,6 +242,46 @@ def _run_set(events, files, store, settings, output_dir, password, relative, ski
         # on their own: the run hung finished but unable to exit.
         from . import ocr_pool
         ocr_pool.shutdown(wait=True)
+
+
+# How long a run waits for the parent to load a model: another step may be
+# using the slot first (a review asking the local model), then the loading.
+NEED_SECONDS = 3600
+
+
+def _need(events, models, name: str, progress) -> tuple[str | None, str]:
+    """Child side: the parent's address for model ``name``, or None and why."""
+    import queue as queue_module
+
+    progress("Starting Kev for the final check" if name == "kev"
+             else "Starting the local model to read the flagged pages", 0.0)
+    events.put(("need", name))
+    try:
+        url, note = models.get(timeout=NEED_SECONDS)
+    except queue_module.Empty:
+        return None, "it was not started in time"
+    return url, note
+
+
+def _read_flagged(events, models, check, result, store, settings, output_dir, password,
+                  progress) -> None:
+    """Child side: the local model reads the flagged pages, if there is one.
+    Kev is stopped for it: the fixed pages are read back by the matcher and
+    the local model."""
+    from . import audit, mapping
+
+    if models is None:
+        return
+    llm_url, note = _need(events, models, "llm", progress)
+    if not llm_url:
+        check.llm_note = note or "not running"
+        audit._write(check)
+        return
+    fixed_store = audit.read_flagged(check, result, store, settings, output_dir, None,
+                                     llm_url, progress)
+    # the forms it found are in the mapping key too: they were replaced
+    if fixed_store is not None and password and result.key_path:
+        mapping.write_encrypted_key(fixed_store, result.key_path, password)
 
 
 def _own_group() -> None:
@@ -440,15 +500,12 @@ class RunQueue:
     def _run(self, doc_set: DocSet, settings, password: str, root: Path) -> None:
         import multiprocessing
 
-        from . import pdf_processor
-
         results = _unique_folder(root, folder_name(doc_set.name))
         results.mkdir(parents=True)
         doc_set.results = results
         doc_set.run_state, doc_set.run_message = "running", "Starting"
         doc_set.run_pages = set()
         doc_set.run_pages_total = 0
-        from . import audit
 
         # A set queued before its reading finished waits for it: the run would
         # read the same pages again, beside the readers still at them. A
@@ -463,18 +520,35 @@ class RunQueue:
                                    f"of {now[1]:,}")
             time.sleep(1)
         doc_set.run_message = "Starting"
-        # Kev starts with the app; a set queued in its first minutes waits for it
-        kev_url = audit.wait_for_kev(audit.KEV_START_SECONDS)
         if self.stopping:
             return
         context = multiprocessing.get_context("spawn")
         events = context.Queue()
+        models = context.Queue()
+        child = self._start_child(context, doc_set, settings, password, results, events,
+                                  models)
+        self.child = child
+        turn = _Turn()
+        try:
+            result, error = self._follow(doc_set, events, child, models, turn)
+        finally:
+            _stop(child)
+            turn.release()                         # the model may stop when idle
+        self.child = None
+        self._after_run(doc_set, result, error)
+
+    def _start_child(self, context, doc_set: DocSet, settings, password: str, results: Path,
+                     events, models):
         child = context.Process(
             target=_run_set, name=f"run-{doc_set.id}",
             args=(events, list(doc_set.files), doc_set.store, settings, results, password,
-                  dict(doc_set.relative), list(doc_set.skipped), self.spill_dir, kev_url))
+                  dict(doc_set.relative), list(doc_set.skipped), self.spill_dir, None,
+                  models))
         child.start()
-        self.child = child
+        return child
+
+    def _follow(self, doc_set: DocSet, events, child, models, turn: "_Turn"):
+        """The child's messages until it is done: (result, error)."""
         result = error = None
         while result is None and error is None:
             event = _next_event(events, child)
@@ -482,7 +556,11 @@ class RunQueue:
                 error = f"the run stopped without finishing (exit code {child.exitcode})"
                 break
             kind = event[0]
-            if kind == "total":
+            if kind == "need":
+                models.put(turn.load(doc_set, event[1]))
+            elif kind == "done_models":
+                turn.release()                     # another step may have the slot
+            elif kind == "total":
                 doc_set.run_pages_total = event[1]
             elif kind == "progress":
                 doc_set.run_message = event[1]
@@ -494,8 +572,11 @@ class RunQueue:
                 result = event[1]
             elif kind == "error":
                 error = event[1]
-        _stop(child)
-        self.child = None
+        return result, error
+
+    def _after_run(self, doc_set: DocSet, result, error) -> None:
+        from . import pdf_processor
+
         if error is not None:
             if self.stopping:
                 error = "the app was closed while it ran - run it again"
@@ -510,6 +591,38 @@ class RunQueue:
         # them, are not kept a moment longer than its results need them
         pdf_processor.forget_ocr(doc_set.files)
         shutil.rmtree(doc_set.uploads, ignore_errors=True)
+
+
+class _Turn:
+    """Parent side: a run's turn at the model slot, taken when its child
+    first needs a model and kept until it is done with them - Kev for the
+    final check, then the local model for the flagged pages in its place."""
+
+    def __init__(self) -> None:
+        self.lease = None
+
+    def load(self, doc_set: DocSet, name: str) -> tuple[str | None, str]:
+        from . import models, ocr_pool
+
+        if self.lease is None:
+            def waiting() -> None:
+                doc_set.run_message = ("Waiting for the models - another set's review is "
+                                       "using the local model")
+            self.lease = models.SLOT.acquire(on_wait=waiting)
+        doc_set.run_message = ("Starting Kev for the final check" if name == "kev"
+                               else "Starting the local model to read the flagged pages")
+        # the readers ahead of the run are twelve gigabytes beside the model;
+        # they start again when next wanted. Not while they read another set:
+        # its reading would stop where it stood.
+        if not ocr_pool.busy():
+            ocr_pool.shutdown(wait=True)
+        url = self.lease.load(name)
+        return url, "" if url else models.SLOT.note(name)
+
+    def release(self) -> None:
+        lease, self.lease = self.lease, None
+        if lease is not None:
+            lease.release()
 
 
 def _mark_interrupted(results: Path, marker: str) -> None:

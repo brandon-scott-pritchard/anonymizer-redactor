@@ -89,7 +89,8 @@ Neither changes anything: flagged pages are listed in `final-check.txt` in
 the set's results folder, and the Run step says how many. Kev answers yes or
 no for a page, never where, so nothing it says is applied blind.
 
-Kev is started with the app and stopped with it, offline (its weights on
+Kev is started when a set's final check needs it (see [one model at a
+time](#the-local-model)) and stopped with the app, offline (its weights on
 disk, `HF_HUB_OFFLINE=1`), on a port of its own; a watcher stops it if the app
 dies without closing, so a model holding ten gigabytes is never left behind.
 It lives outside the app, in its own folder with its own Python
@@ -105,6 +106,48 @@ cd ~/Coding/kev && uv run --extra serve python -m kev.serve --run jaredpalmer/ke
 The last line downloads the weights once (about 9 GB); stop it when it says
 it is serving. Without Kev the check runs with the matcher alone and the
 report says so. It adds about half a second a page on an M3 Max.
+
+### The local model
+
+An optional local language model (`redactor/llm.py`) is asked two things
+the rules cannot settle alone:
+
+- **At review**, after the scan, which of the people and businesses found are
+  the same real person or business—OCR misreadings ("HARRlNGTON",
+  "Harringten"), nicknames, initials, hyphenated or maiden forms
+  (`redactor/llm_grouping.py`). Each form it merges takes the person's
+  invented name in its own shape, is marked "merged by the local model" in
+  the review list, and comes out again with **Split out** like any other
+  form. What it says is checked first: two parties who share a surname, a
+  child and an adult, two people with different first names, or two rows
+  registered apart on purpose are never merged. A business that carries a
+  person's name keeps its business words and takes their invented surname
+  ("Harrington Enterprises" becomes "<invented surname> Enterprises").
+- **After the final check**, what on each flagged page still names a ticked
+  person, quoted word for word. A quote that is really on the page becomes
+  one more written form of that person, the file is made again from its
+  original, and the page is read back by the matcher and the model—at most
+  twice. `final-check.txt` then lists what was fixed and rechecked, and what
+  is still to look at, with any quote it could not fix. A quote not on the
+  page is never applied. Until the model has been tested against a labelled
+  corpus it never clears a flag (`LLM_MAY_CLEAR` in `redactor/audit.py` is
+  off): a page it cannot confirm stays on the list.
+
+It serves an OpenAI-style chat API (`mlx_lm.server`) on 127.0.0.1, offline,
+in its own process group with the same watcher as Kev, and nothing is ever
+sent anywhere else. Point it at a model with `REDACTOR_LLM_PYTHON` (a Python
+with `mlx-lm` installed; default `~/Coding/llm/.venv/bin/python`) and
+`REDACTOR_LLM_MODEL` (a model folder or repo id already on disk; default
+`LLM_MODEL` in `redactor/llm.py`); `REDACTOR_LLM=0` turns it off. Without it
+every step runs as it did and the review page or `final-check.txt` says so.
+
+**One model at a time.** Kev (about ten gigabytes) and the local model
+(about twenty) are never loaded together (`redactor/models.py`). Neither is
+started with the app: each step that needs one takes its turn at a single
+slot, in the order asked; the slot stops the other model, waits for it to be
+gone, then starts the one wanted. A queued run asks for Kev for its final
+check, then—only if a page was flagged—for the local model in its place. A
+model left loaded is stopped after two minutes nobody has asked for it.
 
 ### OCR
 
@@ -768,6 +811,9 @@ redactor/
   review.py           name-list and review decisions, shared by both UIs
   photo.py            photos and screenshots of documents, made into clean PDFs
   grouping.py         one review row per person, address or number, however written
+  llm.py              the optional local language model, started when needed
+  llm_grouping.py     the local model's merges of the review list, checked
+  models.py           Kev and the local model, one loaded at a time
   feedback.py         classification error reports and the mailto draft
   docx_processor.py   OOXML-level DOCX reading and rewriting
   pdf_processor.py    PyMuPDF redaction, image blackout, and the OCR path

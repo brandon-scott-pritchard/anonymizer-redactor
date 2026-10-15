@@ -15,8 +15,15 @@ Neither changes anything. A flagged page is listed for the operator to look at;
 Kev answers yes or no for a page and cannot say where, so nothing it says is
 safe to apply blind.
 
-Kev runs as a separate local service, started with the app and stopped with
-it (:class:`KevService`), offline - its weights are on disk and it is never
+A third reader, the local language model (:mod:`redactor.llm`), is asked of
+each flagged page what on it still names a ticked person, word for word. A
+quote really on the page becomes one more written form of that person, the
+file is made again and its pages read back (:func:`read_flagged`). What it
+cannot fix stays listed; it never clears a flag while LLM_MAY_CLEAR is off.
+
+Kev runs as a separate local service (:class:`KevService`), started when a
+final check needs it - never beside the local model (see models.py) - and
+stopped with the app, offline - its weights are on disk and it is never
 allowed to reach the network. It lives in its own folder with its own Python
 (``REDACTOR_KEV_DIR``, by default ``~/Coding/kev``); where it is missing the
 check runs with the matcher alone and says so.
@@ -25,8 +32,10 @@ check runs with the matcher alone and says so.
 from __future__ import annotations
 
 import atexit
+import copy
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -71,7 +80,7 @@ def _free_port() -> int:
 
 
 class KevService:
-    """Kev, started with the app and stopped with it.
+    """Kev, started when it is needed and stopped with the app.
 
     Started in its own process group and watched: a small watcher process
     stops it the moment the app's process is gone, so an app that crashed or
@@ -229,6 +238,19 @@ class Flag:
     page: int                      # 1-based
     kev: float | None              # None when Kev was not asked
     matched: list[str] = field(default_factory=list)
+    # what the page reads, for the local model to look at; never written out
+    text: str = field(default="", repr=False, compare=False)
+    # (quote, person): what the local model found on it that could not be fixed
+    quotes: list[tuple[str, str]] = field(default_factory=list)
+    note: str = ""
+
+
+@dataclass
+class Fix:
+    """A flagged page the local model's quotes fixed, read back clean."""
+    file: str
+    page: int
+    quotes: list[tuple[str, str]]  # (quote, person)
 
 
 @dataclass
@@ -237,10 +259,18 @@ class Check:
     flags: list[Flag] = field(default_factory=list)
     kev_note: str = ""
     path: Path | None = None
+    # after the local model's reading (read_flagged): None when it did not read
+    still: list[Flag] | None = None
+    fixed: list[Fix] = field(default_factory=list)
+    cleared: list[Flag] = field(default_factory=list)
+    llm_note: str = ""
 
     def summary(self) -> dict:
         return {"pages": self.pages, "flagged": len(self.flags), "kev": self.kev_note,
-                "file": str(self.path) if self.path else ""}
+                "file": str(self.path) if self.path else "",
+                "fixed": len(self.fixed), "cleared": len(self.cleared),
+                "still": len(self.flags) if self.still is None else len(self.still),
+                "llm": self.llm_note}
 
 
 def _ticked_people(store) -> list[str]:
@@ -270,51 +300,80 @@ def _page_texts(path: Path):
                 yield index + 1, page.get_text("text")
 
 
-def check_archive(archive: Path, store, settings, out_dir: Path, kev_url: str | None,
-                  progress=lambda message, fraction: None) -> Check:
-    """Read every delivered page back and list the pages to look at."""
-    from . import engine, ocr_pool, pdf_processor, review
+class _Reader:
+    """The two readers of the final check, for one store's ticked people."""
 
-    check = Check(kev_note=("Kev " + KEV_RUN + " and the name matcher") if kev_url
-                  else "the name matcher only - Kev was not running")
-    people = _ticked_people(store)
-    if not people or archive is None or not Path(archive).exists():
-        return check
-    matcher_store, _ = review.build_store([(name, "person") for name in people])
-    plain = engine.Settings(use_ner=False)
-    matcher = engine.PersonMatcher(matcher_store, plain)
+    def __init__(self, store, check: Check, kev_url: str | None) -> None:
+        from . import engine, review
+
+        self.check = check
+        self.kev_url = kev_url
+        self.people = _ticked_people(store)
+        self.store, _ = review.build_store([(name, "person") for name in self.people])
+        self.settings = engine.Settings(use_ner=False)
+        self.matcher = engine.PersonMatcher(self.store, self.settings)
+
+    def flag(self, member: str, number: int, text: str) -> Flag | None:
+        from . import engine
+
+        if not text.strip():
+            return None
+        hits = engine.scan_text(text, self.store, self.settings, self.matcher)
+        matched = sorted({h.text for h in hits if h.category in ("person", "minor")})
+        score = None
+        if self.kev_url:
+            try:
+                score = ask_kev(self.kev_url, text, self.people)
+            except Exception:
+                self.kev_url = None
+                self.check.kev_note = "the name matcher only - Kev stopped answering"
+        if matched or (score is not None and score >= KEV_THRESHOLD):
+            return Flag(member, number, score, matched, text=text)
+        return None
+
+
+def _read_members(archive: Path, members: list[str] | None, progress, label: str):
+    """(member, page number, text) for every page of the archive's PDFs and
+    Word files - or of ``members`` alone."""
+    from . import ocr_pool, pdf_processor
 
     with tempfile.TemporaryDirectory(prefix="final-check-") as tmp:
         with zipfile.ZipFile(archive) as zf:
-            members = [m for m in zf.namelist() if m.lower().endswith((".pdf", ".docx"))]
-            for member in members:
+            chosen = [m for m in zf.namelist() if m.lower().endswith((".pdf", ".docx"))
+                      and (members is None or m in members)]
+            for member in chosen:
                 target = Path(tmp) / member
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(zf.read(member))
-        files = [Path(tmp) / m for m in members]
+        files = [Path(tmp) / m for m in chosen]
         # a redacted scan has no text to check but its picture: read it, a few
         # pages at once, as the run read the originals
         ocr_pool.read_ahead(files)
         total = max(pipeline_pages(files), 1)
         done = 0
-        for member, path in zip(members, files):
-            for number, text in _page_texts(path):
-                done += 1
-                progress(f"Final check: page {done:,} of {total:,}", done / total)
-                check.pages += 1
-                if not text.strip():
-                    continue
-                hits = engine.scan_text(text, matcher_store, plain, matcher)
-                matched = sorted({h.text for h in hits if h.category in ("person", "minor")})
-                score = None
-                if kev_url:
-                    try:
-                        score = ask_kev(kev_url, text, people)
-                    except Exception:
-                        kev_url, check.kev_note = None, "the name matcher only - Kev stopped answering"
-                if matched or (score is not None and score >= KEV_THRESHOLD):
-                    check.flags.append(Flag(member, number, score, matched))
-        pdf_processor.forget_ocr(files)
+        try:
+            for member, path in zip(chosen, files):
+                for number, text in _page_texts(path):
+                    done += 1
+                    progress(f"{label}: page {done:,} of {total:,}", done / total)
+                    yield member, number, text
+        finally:
+            pdf_processor.forget_ocr(files)
+
+
+def check_archive(archive: Path, store, settings, out_dir: Path, kev_url: str | None,
+                  progress=lambda message, fraction: None) -> Check:
+    """Read every delivered page back and list the pages to look at."""
+    check = Check(kev_note=("Kev " + KEV_RUN + " and the name matcher") if kev_url
+                  else "the name matcher only - Kev was not running")
+    if not _ticked_people(store) or archive is None or not Path(archive).exists():
+        return check
+    reader = _Reader(store, check, kev_url)
+    for member, number, text in _read_members(Path(archive), None, progress, "Final check"):
+        check.pages += 1
+        flag = reader.flag(member, number, text)
+        if flag is not None:
+            check.flags.append(flag)
 
     check.path = Path(out_dir) / "final-check.txt"
     check.path.write_text(render(check), encoding="utf-8")
@@ -326,28 +385,410 @@ def pipeline_pages(files) -> int:
     return pipeline.count_pages(files) + sum(1 for f in files if f.suffix.lower() == ".docx")
 
 
+def _why(flag: Flag) -> list[str]:
+    why = []
+    if flag.matched:
+        why.append("still reads " + ", ".join(f'"{m}"' for m in flag.matched))
+    if flag.kev is not None and flag.kev >= KEV_THRESHOLD:
+        why.append(f"Kev thinks a ticked name is still there ({flag.kev:.0%})")
+    return why
+
+
+def _quoted(quotes) -> str:
+    return ", ".join(f'"{quote}" ({person})' for quote, person in quotes)
+
+
 def render(check: Check) -> str:
+    changed = bool(check.fixed)
     lines = [
         "FINAL CHECK",
         "",
         f"Every delivered page was read back - {check.pages:,} page(s) - by {check.kev_note},",
-        "for the names that were ticked. Nothing was changed. Look at each page below",
-        "before the archive goes anywhere.",
+        "for the names that were ticked. "
+        + ("Only the pages the local model fixed were changed." if changed
+           else "Nothing was changed."),
+        "Look at each page below before the archive goes anywhere.",
         "",
         "This list names the real people it looked for: keep it with the mapping key,",
         "away from anything you deliver.",
         "",
     ]
+    if check.still is None:
+        if not check.flags:
+            lines.append("No page was flagged.")
+        else:
+            lines.append(f"{len(check.flags)} page(s) to look at:")
+            lines.append("")
+            for flag in check.flags:
+                lines.append(f"  {flag.file}, page {flag.page}: {'; '.join(_why(flag))}")
+        if check.flags and check.llm_note:
+            lines += ["", f"The local model did not read the flagged pages: {check.llm_note}."]
+        return "\n".join(lines) + "\n"
+
     if not check.flags:
         lines.append("No page was flagged.")
-    else:
-        lines.append(f"{len(check.flags)} page(s) to look at:")
+    lines.append(f"The local model ({check.llm_note}) read the flagged pages and quoted")
+    lines.append("what it found; only a quote found word for word on the page was used.")
+    lines.append("")
+    if check.fixed:
+        lines.append(f"Fixed by the local model and rechecked - {len(check.fixed)} page(s):")
         lines.append("")
-        for flag in check.flags:
-            why = []
-            if flag.matched:
-                why.append("still reads " + ", ".join(f'"{m}"' for m in flag.matched))
-            if flag.kev is not None and flag.kev >= KEV_THRESHOLD:
-                why.append(f"Kev thinks a ticked name is still there ({flag.kev:.0%})")
+        for fix in check.fixed:
+            lines.append(f"  {fix.file}, page {fix.page}: {_quoted(fix.quotes)} - now replaced")
+        lines.append("")
+    if check.still:
+        lines.append(f"Still to look at - {len(check.still)} page(s):")
+        lines.append("")
+        for flag in check.still:
+            why = _why(flag) + ([flag.note] if flag.note else [])
+            if flag.quotes:
+                why.append("the local model found " + _quoted(flag.quotes)
+                           + " but could not fix it")
             lines.append(f"  {flag.file}, page {flag.page}: {'; '.join(why)}")
-    return "\n".join(lines) + "\n"
+        lines.append("")
+    elif check.flags:
+        lines.append("Nothing is left to look at.")
+        lines.append("")
+    if check.cleared:
+        lines.append(f"Cleared by the local model - {len(check.cleared)} page(s). It found no "
+                     "ticked name on these; look if in doubt:")
+        for flag in check.cleared:
+            lines.append(f"  {flag.file}, page {flag.page}: {'; '.join(_why(flag))}")
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
+# --------------------------------------------------------------------------
+# the local model's reading of the flagged pages
+# --------------------------------------------------------------------------
+
+# A flagged page the local model found nothing on, and the matcher nothing
+# either, may be cleared - moved to the end of the list - once that has been
+# tried against a labelled corpus. Until then it is listed like any other.
+LLM_MAY_CLEAR = False
+LLM_ROUNDS = 2                    # fix and read again, at most this many times
+FORMS_SHOWN = 12                  # a person's known written forms put to the model
+
+PAGE_SYSTEM = (
+    "You check pages that were anonymized: the real people listed below should have been "
+    "removed or replaced with invented names everywhere. Quote, word for word exactly as "
+    "printed on the page, every place where one of these real people is still named - in "
+    "full, by surname or first name alone, by initials, misspelled or misread by OCR "
+    "(HARRlNGTON, Harringten), glued into other words (4417IntuPymdHARRINGTON), or in "
+    "capitals. Copy each quote character for character from the page, including any "
+    "letters it is glued to. Do not quote invented names, placeholders such as "
+    "[PERSON-1] or [REDACTED], or other people's names. If no listed person is named, "
+    "answer with an empty list.")
+PAGE_SCHEMA = ('{"found": [{"quote": "<the text exactly as on the page>", '
+               '"person": "<which listed person, by number>"}]}')
+
+
+def _heads(store) -> list:
+    return [e for e in store.entities.values()
+            if e.enabled and e.category in ("person", "minor") and e.parent is None]
+
+
+def _forms(store, head) -> list[str]:
+    from . import grouping
+
+    return [m.canonical for m in grouping.members(store, head)][:FORMS_SHOWN]
+
+
+def _ask_page(url: str, text: str, heads: list, store) -> list[tuple[str, str]]:
+    """(quote, person) the model says still names one of ``heads`` on the page."""
+    from . import llm
+
+    listing = "\n".join(
+        f"{i}. {head.canonical}"
+        + (f" (also written: {', '.join(_forms(store, head))})" if _forms(store, head) else "")
+        for i, head in enumerate(heads, 1))
+    answer = llm.chat(url, PAGE_SYSTEM,
+                      "The real people:\n" + listing + "\n\nThe page:\n" + text[:PAGE_CHARS],
+                      PAGE_SCHEMA, max_tokens=1024)
+    found = answer.get("found", []) if isinstance(answer, dict) else answer
+    out = []
+    for item in found if isinstance(found, list) else []:
+        if isinstance(item, dict):
+            out.append((str(item.get("quote") or "").strip(), str(item.get("person") or "")))
+    return out
+
+
+def _person(said: str, heads: list, store):
+    said = said.strip().rstrip(".")
+    if said.isdigit() and 1 <= int(said) <= len(heads):
+        return heads[int(said) - 1]
+    folded = said.casefold()
+    for head in heads:
+        if folded == head.canonical.casefold() or folded in (f.casefold()
+                                                            for f in _forms(store, head)):
+            return head
+    return None
+
+
+def _squash(text: str) -> str:
+    return " ".join(text.split()).casefold()
+
+
+def _invented_words(store) -> set[str]:
+    out: set[str] = set()
+    for entity in store.entities.values():
+        out.update(w.casefold() for w in re.findall(r"[A-Za-z]+", entity.replacement or ""))
+    return out | {"redacted"}
+
+
+def _name_parts(store, head) -> set[str]:
+    from . import grouping
+
+    parts: set[str] = set()
+    for entity in [head, *grouping.members(store, head)]:
+        person = entity.person
+        if person is None:
+            continue
+        for piece in (person.first, *person.middles, person.last):
+            for bit in re.split(r"[-\s]", piece or ""):
+                bit = re.sub(r"[^a-z]", "", bit.casefold())
+                if bit:
+                    parts.add(bit)
+    return parts
+
+
+def _resembles(quote: str, parts: set[str]) -> bool:
+    """Whether a quote looks like the person's name at all: holding one of
+    its words, a misreading of one, or its initials. A model that quotes
+    "the" must not have every "the" replaced."""
+    from .llm_grouping import similar
+
+    letters = re.sub(r"[^a-z]", "", quote.casefold())
+    words = [w.casefold() for w in re.findall(r"[A-Za-z0-9|!]+", quote)]
+    if any(len(p) >= 4 and p in letters for p in parts):
+        return True
+    if any(len(p) >= 4 and similar(w, p) for w in words for p in parts):
+        return True
+    if any(len(p) < 4 and w == p for w in words for p in parts):
+        return True
+    initials = {p[0] for p in parts}
+    return 2 <= len(letters) <= 4 and set(letters) <= initials and len(set(letters)) == len(letters)
+
+
+def _confirmed(found, text: str, heads: list, store) -> tuple[list, int]:
+    """The quotes that are really on the page and name a listed person:
+    (quote, head) pairs, and how many quotes were not on the page."""
+    page, invented = _squash(text), _invented_words(store)
+    out, missing = [], 0
+    for quote, said in found:
+        head = _person(said, heads, store)
+        if head is None or len(quote) < 2:
+            continue
+        if _squash(quote) not in page:
+            missing += 1                        # not on the page: never applied
+            continue
+        words = {w.casefold() for w in re.findall(r"[A-Za-z]+", quote)}
+        if words and words <= invented:
+            continue                            # an invented name, or a placeholder
+        if not _resembles(quote, _name_parts(store, head)):
+            continue
+        if (quote, head) not in out:
+            out.append((quote, head))
+    return out, missing
+
+
+def _register(store, quote: str, head, text: str) -> bool:
+    """The quote, and any word it is glued into, made written forms of the
+    person in ``store``. True when anything new was added."""
+    from . import llm_grouping
+
+    added = False
+    known = {v.text.casefold() for e in [head, *_members(store, head)] for v in e.variants}
+    if quote.casefold() not in known:
+        added |= llm_grouping.add_form(store, head, quote, "found by the final check") \
+            is not None
+    # the word a glued quote sits in: matched whole, only the name swapped
+    folded, at = text.casefold(), -1
+    while (at := folded.find(quote.casefold(), at + 1)) >= 0:
+        added |= _register_glued(store, quote, head, text, at)
+    return added
+
+
+def _register_glued(store, quote: str, head, text: str, at: int) -> bool:
+    from . import llm_grouping
+
+    added = False
+    start, end = at, at + len(quote)
+    while start > 0 and not text[start - 1].isspace():
+        start -= 1
+    while end < len(text) and not text[end].isspace():
+        end += 1
+    for token in re.finditer(r"\S+", text[start:end]):
+        word = token.group(0).strip(".,;:()[]\"'")
+        lo = start + token.start() + token.group(0).find(word)
+        hi = lo + len(word)
+        inner_lo, inner_hi = max(lo, at), min(hi, at + len(quote))
+        if inner_lo >= inner_hi or (lo, hi) == (inner_lo, inner_hi):
+            continue
+        piece = text[inner_lo:inner_hi]
+        stand_in = llm_grouping.stand_in(store, head, piece)
+        written = text[lo:inner_lo] + stand_in + text[inner_hi:hi]
+        added |= llm_grouping.add_form(store, head, word, "glued, found by the final check",
+                                       written=written) is not None
+    return added
+
+
+def _members(store, head) -> list:
+    from . import grouping
+    return grouping.members(store, head)
+
+
+def _rerun(members: list[str], result, store, settings, archive: Path) -> dict[str, str]:
+    """The delivered files ``members`` made again from their originals with
+    ``store``, put back into the archive. {member: why} for any that could
+    not be."""
+    from . import docx_processor, engine, pdf_processor
+
+    by_member = {o.delivered_name: o for o in getattr(result, "processed", [])}
+    failed: dict[str, str] = {}
+    made: dict[str, Path] = {}
+    matcher = engine.PersonMatcher(store, settings)
+    work = Path(tempfile.mkdtemp(prefix="final-fix-"))
+    try:
+        for member in members:
+            outcome = by_member.get(member)
+            if outcome is None or not Path(outcome.source).exists():
+                failed[member] = "its original was not to hand to make it again"
+                continue
+            target = work / f"{len(made)}{Path(member).suffix}"
+            try:
+                process = docx_processor.process if outcome.kind == "docx" \
+                    else pdf_processor.process
+                detail = process(Path(outcome.source), target, store, settings, matcher)
+            except Exception as exc:
+                failed[member] = f"making it again failed ({type(exc).__name__})"
+                continue
+            if detail.refused or not target.exists():
+                failed[member] = "making it again was refused"
+                continue
+            made[member] = target
+        if made:
+            _replace_members(archive, made)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    return failed
+
+
+def _replace_members(archive: Path, made: dict[str, Path]) -> None:
+    partial = archive.with_name(archive.name + ".part")
+    with zipfile.ZipFile(archive) as source, \
+            zipfile.ZipFile(partial, "w", zipfile.ZIP_DEFLATED) as target:
+        for info in source.infolist():
+            if info.filename in made:
+                target.write(made[info.filename], arcname=info.filename)
+            else:
+                target.writestr(info, source.read(info.filename))
+    os.replace(partial, archive)
+
+
+def read_flagged(check: Check, result, store, settings, out_dir: Path, kev_url: str | None,
+                 llm_url: str, progress=lambda message, fraction: None):
+    """The local model reads each flagged page for what is still a real name.
+
+    Each quote found word for word on the page becomes one more written form
+    of its person, the files those pages came from are made again with it,
+    and their pages are read back by all three readers - at most
+    LLM_ROUNDS times. Returns the store with the forms added, or None when
+    nothing was added. final-check.txt is written again either way.
+    """
+    from . import llm
+
+    check.still, check.llm_note = [], f"{llm.llm_model()}, offline"
+    check.path = check.path or Path(out_dir) / "final-check.txt"
+    archive = Path(result.archive) if result is not None and result.archive else None
+    heads = _heads(store)
+    if not check.flags or archive is None or not heads:
+        _write(check)
+        return None
+    fixed_store = copy.deepcopy(store)
+    reader = _Reader(store, check, kev_url)
+    pending = list(check.flags)
+    applied: dict[tuple[str, int], list] = {}      # page -> quotes applied to it
+    changed = False
+    try:
+        for round_ in range(LLM_ROUNDS + 1):
+            to_fix: dict[tuple[str, int], tuple[Flag, list]] = {}
+            for index, flag in enumerate(pending):
+                progress(f"The local model is reading flagged page {index + 1:,} of "
+                         f"{len(pending):,}", index / max(len(pending), 1))
+                found, missing = _confirmed(_ask_page(llm_url, flag.text, heads, store),
+                                            flag.text, heads, store)
+                page = (flag.file, flag.page)
+                if not found:
+                    if _clean(flag) and page in applied:   # read back clean
+                        check.fixed.append(Fix(flag.file, flag.page, applied[page]))
+                        continue
+                    if not flag.matched and LLM_MAY_CLEAR and page not in applied:
+                        check.cleared.append(flag)
+                        continue
+                    if page in applied:
+                        flag.quotes = applied[page]
+                        flag.note = "made again with what the local model found, still flagged"
+                    else:
+                        flag.note = flag.note or (
+                            "the local model found no ticked name on it"
+                            + (f" ({missing} quote(s) it gave were not on the page)"
+                               if missing else ""))
+                    check.still.append(flag)
+                    continue
+                if round_ == LLM_ROUNDS:                 # no more making again
+                    flag.quotes = [(q, h.canonical) for q, h in found]
+                    check.still.append(flag)
+                    continue
+                if not any([_register(fixed_store, q, fixed_store.entities[h.key], flag.text)
+                            for q, h in found]):
+                    flag.quotes = [(q, h.canonical) for q, h in found]
+                    flag.note = "its names are already forms the run replaces"
+                    check.still.append(flag)
+                    continue
+                changed = True
+                to_fix[page] = (flag, found)
+            if not to_fix:
+                break
+            members = sorted({member for member, _number in to_fix})
+            progress("Making the fixed files again", 0.9)
+            failed = _rerun(members, result, fixed_store, settings, archive)
+            for page, (flag, found) in to_fix.items():
+                applied.setdefault(page, []).extend(
+                    (q, h.canonical) for q, h in found
+                    if (q, h.canonical) not in applied.get(page, []))
+            pending = []
+            for page, (flag, found) in list(to_fix.items()):
+                if page[0] in failed:
+                    flag.quotes = [(q, h.canonical) for q, h in found]
+                    flag.note = failed[page[0]]
+                    check.still.append(flag)
+                    del to_fix[page]
+            again = {member for member, _number in to_fix}
+            if not again:
+                break
+            for member, number, text in _read_members(archive, sorted(again), progress,
+                                                      "Reading the fixed pages back"):
+                if (member, number) not in to_fix:
+                    continue
+                pending.append(reader.flag(member, number, text)
+                               or Flag(member, number, None, [], text=text))
+    except Exception as exc:                        # what was not read stays listed
+        check.llm_note += f" - stopped answering ({type(exc).__name__})"
+        done = {(f.file, f.page) for f in check.still} | {(f.file, f.page) for f in check.fixed}
+        for flag in pending + check.flags:
+            if (flag.file, flag.page) not in done:
+                done.add((flag.file, flag.page))
+                check.still.append(flag)
+    check.still.sort(key=lambda f: (f.file, f.page))
+    _write(check)
+    return fixed_store if changed else None
+
+
+def _clean(flag: Flag) -> bool:
+    """Neither the matcher nor Kev sees a ticked name on the page."""
+    return not flag.matched and (flag.kev is None or flag.kev < KEV_THRESHOLD)
+
+
+def _write(check: Check) -> None:
+    if check.path is not None:
+        check.path.write_text(render(check), encoding="utf-8")

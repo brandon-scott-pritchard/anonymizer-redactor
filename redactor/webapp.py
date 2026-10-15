@@ -32,8 +32,8 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import (__version__, caption, categories, feedback, grouping, names as _names, ner,
-               ocr_pool, officials, pdf_processor, pipeline, review, sets)
+from . import (__version__, caption, categories, feedback, grouping, llm_grouping,
+               names as _names, ner, ocr_pool, officials, pdf_processor, pipeline, review, sets)
 from .engine import Settings
 from .mapping import MappingStore
 
@@ -314,6 +314,9 @@ def _entity_row(entity, store=None) -> dict:
         # a head row: its forms ride along, and Times counts all of them
         row["forms"] = [_entity_row(e) for e in grouping.members(store, entity)]
         row["occurrences"] = grouping.group_total(store, entity)
+        if not row["note"] and any(f["note"].startswith(llm_grouping.NOTE)
+                                   for f in row["forms"]):
+            row["note"] = llm_grouping.NOTE
     return row
 
 
@@ -327,7 +330,8 @@ def _entities_payload() -> dict:
     return {"entities": [_entity_row(e, store) for e in heads],
             "risky": risky[:12], "unused": unused,
             "active": sum(1 for e in store.entities.values() if e.enabled),
-            "instructions": review.REVIEW_INSTRUCTIONS}
+            "instructions": review.REVIEW_INSTRUCTIONS,
+            "llm": {"note": store.merge_note, "merged": llm_grouping.merged_rows(store)}}
 
 
 # --------------------------------------------------------------------------
@@ -648,10 +652,47 @@ async def build_review(request: Request):
             settings.protected_names = _reprotect(entries)
         pipeline.prescan(files, store, settings, progress)
         review.carry_decisions(store, carryover)
+        _merge_with_llm(store, progress)
         SESSION.store = store
         return {**_entities_payload(), **_guard_payload()}
 
     return {"job": _start_job(work, lambda: pipeline.count_pages(files))}
+
+
+def _merge_with_llm(store: MappingStore, progress) -> None:
+    """The local model's say on which names are one person, folded in.
+
+    Loaded through the model slot - Kev is stopped first, and a set's final
+    check using the slot is waited for. Where the model is missing, or does
+    not come up in time, the list is the rules' alone and the page says so.
+    """
+    from . import llm, models
+
+    if len(llm_grouping.candidates(store)) < 2:
+        return
+    if os.environ.get("REDACTOR_LLM", "1") == "0" or not llm.llm_python().is_file():
+        llm.LLM.start()                            # only to say why not
+        store.merge_note = f"The local model was not used ({llm.LLM.note})."
+        return
+
+    def waiting() -> None:
+        progress("Waiting for the local model (another set's final check is using it)", 0.95)
+
+    with models.SLOT.use("llm", on_wait=waiting) as url:
+        if url is None:
+            store.merge_note = (f"The local model was not used ({models.SLOT.note('llm')}) - "
+                                "names were grouped by the rules alone.")
+            return
+        try:
+            merges = llm_grouping.propose_merges(store, url, progress)
+            done = llm_grouping.apply_merges(store, merges)
+        except Exception as exc:                   # the rules' list stands
+            store.merge_note = (f"The local model could not be asked ({exc}) - names were "
+                                "grouped by the rules alone.")
+            return
+    store.merge_note = (f"The local model merged {len(done)} name(s) into the person or "
+                        "business they are - each is marked; Split out undoes one."
+                        if done else "The local model found no other names to merge.")
 
 
 @app.patch("/api/entities")
@@ -673,6 +714,7 @@ async def edit_entity(request: Request):
         if not replacement.strip():
             raise HTTPException(422, "The replacement cannot be empty.")
         review.set_replacement(entity, replacement, SESSION.store)
+    llm_grouping.settle(SESSION.store)             # a regrouping keeps the model's merges
     return _entities_payload()
 
 
@@ -685,6 +727,7 @@ async def split_entity(request: Request):
     if entity is None:
         raise HTTPException(404, "no such entity")
     grouping.split(SESSION.store, entity)
+    llm_grouping.settle(SESSION.store)
     return _entities_payload()
 
 
@@ -771,6 +814,8 @@ def _kev_note() -> str:
     from . import audit
     if audit.KEV.note.startswith("running") and audit.KEV.url is None:
         return "stopped unexpectedly - the final check uses the name matcher alone"
+    if audit.KEV.note in ("not started", "stopped"):
+        return "started when a set's final check needs it"
     return audit.KEV.note
 
 
@@ -936,9 +981,8 @@ def main() -> int:
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
 
-    from . import audit
-
-    audit.KEV.start()                     # the final check's model; stopped on exit
+    # Kev and the local model are started when a step needs one, one at a
+    # time (see models.py), and stopped on exit
     url = f"http://127.0.0.1:{port}/?token={TOKEN}"
     # flush: the frozen app is windowed, so stdout is block-buffered when
     # redirected and the URL would otherwise never reach a log file
