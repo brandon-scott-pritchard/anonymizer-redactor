@@ -649,12 +649,40 @@ def _register(store, quote: str, head, text: str, span: tuple[int, int]) -> bool
     from . import llm_grouping
 
     added = False
+    # a quote that is the name glued to more - "HARRINGTONENTERPRISES" - is
+    # narrowed to the name: registered whole it read "TOLK", the business lost
+    inner = _name_inside(quote, head)
+    if inner is not None:
+        a, b = inner
+        quote, span = quote[a:b], (span[0] + a, span[0] + b)
     known = {v.text.casefold() for e in [head, *_members(store, head)] for v in e.variants}
     if quote.casefold() not in known:
         added |= llm_grouping.add_form(store, head, quote, "found by the final check") \
             is not None
     # the word a glued quote sits in: matched whole, only the name swapped
     return _register_glued(store, head, text, *span) or added
+
+
+def _name_inside(quote: str, head) -> tuple[int, int] | None:
+    """Where the person's own name sits in a longer glued quote, or None
+    when the quote is the name (or a misspelling of it) and nothing more."""
+    person = head.person
+    if person is None:
+        return None
+    folded = quote.casefold()
+    spans = []
+    for part in (person.first, *person.middles, person.last):
+        part = (part or "").strip(".").casefold()
+        if len(part) >= 3:
+            at = folded.find(part)
+            if at >= 0:
+                spans.append((at, at + len(part)))
+    if not spans:
+        return None
+    a, b = min(s for s, _e in spans), max(e for _s, e in spans)
+    if (a, b) == (0, len(quote)):
+        return None
+    return a, b
 
 
 def _register_glued(store, head, text: str, at: int, stop: int) -> bool:

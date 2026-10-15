@@ -472,6 +472,8 @@ def test_a_name_glued_into_a_bank_line_is_fixed_keeping_the_rest(fake_llm, answe
     head = store.entities["person:kyle d harrington"]
     assert "HARRINGTON" not in text.upper().replace(head.surrogate.last.upper(), "")
     assert "4417IntuPymd" in text and "2,485.81" in text
+    # only the name swapped: the business glued to it stays
+    assert f"{head.surrogate.last.upper()}ENTERPRISES" in text.upper()
     assert len(check.fixed) == 1
 
 
