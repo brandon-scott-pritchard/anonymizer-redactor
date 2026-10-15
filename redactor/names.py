@@ -34,6 +34,34 @@ RISKY_SINGLE_TOKENS = {
 }
 
 
+# Words no name is ever written as on its own. A heading or a merchant ticked
+# as a person - "The Home Depot", "Statement of Account" - made every "the"
+# in the case a stand-in: 1,456 of them in one household's statements.
+FUNCTION_WORDS = frozenset("""
+a an and the of for to in on at by with from or as is it its this that per via
+usa us inc llc co corp ltd na n.a bank
+""".split())
+
+_ORDINARY: frozenset[str] | None = None
+
+
+def ordinary_word(word: str) -> bool:
+    """An everyday English word, from the bundled list: a name written as one
+    alone ("Baker", "Hope") is matched only with its capital - see engine."""
+    global _ORDINARY
+    if _ORDINARY is None:
+        import gzip
+
+        from .places import _data_file
+        try:
+            _ORDINARY = frozenset(gzip.decompress(
+                _data_file().with_name("common_words.txt.gz").read_bytes()).decode().split())
+        except OSError:
+            _ORDINARY = frozenset()
+    word = word.casefold()
+    return word in _ORDINARY or (word.endswith("s") and word[:-1] in _ORDINARY)
+
+
 @dataclass(frozen=True)
 class NameVariant:
     """One written form of a name."""
@@ -42,6 +70,9 @@ class NameVariant:
     components: tuple         # e.g. ("first", "last") or ("initial:first", "last")
     layout: str               # "plain" | "comma" | "title"
     risky: bool = False
+    # a single word that is also an everyday one ("Baker", "Hope"): matched
+    # only with its capital
+    everyday: bool = False
 
     @property
     def token_count(self) -> int:
@@ -153,11 +184,16 @@ def variants(name: PersonName, include_single_tokens: bool = True) -> list[NameV
         text = " ".join(text.split()).strip(" ,")
         if len(text) < 2:
             return
-        risky = len(components) == 1 and text.strip(".").casefold() in RISKY_SINGLE_TOKENS
+        word = text.strip(".").casefold()
+        if len(components) == 1 and word in FUNCTION_WORDS:
+            return                     # "The" of "The Home Depot" is nobody's name
+        risky = len(components) == 1 and word in RISKY_SINGLE_TOKENS
+        everyday = (len(components) == 1 and layout == "plain" and " " not in word
+                    and (risky or ordinary_word(word)))
         key = text.casefold()
         existing = out.get(key)
         if existing is None or len(components) > existing.token_count:
-            out[key] = NameVariant(text, components, layout, risky)
+            out[key] = NameVariant(text, components, layout, risky, everyday)
 
     n = len(parts)
     # every ordered subset of the components: first, last, first+last, first+middle, …

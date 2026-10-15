@@ -481,3 +481,30 @@ def test_the_same_party_reaching_the_check_twice_is_not_an_ambiguity():
 def test_an_ordinary_word_is_not_a_nickname():
     from redactor import names as _names
     assert _names.nickname_for("Marisol", ["Christine Vaughn"]) is None
+
+
+def test_a_name_that_is_an_everyday_word_is_matched_only_with_its_capital():
+    """Ticked as people, "Hope Baker" and "The Home Depot" made every "hope",
+    "baker" and "the" in a household's statements a stand-in - 29% of the
+    ordinary words on its typed pages."""
+    store = MappingStore()
+    store.add_person("Hope Baker")
+    store.add_person("The Home Depot")
+    out, _hits = _engine.scan_and_apply(
+        "I hope the baker baked. Hope Baker signed. BAKER, HOPE. The statement.",
+        store, _Settings(), "doc")
+    assert out.startswith("I hope the baker baked. ")
+    assert "Hope Baker" not in out and "BAKER" not in out
+    assert out.endswith("The statement.")
+
+
+@pytest.mark.parametrize("line,category", [
+    ("01/24 82633072107526 Summit Home #1177 Layton $96.00", "check_number"),
+    ("01/09 01/07 24974938269185115 RED ROBIN 7413 LAYTON 59.83", "check_number"),
+    ("Card number 4111 1111 1111 1111", "credit_card"),
+    ("***-**-6789", "ssn"),
+    ("XXX-XX-6789 dependent", "ssn"),
+])
+def test_a_rows_reference_is_not_a_card_and_a_masked_ssn_is_an_ssn(line, category):
+    from redactor import patterns
+    assert [m.category for m in patterns.scan(line)] == [category]

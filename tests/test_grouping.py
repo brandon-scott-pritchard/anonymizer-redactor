@@ -474,3 +474,22 @@ def test_a_business_carrying_the_family_name_wears_the_invented_one():
 def test_a_business_glued_and_spaced_is_one_business():
     store = _store(values=[("employer", "Red Canyon Lands", 4), ("employer", "REDCANYONLANDS")])
     assert _row(store, "REDCANYONLANDS").replacement == _row(store, "Red Canyon Lands").replacement
+
+
+def test_one_ssn_however_it_is_masked():
+    """"***-**-9016" read as an account, and "*****9016" - the same mask with
+    its hyphens dropped - tied to nothing."""
+    store = _store(values=[("ssn", "923-90-9016", 3), ("ssn", "XXX-XX-9016"),
+                           ("ssn", "***-**-9016"), ("masked_account", "*****9016"),
+                           ("masked_account", "*****5555")])
+    full = _row(store, "923-90-9016").replacement
+    for form in ("XXX-XX-9016", "***-**-9016", "*****9016"):
+        assert _row(store, form).replacement == full
+    assert _row(store, "*****5555").replacement != full
+    met_later = store.add_value("masked_account", "*****9016 ")
+    assert met_later.replacement == full or grouping.head_of(store, met_later).replacement == full
+
+
+def test_two_full_ssns_sharing_a_last_four_leave_the_mask_alone():
+    store = _store(values=[("ssn", "923-90-9016"), ("ssn", "931-22-9016"), ("ssn", "XXX-XX-9016")])
+    assert grouping.head_of(store, _row(store, "XXX-XX-9016")).canonical == "XXX-XX-9016"

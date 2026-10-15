@@ -60,6 +60,7 @@ def group(store: MappingStore) -> None:
     _group_values(store, ADDRESSES, _address_groups)
     _group_values(store, ORGS, _org_groups)
     _group_values(store, ACCOUNTS, _account_groups)
+    _ssn_forms(store)
     _group_values(store, PHONES, _same_key_groups(_phone_key))
     _group_values(store, EMAILS, _same_key_groups(_email_key))
     _address_notes(store)
@@ -128,6 +129,19 @@ def attach(store: MappingStore, entity: Entity) -> None:
     """
     if entity.is_person or entity.key in store.split_out:
         return
+    tail = _SSN_TAIL.fullmatch(entity.canonical.strip())
+    digits = re.sub(r"\D", "", entity.canonical)
+    if (entity.category == "ssn" and len(digits) == 4) or (entity.category in ACCOUNTS and tail):
+        last4 = digits[-4:]
+        owners = [e for e in store.entities.values()
+                  if e.category == "ssn" and e.parent is None and e is not entity
+                  and len(re.sub(r"\D", "", e.canonical)) == 9
+                  and re.sub(r"\D", "", e.canonical).endswith(last4)]
+        if len(owners) == 1:
+            entity.parent = owners[0].key
+            entity.replacement = owners[0].replacement
+            entity.group_note = "the same Social Security number, masked"
+            return
     for family, finder in ((ADDRESSES, _address_groups),
                            (ORGS, _org_groups),
                            (ACCOUNTS, _account_groups),
@@ -504,7 +518,7 @@ def _names_in_businesses(store: MappingStore) -> None:
     for entity in store.entities.values():
         if (entity.category in PEOPLE and entity.parent is None and entity.enabled
                 and entity.person is not None and entity.surrogate is not None
-                and len(entity.person.last.strip(".")) >= 3 and entity.surrogate.last):
+                and entity.surrogate.last and _a_family_name(entity.person)):
             families.append((entity.person.last, entity))
     if not families:
         return
@@ -537,6 +551,66 @@ def _names_in_businesses(store: MappingStore) -> None:
         if org.replacement:
             for member in members(store, org):
                 member.replacement = org.replacement
+
+
+# five marks and four digits: an SSN printed masked with its hyphens dropped
+_SSN_TAIL = re.compile(r"[*Xx•#.]{5}[\- ]?(\d{4})")
+
+
+def _ssn_forms(store: MappingStore) -> None:
+    """One SSN however it is printed: "923-90-9016", "XXX-XX-9016",
+    "***-**-9016" - and "*****9016", the same mask with its hyphens dropped,
+    which was read as an account. A masked form joins the one full number
+    with its last four; with no full number, the masked forms with the same
+    last four are one. Two full numbers sharing a last four are two people,
+    and a mask that could be either is left on its own."""
+    ssns = [e for e in store.entities.values()
+            if e.category == "ssn" and e.key not in store.split_out]
+    full: dict[str, list[Entity]] = defaultdict(list)
+    for entity in ssns:
+        digits = re.sub(r"\D", "", entity.canonical)
+        if len(digits) == 9:
+            full[digits[-4:]].append(entity)
+    masked = [e for e in ssns if len(re.sub(r"\D", "", e.canonical)) == 4]
+    masked += [e for e in store.entities.values()
+               if e.category in ACCOUNTS and e.key not in store.split_out
+               and _SSN_TAIL.fullmatch(e.canonical.strip())
+               and (full.get(_SSN_TAIL.fullmatch(e.canonical.strip()).group(1))
+                    or any(re.sub(r"\D", "", m.canonical) == _SSN_TAIL.fullmatch(
+                        e.canonical.strip()).group(1) for m in ssns))]
+    by_tail: dict[str, list[Entity]] = defaultdict(list)
+    for entity in masked:
+        by_tail[re.sub(r"\D", "", entity.canonical)[-4:]].append(entity)
+    for tail, forms in by_tail.items():
+        owners = full.get(tail, [])
+        if len(owners) > 1:
+            continue
+        head = owners[0] if owners else max(
+            (e for e in forms if e.category == "ssn"), key=_prevalence, default=None)
+        if head is None:
+            continue
+        for entity in forms:
+            if entity is not head:
+                entity.parent = head.key
+                entity.group_note = "the same Social Security number, masked"
+
+
+def _a_family_name(person: _names.PersonName) -> bool:
+    """A surname a business can be said to carry. Not a heading or a
+    merchant ticked as a person: "DELTA AIR" and "Hill AFB" on the list made
+    the Air Force base read "U.S. Dirks Force ... Dahl PAHL". Four letters
+    at least, and an everyday word ("Hill", "Baker") only beside a real
+    first name."""
+    last = person.last.strip(".")
+    if len(last) < 4 or not person.first or len(person.first.strip(".")) < 2:
+        return False
+    from . import ner
+    if not ner.likely_name(person.canonical, "person"):
+        return False
+    if _names.ordinary_word(last):
+        _common, given = ner._lists()
+        return person.first.strip(".").casefold() in given
+    return True
 
 
 def _org_key(text: str) -> tuple[str, ...]:

@@ -489,6 +489,11 @@ DETECTORS: tuple[Detector, ...] = (
     # -------------------------------------------------------- government ID --
     _d("ssn", r"(?<!\d)\d{3}-\d{2}-\d{4}(?!\d)", validator=valid_ssn, priority=95,
        digit=True),
+    # The SSN's own shape, masked: "***-**-6789", "XXX-XX-6789". Read as a
+    # masked account wherever no "SSN" label stood beside it - but nothing
+    # else is printed three marks, two marks, four digits.
+    _d("ssn", r"(?<![\w*•#\-])[*Xx•#]{3}[\- ][*Xx•#]{2}[\- ]\d{4}(?![\d\-])", priority=96,
+       digit=True),
     # an ITIN is labelled as one on a 1040 and on an IRS notice
     _d("ssn", labeled(("s\\.?s\\.?n\\.?", "social\\s+security", "soc\\.?\\s*sec\\.?",
                        "i\\.?t\\.?i\\.?n\\.?", "individual\\s+taxpayer\\s+identification"),
@@ -1245,7 +1250,14 @@ def scan(
                 continue
             if _overlaps(start, end, protected):
                 continue
-            found.append(Match(start, end, value, det.category, "pattern", det.priority))
+            category = det.category
+            if category == "credit_card" and m.start() == start and \
+                    _ROW_DATE_BEFORE.search(text[max(0, start - 40):start]):
+                # the reference number of a statement row: "01/24 82633072107526
+                # Summit Home" - a card number is never printed whole in a row,
+                # and one random number in ten passes the card checksum
+                category = "check_number"
+            found.append(Match(start, end, value, category, "pattern", det.priority))
 
     if any(m.category == "credit_card" and _CARD_TAIL.fullmatch(m.text) for m in found):
         streets = _street_starts(text)
@@ -1254,6 +1266,12 @@ def scan(
                          and m.start in streets)]
     return resolve(found)
 
+
+
+# A transaction row's date or dates, just before a number on the same line
+_ROW_DATE_BEFORE = re.compile(
+    r"(?:^|(?<=\s))(?:\d{1,2}/\d{1,2}(?:/\d{2,4})?|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|"
+    r"Oct|Nov|Dec)[a-z]*\.?[^\S\n]\d{1,2})(?:[^\S\n]+\d{1,2}/\d{1,2}(?:/\d{2,4})?)?[^\S\n]+$")
 
 
 def resolve(matches: list[Match]) -> list[Match]:

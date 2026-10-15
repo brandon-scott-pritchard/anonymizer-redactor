@@ -156,6 +156,15 @@ class EntityMatcher:
             bodies = []
             lookup: dict[str, tuple[_names.NameVariant, int]] = {}
             for variant, priority in usable:
+                if variant.everyday:
+                    # an everyday word that is also this person's name, alone:
+                    # only with its capital - "Baker", "BAKER", never "baker"
+                    word = variant.text
+                    bodies.append("(?-i:" + "|".join(
+                        _names.escape_token(form)
+                        for form in dict.fromkeys((word[:1].upper() + word[1:].lower(),
+                                                   word.upper()))) + ")")
+                    continue
                 bodies.append(r"\s+".join(_token_body(tok, variant.token_count)
                                           for tok in variant.text.split()))
                 lookup.setdefault(_exact_key(variant.text), (variant, priority))
