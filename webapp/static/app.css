@@ -350,3 +350,4 @@ details.skipped ul { max-height: 180px; overflow-y: auto; margin: 6px 0 0; paddi
 .resultsroot strong { color: var(--ink); word-break: break-all; }
 .card.setname label { display: flex; align-items: center; gap: 12px; font: 600 14px var(--sans); }
 .card.setname input { flex: 1; min-width: 0; }
+.resultsroot .kevnote { margin-left: auto; font-size: 12.5px; }

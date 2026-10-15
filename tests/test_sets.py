@@ -111,6 +111,10 @@ def test_two_sets_are_read_reviewed_and_run_unattended(client, tmp_path):
         doc_set = webapp.SESSION.sets[set_id]
         produced = {p.suffix for p in doc_set.results.iterdir()}
         assert {".zip", ".json", ".txt"} <= produced
+        # every delivered page read back for the ticked names, and none flagged
+        assert (doc_set.results / "final-check.txt").exists()
+        audit = next(s for s in done["sets"] if s["id"] == set_id)["run"]["audit"]
+        assert audit["pages"] == 2 and audit["flagged"] == 0, audit
         archive = next(doc_set.results.glob("*.zip"))
         with zipfile.ZipFile(archive) as zf:
             for member in zf.namelist():

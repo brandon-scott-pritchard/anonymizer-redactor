@@ -536,7 +536,13 @@ function RunStep({ state, actions, meta }) {
           <a href=${dl("key")} download><button>Download mapping key</button></a>
           <a href=${dl("report")} download><button>Download report</button></a>
         </div>
-        <p class="warn">Keep the mapping key and the report away from anything you deliver.</p>` : null}
+        ${run.audit && run.audit.error ? html`<p class="status-bad">The final check did not
+            finish (${run.audit.error}). Look the archive over yourself before it goes anywhere.</p>`
+          : run.audit && run.audit.file ? html`<p class=${run.audit.flagged ? "status-bad" : "status-ok"}>
+            Final check: ${run.audit.pages.toLocaleString()} page(s) read back by ${run.audit.kev}.
+            ${run.audit.flagged ? ` ${run.audit.flagged} page(s) to look at - listed in final-check.txt in the set's folder.`
+              : " No page was flagged."}</p>` : null}
+        <p class="warn">Keep the mapping key, the report and final-check.txt away from anything you deliver.</p>` : null}
     </div>
     <div class="bar">
       <button onClick=${() => actions.go(2)}>← Back</button>
@@ -852,6 +858,7 @@ function SetsBar({ sets, actions }) {
     <div class="resultsroot">
       Results go to: <strong>${sets.results_root || "not chosen yet"}</strong>
       <button onClick=${actions.chooseResults}>${sets.results_root ? "Change…" : "Choose folder…"}</button>
+      <span class="kevnote">Final check model (Kev): ${sets.kev || "not started"}</span>
     </div>
   </div>`;
 }

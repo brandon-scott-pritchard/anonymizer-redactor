@@ -293,9 +293,13 @@ def collect_suggestions(
     # the other end of a transfer. Proposed as people, so a ticked one gets an
     # invented name and the statement still reads as a statement.
     tables: dict[str, list] = {}
-    for raw_path in files:
+    total = max(len(files), 1)
+    for index, raw_path in enumerate(files):
         path = Path(raw_path)
         if path.name in texts:
+            # its own message: on a large set this pass went on for hours
+            # under "Looking for town and city names"
+            progress(f"Reading the tables in {path.name}", 0.55 + 0.05 * index / total)
             tables[path.name] = tables_in(path)
     # a blank line between readings and between columns: joined line to line,
     # the end of one column ran into the start of the next - "Daily Cash"

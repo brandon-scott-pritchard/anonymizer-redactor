@@ -71,6 +71,41 @@ and what was read off them are deleted. While anything is reading, queued or
 running, the Mac is kept from idle sleep (`caffeinate -i`; the screen still
 sleeps). Everything is held by the running app: quitting it ends the queue.
 
+### The final check
+
+After each queued set runs, every delivered page is read back—a redacted
+scan's picture through OCR, everything else through its text—for the names
+that were ticked, by two readers that are blind in different places
+(`redactor/audit.py`):
+
+- the app's own name matcher, sure of every written form of a ticked name
+  but blind to one OCR glued into another word or misspelled;
+- [Kev](https://github.com/jaredpalmer/kev), a small open classification
+  model, asked of each page whether any ticked person is still named on it.
+  On the corpus test it caught 18 of the 25 leaks the matcher missed—glued
+  and misspelled names—and flagged none of 120 clean anonymized pages.
+
+Neither changes anything: flagged pages are listed in `final-check.txt` in
+the set's results folder, and the Run step says how many. Kev answers yes or
+no for a page, never where, so nothing it says is applied blind.
+
+Kev is started with the app and stopped with it, offline (its weights on
+disk, `HF_HUB_OFFLINE=1`), on a port of its own; a watcher stops it if the app
+dies without closing, so a model holding ten gigabytes is never left behind.
+It lives outside the app, in its own folder with its own Python
+(`REDACTOR_KEV_DIR`, default `~/Coding/kev`; `REDACTOR_KEV=0` turns it off).
+To install it there:
+
+```bash
+git clone https://github.com/jaredpalmer/kev.git ~/Coding/kev
+cd ~/Coding/kev && uv sync --extra serve
+cd ~/Coding/kev && uv run --extra serve python -m kev.serve --run jaredpalmer/kev-4b@v1.0 --port 8009
+```
+
+The last line downloads the weights once (about 9 GB); stop it when it says
+it is serving. Without Kev the check runs with the matcher alone and the
+report says so. It adds about half a second a page on an M3 Max.
+
 ### OCR
 
 Scanned PDFs are pictures of text with no text layer. Two engines read them,
@@ -697,7 +732,7 @@ the language model, and copy the result back into `dist/`.
 ~/.venvs/anonymizer-redactor/bin/python -m pytest tests/ -q
 ```
 
-1,055 tests covering detector accuracy, allowlist protection, judicial-officer
+1,060 tests covering detector accuracy, allowlist protection, judicial-officer
 harvesting in every layout a court prints, child rosters and custody clauses,
 name-variant expansion and merging, overlapping-name folding, typo matching,
 Word's own run and tab structure, surrogate determinism, image redaction,

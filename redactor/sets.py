@@ -76,6 +76,7 @@ class DocSet:
     run_pages: set = field(default_factory=set)
     run_pages_total: int = 0
     run_error: str = ""
+    audit: dict | None = None                  # the final check's summary
     results: Path | None = None
     queued_at: float = 0.0
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -161,7 +162,8 @@ class DocSet:
                     "total": self.run_pages_total,
                     "results": str(self.results) if self.results else "",
                     "failed": len(self.run_result.failed) if self.run_result else 0,
-                    "files": len(self.run_result.outcomes) if self.run_result else 0},
+                    "files": len(self.run_result.outcomes) if self.run_result else 0,
+                    "audit": self.audit or {}},
         }
 
 
@@ -171,13 +173,15 @@ class DocSet:
 
 
 def _run_set(events, files, store, settings, output_dir, password, relative, skipped,
-             spill_dir) -> None:
-    """Child side: one set's run, reporting as it goes."""
+             spill_dir, kev_url=None) -> None:
+    """Child side: one set's run, then its final check, reporting as it goes."""
+    _own_group()
     # everything was read before the set was queued; whatever was not is read
     # in-line here rather than by a second pool of readers
+    readers = os.environ.get("REDACTOR_OCR_WORKERS")
     os.environ["REDACTOR_OCR_WORKERS"] = "0"
     try:
-        from . import pdf_processor, pipeline
+        from . import audit, pdf_processor, pipeline
 
         pdf_processor.keep_ocr_on_disk(spill_dir)
 
@@ -187,13 +191,56 @@ def _run_set(events, files, store, settings, output_dir, password, relative, ski
         with pdf_processor.page_listener(lambda path, index: events.put(("page", path, index))):
             result = pipeline.run_job(files, store, settings, output_dir, password, progress,
                                       relative=relative, skipped=skipped)
+        # the delivered pages were never read: a redacted scan's are, a few
+        # at once, for the final check
+        if readers is None:
+            os.environ.pop("REDACTOR_OCR_WORKERS", None)
+        else:
+            os.environ["REDACTOR_OCR_WORKERS"] = readers
+        try:
+            check = audit.check_archive(result.archive, store, settings, output_dir, kev_url,
+                                        progress)
+            events.put(("audit", check.summary()))
+        except Exception as exc:                   # the run is delivered either way
+            events.put(("audit", {"error": f"{type(exc).__name__}: {exc}"}))
         events.put(("done", result))
     except BaseException as exc:                   # the parent marks the set failed
         events.put(("error", f"{type(exc).__name__}: {exc}"))
+    finally:
+        # A process started by multiprocessing waits, as it exits, for every
+        # process it started - and the readers for the final check never stop
+        # on their own: the run hung finished but unable to exit.
+        from . import ocr_pool
+        ocr_pool.shutdown(wait=True)
+
+
+def _own_group() -> None:
+    """Child side: a process group of its own, so the queue can stop it and
+    everything it started at once - see :func:`_stop`."""
+    try:
+        os.setpgrp()
+    except OSError:
+        pass
+
+
+def _stop(child) -> None:
+    """Wait for a finished child to exit; then make sure nothing it started
+    is left running. Stopping only the child orphaned its OCR readers."""
+    import signal
+
+    child.join(timeout=30)
+    for sig, grace in ((signal.SIGTERM, 10), (signal.SIGKILL, 5)):
+        try:
+            os.killpg(child.pid, sig)
+        except (ProcessLookupError, PermissionError, OSError):
+            break                                  # the group is gone: all clean
+        child.join(timeout=grace)
+        time.sleep(0.5)
 
 
 def _prepare_set(events, files, settings, spill_dir) -> None:
     """Child side: everything the name screen shows, worked out ahead."""
+    _own_group()
     os.environ["REDACTOR_OCR_WORKERS"] = "0"
     try:
         from . import officials, pdf_processor, pipeline
@@ -264,7 +311,7 @@ class Preparer:
                 except queue_module.Empty:
                     if not child.is_alive():
                         outcome = ("error", f"stopped (exit code {child.exitcode})")
-            child.join(timeout=30)
+            _stop(child)
             if outcome[0] == "done":
                 doc_set.prepared, doc_set.prepared_for = outcome[1], covered
             else:
@@ -336,12 +383,16 @@ class RunQueue:
         doc_set.run_state, doc_set.run_message = "running", "Starting"
         doc_set.run_pages = set()
         doc_set.run_pages_total = pipeline.count_pages(doc_set.files)
+        from . import audit
+
+        # Kev starts with the app; a set queued in its first minutes waits for it
+        kev_url = audit.wait_for_kev(audit.KEV_START_SECONDS)
         context = multiprocessing.get_context("spawn")
         events = context.Queue()
         child = context.Process(
             target=_run_set, name=f"run-{doc_set.id}",
             args=(events, list(doc_set.files), doc_set.store, settings, results, password,
-                  dict(doc_set.relative), list(doc_set.skipped), self.spill_dir))
+                  dict(doc_set.relative), list(doc_set.skipped), self.spill_dir, kev_url))
         child.start()
         result = error = None
         while result is None and error is None:
@@ -356,11 +407,13 @@ class RunQueue:
                 doc_set.run_message = event[1]
             elif kind == "page":
                 doc_set.run_pages.add((event[1], event[2]))
+            elif kind == "audit":
+                doc_set.audit = event[1]
             elif kind == "done":
                 result = event[1]
             elif kind == "error":
                 error = event[1]
-        child.join(timeout=30)
+        _stop(child)
         if error is not None:
             doc_set.run_state, doc_set.run_error = "failed", error
             doc_set.run_message = "Failed"

@@ -190,7 +190,7 @@ class _Scheduler:
         if entry is not None and not entry["future"].done():
             entry["future"].set_result(None)
 
-    def shutdown(self) -> None:
+    def shutdown(self, wait: bool = False) -> None:
         with self.wake:
             self.closed = True
             self.wake.notify_all()
@@ -200,8 +200,8 @@ class _Scheduler:
         for entry in waiting:
             if not entry["future"].done():
                 entry["future"].set_result(None)
-        self.readers.shutdown(wait=False, cancel_futures=True)
-        self.surveyor.shutdown(wait=False, cancel_futures=True)
+        self.readers.shutdown(wait=wait, cancel_futures=True)
+        self.surveyor.shutdown(wait=wait, cancel_futures=True)
 
 
 def _get_scheduler() -> _Scheduler | None:
@@ -227,14 +227,15 @@ def _get_scheduler() -> _Scheduler | None:
         return _scheduler
 
 
-def shutdown() -> None:
-    """Stop the workers and forget everything - tests and the self-test."""
+def shutdown(wait: bool = False) -> None:
+    """Stop the workers and forget everything. ``wait`` until they have exited -
+    which a process started by multiprocessing must, before it can exit itself."""
     global _scheduler, _broken
     with _lock:
         scheduler, _scheduler, _broken = _scheduler, None, False
         _surveys.clear()
     if scheduler is not None:
-        scheduler.shutdown()
+        scheduler.shutdown(wait=wait)
 
 
 def _file_key(path: Path) -> tuple | None:

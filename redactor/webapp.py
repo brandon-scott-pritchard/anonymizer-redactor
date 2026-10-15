@@ -369,6 +369,7 @@ def state():
         # so the results screen can put it on the download links; see the
         # middleware above for why a cookie is not enough
         "download_token": TOKEN,
+        "kev": _kev_note(),
         **_sets_payload(),
     }
 
@@ -715,10 +716,16 @@ async def run(request: Request):
 # --------------------------------------------------------------------------
 
 
+def _kev_note() -> str:
+    from . import audit
+    return audit.KEV.note
+
+
 def _sets_payload() -> dict:
     return {"sets": [s.summary() for s in sorted(SESSION.sets.values(), key=lambda s: s.rank)],
             "selected": SESSION.selected,
-            "results_root": str(SESSION.results_root) if SESSION.results_root else ""}
+            "results_root": str(SESSION.results_root) if SESSION.results_root else "",
+            "kev": _kev_note()}
 
 
 def _find_set(set_id: str) -> sets.DocSet:
@@ -862,6 +869,9 @@ def main() -> int:
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
 
+    from . import audit
+
+    audit.KEV.start()                     # the final check's model; stopped on exit
     url = f"http://127.0.0.1:{port}/?token={TOKEN}"
     # flush: the frozen app is windowed, so stdout is block-buffered when
     # redirected and the URL would otherwise never reach a log file

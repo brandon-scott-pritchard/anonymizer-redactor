@@ -105,6 +105,11 @@ class Bridge:
 
 
 def main() -> int:
+    from . import audit
+
+    # the final check's model: started now, so it is up long before the first
+    # set finishes its run, and stopped when the app is (see audit.KevService)
+    audit.KEV.start()
     port = _free_port()
     _serve(port)
     if not _wait_until_up(port):
