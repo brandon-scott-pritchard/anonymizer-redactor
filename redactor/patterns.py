@@ -1099,6 +1099,54 @@ def _handle_from_another_row(value: str, label: str) -> bool:
 _HANDLE_LIKE = re.compile(r"[\d._\-]|^[a-z]+[A-Z]|^[a-z]{6,}$")
 
 
+# --------------------------------------------------------------------------
+# dates, in every common form
+# --------------------------------------------------------------------------
+
+# A date read as an account, a check or a policy number was then replaced in
+# every document of the case, wherever it was written: one household lost 852
+# dates to "12/21/2023", "02/20" and "01 2024 01" registered as bank and
+# investment accounts. Whatever a detector found, a value that is a date in
+# any of these forms is only ever a date - and only a date of birth is taken.
+_MON = (r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|"
+        r"sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?")
+_M = r"(?:0?[1-9]|1[0-2])"
+_D = r"(?:0?[1-9]|[12]\d|3[01])"
+_Y = r"(?:19|20)\d\d"
+_YY = r"\d\d"
+_DATE_SEPS = ("/", "-", ".")
+_ONE_DATE = "|".join([
+    # 12/21/2023, 12-21-23, 12.21.2023 - one separator throughout
+    *(rf"{_M}{re.escape(c)}{_D}{re.escape(c)}(?:{_Y}|{_YY})" for c in _DATE_SEPS),
+    *(rf"{_Y}{re.escape(c)}{_M}{re.escape(c)}{_D}" for c in _DATE_SEPS),        # 2024-03-30
+    *(rf"{_D}{re.escape(c)}{_M}{re.escape(c)}{_Y}" for c in _DATE_SEPS),        # 30.03.2024
+    rf"{_M}/{_D}", rf"{_M}/{_YY}",                                          # 02/20 (slash only)
+    rf"{_M}[/\-]{_Y}",                                                      # 03/2024, 3-2024
+    rf"{_MON}[^\S\n]?{_D}(?:st|nd|rd|th)?,?(?:[^\S\n]{_Y})?",               # May 31, 2021  May31
+    rf"{_D}(?:st|nd|rd|th)?(?:[^\S\n]|-)?{_MON},?(?:[^\S\n]|-)?(?:{_Y}|{_YY})?",   # 31 May 2021, 31-Jan-24
+    rf"{_MON}(?:[^\S\n]|-|,)*(?:{_Y}|'?{_YY})",                              # May 2021, Jan-24
+    rf"{_M}[^\S\n]{_Y}(?:[^\S\n]{_M})?",                                    # 01 2024, 01 2024 01
+])
+_DATE_SHAPE = re.compile(
+    rf"(?i)^(?:[A-Za-z]{{1,12}}[^\S\n]?)?(?:{_ONE_DATE})(?:[^\S\n]*(?:-|–|—|to|thru|through)[^\S\n]*(?:{_ONE_DATE}))?$")
+# a small decimal is a figure, a rate or a score - never an account: "8.5"
+_SMALL_DECIMAL = re.compile(r"^\d{1,3}\.\d{1,2}$")
+DATE_CATEGORIES = frozenset({"dob"})
+
+
+DATE_IN_TEXT = re.compile(rf"(?i)(?<![\w/.\-])(?:{_ONE_DATE})(?![\w/\-])")
+
+
+def date_spans(text: str) -> list[tuple[int, int]]:
+    """Where the text has a date written, in any of the forms above."""
+    return [m.span() for m in DATE_IN_TEXT.finditer(text)]
+
+
+def looks_like_date(value: str) -> bool:
+    """A date, in any common form, alone - see above."""
+    return bool(_DATE_SHAPE.match(" ".join(value.split()).strip(" ,.;:()")))
+
+
 def _wrong_shape(category: str, value: str, label: str = "") -> bool:
     """True when the value is money or a date and the category cannot be either.
 
@@ -1106,6 +1154,13 @@ def _wrong_shape(category: str, value: str, label: str = "") -> bool:
     """
     cleaned = value.strip()
     if category not in _DECIMAL_NATIVE and _CURRENCY_SHAPE.match(cleaned):
+        return True
+    # ...unless its label says outright an identifier follows: "Card Ending
+    # 1-2019" is a card's last digits, shaped like a month and a year
+    if category not in DATE_CATEGORIES and looks_like_date(cleaned) \
+            and not _IDENTIFIER_CUE.search(label):
+        return True
+    if category not in _DECIMAL_NATIVE and _SMALL_DECIMAL.match(cleaned):
         return True
     if (category in _YEAR_REJECTING and _YEAR_ONLY.match(cleaned)
             and not _IDENTIFIER_CUE.search(label)):

@@ -571,3 +571,35 @@ def test_a_name_inside_an_email_goes_with_the_whole_address():
                      scan_text("Abigail Okafor abigail.okafor98@example.com", store,
                                Settings(use_ner=False, pdf_mode="anonymize")))
     assert "@" not in out and "98" not in out and "[EMAIL-" in out
+
+
+@pytest.mark.parametrize("value", ["12/21/2023", "12/21/23", "02/20", "01 2024 01", "2024-03-30",
+                                   "30.03.2024", "03/2024", "May 31, 2021", "31-Jan-24", "Jan-24",
+                                   "July1", "period08/01/2021-07/31/2022", "Dated 3/5/24"])
+def test_a_date_in_any_common_form_is_never_an_account(value):
+    """One household lost 852 dates to "12/21/2023", "02/20" and "01 2024 01"
+    registered as bank and investment accounts, then replaced everywhere."""
+    from redactor import patterns
+    assert patterns.looks_like_date(value)
+    for category in ("bank_account", "investment_account", "check_number", "policy_number"):
+        assert patterns._wrong_shape(category, value)
+    assert not patterns._wrong_shape("dob", value)
+
+
+@pytest.mark.parametrize("value", ["3-6815", "2-5666", "12-34-5678", "123-45-6789", "4417220193",
+                                   "8102 4477 9301", "621-555-0143", "1974 S Aspen Way"])
+def test_numbers_that_are_not_dates_stay_numbers(value):
+    from redactor import patterns
+    assert not patterns.looks_like_date(value)
+
+
+def test_nothing_but_a_birth_date_is_taken_from_inside_a_date():
+    from redactor import review
+    from redactor.engine import Settings, apply_hits, scan_text
+
+    store, _ = review.build_store([("May Thompson", "person")])
+    store.add_value("bank_account", "12/21/2023")         # as a detector once did
+    text = "Paid May 31, 2021 to May Thompson on 12/21/2023. DOB: 12/06/1986"
+    out = apply_hits(text, scan_text(text, store, Settings(use_ner=False, pdf_mode="anonymize")))
+    assert "May 31, 2021" in out and "12/21/2023" in out
+    assert "Thompson" not in out and "12/06/1986" not in out

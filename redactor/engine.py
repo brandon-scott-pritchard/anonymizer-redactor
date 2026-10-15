@@ -557,6 +557,13 @@ def scan_text(
     # bare recurrence of one must be matched in this same piece of text.
     hits.extend(matcher.find_values(text, protected, redact))
     hits.extend(run_together_hits(text, store, redact, protected))
+    # Nothing but a date of birth is taken from inside a written date: a
+    # date read as an account, or a "May" ticked as a name, took "May 31,
+    # 2021" apart - see patterns.looks_like_date.
+    dates = patterns.date_spans(text)
+    if dates:
+        hits = [h for h in hits if h.category in patterns.DATE_CATEGORIES
+                or not any(a <= h.start and h.end <= b for a, b in dates)]
 
     hits = matcher.held_back(text, hits)
     return _resolve(hits)
