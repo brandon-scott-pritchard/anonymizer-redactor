@@ -58,13 +58,14 @@ def group(store: MappingStore) -> None:
         entity.group_note = ""
     _group_people(store)
     _group_values(store, ADDRESSES, _address_groups)
-    _group_values(store, ORGS, _same_key_groups(_org_key, typo=True))
+    _group_values(store, ORGS, _org_groups)
     _group_values(store, ACCOUNTS, _account_groups)
     _group_values(store, PHONES, _same_key_groups(_phone_key))
     _group_values(store, EMAILS, _same_key_groups(_email_key))
     _address_notes(store)
     sync(store)
     _one_replacement_per_head(store)
+    _names_in_businesses(store)
 
 
 def sync(store: MappingStore) -> None:
@@ -74,6 +75,17 @@ def sync(store: MappingStore) -> None:
         if head is entity:
             continue
         if entity.is_person and head.is_person:
+            if _glued_into(entity.person, head.person) and head.surrogate is not None:
+                # glued back the way it was found, in its own capitals
+                stand_in = head.surrogate
+                parts = [stand_in.first, stand_in.last]
+                if len(entity.person.ordered[0][1]) > len(
+                        _names._ocr_folded(head.person.first + head.person.last)) + 0 \
+                        and stand_in.middles:
+                    parts = [stand_in.first, *stand_in.middles, stand_in.last]
+                glued = "".join(p.strip(".") for p in parts if p)
+                entity.replacement = _names.match_case(entity.canonical, glued)
+                continue
             mapping = _partial_mapping(entity.person, head.person)
             if mapping is not None and head.surrogate is not None:
                 entity.surrogate = _shaped_surrogate(entity.person, head.surrogate, mapping,
@@ -117,7 +129,7 @@ def attach(store: MappingStore, entity: Entity) -> None:
     if entity.is_person or entity.key in store.split_out:
         return
     for family, finder in ((ADDRESSES, _address_groups),
-                           (ORGS, _same_key_groups(_org_key, typo=True)),
+                           (ORGS, _org_groups),
                            (ACCOUNTS, _account_groups),
                            (PHONES, _same_key_groups(_phone_key)),
                            (EMAILS, _same_key_groups(_email_key))):
@@ -150,7 +162,8 @@ def _could_join(family: set[str], entity: Entity, head: Entity) -> bool:
         return not mine or (theirs is not None and theirs.group(1) == mine.group(1))
     if family is ORGS:
         a, b = _org_key(entity.canonical), _org_key(head.canonical)
-        return bool(a and b) and len(a) == len(b) and a[0][:1] == b[0][:1]
+        return bool(a and b) and ((len(a) == len(b) and a[0][:1] == b[0][:1])
+                                  or _joined_org(entity.canonical) == _joined_org(head.canonical))
     digits = re.sub(r"\D", "", entity.canonical)[-4:]
     if family is ACCOUNTS or family is PHONES:
         return bool(digits) and re.sub(r"\D", "", head.canonical).endswith(digits)
@@ -209,9 +222,26 @@ def _tokens(person: _names.PersonName) -> list[tuple[str, str]]:
 
 
 def _fits(part: str, whole: str) -> bool:
+    """A word of a name in another written form of it: the same word, its
+    initial, or the same name misread by OCR or shortened ("Kate")."""
     if part == whole:
         return True
-    return len(part) == 1 and whole[:1] == part
+    if len(part) == 1:
+        return whole[:1] == part
+    return len(whole) > 1 and _names.same_given(part, whole)
+
+
+def _glued_into(part: _names.PersonName | None, whole: _names.PersonName | None) -> bool:
+    """One word that is the whole name run together: "ThomasLarsen",
+    "KYLEDHARRINGTON". OCR glues a name as often as it splits it, and the
+    glued form was given an invented person of its own."""
+    if part is None or whole is None or len(part.ordered) != 1 or len(whole.ordered) < 2:
+        return False
+    word = _names._ocr_folded(part.ordered[0][1])
+    words = [_names._ocr_folded(v) for _k, v in whole.ordered]
+    joined = "".join(words)
+    first_last = words[0] + words[-1]
+    return len(word) >= 6 and word in (joined, first_last)
 
 
 def _partial_mapping(part: _names.PersonName | None,
@@ -300,13 +330,31 @@ def _group_people(store: MappingStore) -> None:
             continue
         candidates = [h for h in heads
                       if h.category == entity.category and not h.candidates
-                      and _partial_mapping(entity.person, h.person) is not None]
+                      and (_partial_mapping(entity.person, h.person) is not None
+                           or _glued_into(entity.person, h.person))]
+        if len(candidates) > 1 and _one_family(entity, candidates):
+            # a bare surname the whole family shares: whichever of them it
+            # is, it reads as the family's one invented surname - left on its
+            # own it was handed a surname of its own, a second family
+            candidates = [max(candidates, key=_prevalence)]
         if len(candidates) == 1:
             entity.parent = candidates[0].key
         elif len(candidates) > 1:
             entity.candidates = tuple(h.canonical for h in candidates)
         else:
             heads.append(entity)
+
+
+def _one_family(entity: Entity, heads: list[Entity]) -> bool:
+    """A surname alone, fitting heads that all wear one invented surname."""
+    person = entity.person
+    if person is None or len(person.ordered) != 1:
+        return False
+    surnames = {h.surrogate.last.casefold() for h in heads
+                if h.surrogate is not None and h.surrogate.last}
+    return len(surnames) == 1 and all(
+        h.person is not None and h.person.last
+        and _names.alike(person.ordered[0][1], h.person.last) for h in heads)
 
 
 # --------------------------------------------------------------------------
@@ -402,6 +450,93 @@ def _same_key_groups(key_of: Callable[[str], object], typo: bool = False):
 
 _ORG_SUFFIXES = {"inc", "incorporated", "llc", "l", "c", "corp", "corporation", "co",
                  "company", "ltd", "limited", "lp", "llp", "pllc", "pc", "na", "the"}
+
+
+# a business written glued and spaced - "REDCANYONLANDS", "Red Canyon Lands" -
+# is one business when its letters run to at least this many
+GLUED_ORG_MIN_LETTERS = 8
+
+
+def _org_groups(pool: list[Entity]) -> list[list[Entity]]:
+    """Businesses by name, a slipped letter allowed - and glued or spaced.
+
+    OCR runs a company's words together on one statement and not the next,
+    and the two written forms got two placeholders.
+    """
+    clusters = _same_key_groups(_org_key, typo=True)(pool)
+    by_joined: dict[str, list[Entity]] = {}
+    merged: list[list[Entity]] = []
+    for cluster in clusters:
+        joins = {_joined_org(e.canonical) for e in cluster}
+        joins = {j for j in joins if len(j) >= GLUED_ORG_MIN_LETTERS}
+        target = next((by_joined[j] for j in joins if j in by_joined), None)
+        if target is None:
+            target = []
+            merged.append(target)
+        target.extend(cluster)
+        for joined in joins:
+            by_joined.setdefault(joined, target)
+    return merged
+
+
+def _joined_org(text: str) -> str:
+    """A business name's letters run together, its "LLC" or "Inc" dropped
+    however it was written - glued on too."""
+    joined = "".join(_org_key(text))
+    trimmed = True
+    while trimmed:
+        trimmed = False
+        for suffix in sorted(_ORG_SUFFIXES, key=len, reverse=True):
+            if len(suffix) >= 2 and joined.endswith(suffix) \
+                    and len(joined) - len(suffix) >= GLUED_ORG_MIN_LETTERS:
+                joined, trimmed = joined[:-len(suffix)], True
+                break
+    return joined
+
+
+def _names_in_businesses(store: MappingStore) -> None:
+    """A business that carries a ticked family's surname wears the family's
+    invented one: "Harrington Enterprises" reads "Tolk Enterprises" beside
+    "Kyle Tolk", not "[ORGANIZATION-3]" - the bracket read as someone else,
+    and the surname left in it named the family. A "business" that is nothing
+    but the person's name - a surname tagged as a company - is the person."""
+    families: list[tuple[str, Entity]] = []
+    for entity in store.entities.values():
+        if (entity.category in PEOPLE and entity.parent is None and entity.enabled
+                and entity.person is not None and entity.surrogate is not None
+                and len(entity.person.last.strip(".")) >= 3 and entity.surrogate.last):
+            families.append((entity.person.last, entity))
+    if not families:
+        return
+    for org in store.entities.values():
+        if org.category not in ORGS or org.parent is not None:
+            continue
+        words = org.canonical.split()
+        bares = [re.sub(r"(?i)['’]s$", "", w).strip(".,'’") for w in words]
+        owners = [next((person for last, person in families
+                        if len(bare) >= 3 and _names.alike(bare, last)), None) for bare in bares]
+        if not any(owners):
+            continue
+        family = [person for person in owners if person is not None]
+        out = []
+        for word, bare, owner in zip(words, bares, owners):
+            fake = owner.surrogate.last if owner is not None else ""
+            if not fake:
+                # a first name beside the family's surname is one of them:
+                # "Kyle Harrington" tagged a company must not read "Kyle Tolk"
+                person = next((p for p in family if p.person.first and len(bare) >= 2
+                               and _names.same_given(bare, p.person.first)), None)
+                fake = person.surrogate.first if person is not None else ""
+            if not fake or not bare:
+                out.append(word)
+                continue
+            # keep the word's own trimmings: "HARRINGTON'S" -> "TOLK'S"
+            at = word.find(bare)
+            out.append(word[:at] + _names.match_case(bare, fake) + word[at + len(bare):])
+        org.replacement = " ".join(out)
+        if org.replacement:
+            for member in members(store, org):
+                member.replacement = org.replacement
 
 
 def _org_key(text: str) -> tuple[str, ...]:

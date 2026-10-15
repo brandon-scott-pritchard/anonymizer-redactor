@@ -413,3 +413,64 @@ def test_a_form_met_mid_run_stays_ticked_under_an_unticked_group():
     grouping.set_enabled(store, _row(store, "123 N Main St"), False)
     late = store.add_value("street_address", "123 N. Main Street")
     assert late.parent and late.enabled
+
+
+# ---------------------------------------------------------------------------
+# one person, one stand-in, however the scan wrote them
+# ---------------------------------------------------------------------------
+
+
+def test_a_surname_misread_by_ocr_is_still_the_family():
+    """"HARRlNGTON" and "Harringten" off a scan were handed invented surnames
+    of their own, and one household read as two."""
+    store = _store(["KYLE D HARRINGTON", "JENNA R HARRINGTON", "Kyle Harringten", "HARRlNGTON"])
+    family = _row(store, "KYLE D HARRINGTON").surrogate.last
+    assert _row(store, "Kyle Harringten").replacement.split()[-1] == family
+    assert _row(store, "HARRlNGTON").replacement == family.upper() or \
+        _row(store, "HARRlNGTON").replacement.casefold() == family.casefold()
+    assert _apply(store, "Paid by Kyle Harringten") == \
+        f"Paid by {_row(store, 'Kyle Harringten').replacement}"
+
+
+def test_a_short_surname_a_letter_out_is_another_family():
+    store = _store(["Thomas Larsen", "Dana Larson"])
+    assert _row(store, "Thomas Larsen").surrogate.last != _row(store, "Dana Larson").surrogate.last
+
+
+def test_a_glued_name_takes_the_stand_in_glued():
+    store = _store(["Thomas Larsen", "ThomasLarsen"])
+    stand_in = _row(store, "Thomas Larsen").surrogate
+    assert _head(store, "ThomasLarsen") == "Thomas Larsen"
+    assert _row(store, "ThomasLarsen").replacement == stand_in.first + stand_in.last
+
+
+def test_a_nickname_is_the_same_person():
+    store = _store(["Katherine Morales", "Kate Morales"])
+    assert _head(store, "Kate Morales") == "Katherine Morales"
+    assert _row(store, "Kate Morales").replacement == _row(store, "Katherine Morales").replacement
+
+
+def test_a_bare_surname_the_family_shares_takes_the_family_surname():
+    store = _store(["KYLE D HARRINGTON", "JENNA R HARRINGTON", "Harringtom"])
+    family = _row(store, "KYLE D HARRINGTON").surrogate.last
+    assert _row(store, "Harringtom").replacement.casefold() == family.casefold()
+
+
+def test_a_business_carrying_the_family_name_wears_the_invented_one():
+    store = _store(["KYLE D HARRINGTON"], values=[
+        ("organization", "Harrington Enterprises LLC", 3), ("organization", "HARRINGTONENTERPRISESLLC"),
+        ("organization", "Kyle Harrington"), ("organization", "HARRINGTON'S AUTO")])
+    stand_in = _row(store, "KYLE D HARRINGTON").surrogate
+    business = _row(store, "Harrington Enterprises LLC").replacement
+    assert business == f"{stand_in.last} Enterprises LLC"
+    assert _row(store, "HARRINGTONENTERPRISESLLC").replacement == business
+    assert _row(store, "Kyle Harrington").replacement == f"{stand_in.first} {stand_in.last}"
+    assert _row(store, "HARRINGTON'S AUTO").replacement == f"{stand_in.last.upper()}'S AUTO"
+    for row in ("Harrington Enterprises LLC", "Kyle Harrington", "HARRINGTON'S AUTO"):
+        assert "harrington" not in _row(store, row).replacement.casefold()
+        assert "kyle" not in _row(store, row).replacement.casefold()
+
+
+def test_a_business_glued_and_spaced_is_one_business():
+    store = _store(values=[("employer", "Red Canyon Lands", 4), ("employer", "REDCANYONLANDS")])
+    assert _row(store, "REDCANYONLANDS").replacement == _row(store, "Red Canyon Lands").replacement

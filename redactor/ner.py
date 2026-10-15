@@ -475,3 +475,83 @@ def _plausible(value: str, category: str) -> bool:
         if not any(tok[:1].isupper() for tok in value.split()):
             return False
     return True
+
+
+# --------------------------------------------------------------------------
+# which suggestions are likely names
+# --------------------------------------------------------------------------
+
+# The model calls a column heading, a merchant or a city a person as readily
+# as a person: on a household's statements it proposed "Statement", "Interest
+# Rate", "Maturity Date", "Zelle", "Los Angeles" - and "Tick all" sent every
+# one of them through the run, each a stand-in where a heading or a figure's
+# label had been. Nothing is dropped here; a suggestion that is probably not
+# a name is listed apart, unticked, for the operator to tick if it is one.
+_RAILS_AND_BRANDS = frozenset("""
+zelle venmo paypal cashapp fdic sipc ach usa us whse llc inc corp ltd co bank
+""".split())
+
+
+def _word_list(name: str) -> frozenset[str]:
+    import gzip
+
+    from .places import _data_file
+
+    path = _data_file().with_name(name)
+    try:
+        return frozenset(gzip.decompress(path.read_bytes()).decode().split())
+    except OSError:
+        return frozenset()
+
+
+_COMMON: frozenset[str] | None = None
+_GIVEN: frozenset[str] | None = None
+
+
+def _lists() -> tuple[frozenset[str], frozenset[str]]:
+    global _COMMON, _GIVEN
+    if _COMMON is None:
+        _COMMON = _word_list("common_words.txt.gz")
+        from . import names as _names
+        _GIVEN = _word_list("given_names.txt.gz") | frozenset(_names.NICKNAMES) | frozenset(
+            short for shorts in _names.NICKNAMES.values()
+            for short in ((shorts,) if isinstance(shorts, str) else shorts))
+    return _COMMON, _GIVEN
+
+
+def _plain(word: str) -> str:
+    return re.sub(r"(?i)['’]s$", "", word).strip(".,'’()").casefold()
+
+
+def likely_name(text: str, category: str, known: frozenset[str] = frozenset()) -> bool:
+    """Is this suggestion probably a name at all?
+
+    ``known`` is the words of the names already on the list: a suggestion
+    sharing one - the household's surname in a business, a party's first
+    name - is always likely.
+    """
+    from . import places
+
+    words = [_plain(w) for w in text.split() if _plain(w)]
+    if not words:
+        return False
+    if any(w in known for w in words):
+        return True
+    if category == "employer":
+        return True
+    if category in ("organization", "location"):
+        # a business or place is someone's only when it carries their name
+        return False
+    common, given = _lists()
+    if places.known(text):
+        return False
+    if any(w in _RAILS_AND_BRANDS for w in words):
+        return False
+    if len(words) == 1 and text.strip(".").isupper() and len(words[0]) <= 4:
+        return False                          # "FDIC", "SIPC"
+    if any(w in given for w in words):
+        return True
+    def ordinary(word: str) -> bool:
+        return word in common or (word.endswith("s") and word[:-1] in common) or \
+            (word.endswith("es") and word[:-2] in common)
+    return not all(ordinary(w) for w in words)

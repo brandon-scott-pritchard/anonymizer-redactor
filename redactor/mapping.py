@@ -236,7 +236,8 @@ class MappingStore:
         for entity in self.entities.values():
             if not entity.is_person or not entity.person or not entity.surrogate:
                 continue
-            if entity.person.last and entity.person.last.casefold() == last.casefold():
+            # the same surname misread on a scan is still this family's
+            if entity.person.last and _names.alike(entity.person.last, last):
                 return entity.surrogate.last
         return None
 

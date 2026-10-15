@@ -1829,7 +1829,15 @@ def _plan_edits(word_sets: list[list], store, anon_settings, matcher, settings,
                     if ocr:
                         say = _no_glued_names(say, store, settings)
                 else:
-                    say, words_in = "", fresh
+                    # the rest of a hit another reading already wrote over:
+                    # cleared, nothing written - so only the hit's share of
+                    # each word, not a figure glued on beside it
+                    lo = min(h.start for h in run_hits)
+                    hi = max(h.end for h in run_hits)
+                    fresh_ids = {id(rect) for rect in fresh}
+                    say = ""
+                    words_in = [_share_of_word(rect, s_, e_, lo, hi, text[s_:e_]) if ocr else rect
+                                for s_, e_, rect in run if id(rect) in fresh_ids]
                 edits.append(_Edit(words_in, say, run_hits[0]))
         if ocr:
             for hit, rect in [*_glued_names(words, store, settings),

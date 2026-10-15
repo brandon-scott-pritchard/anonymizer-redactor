@@ -333,12 +333,28 @@ function NamesStep({ state, set, actions, meta }) {
       // a diminutive of a party already on the list belongs to that party
       role: s.nickname_for ? `Short for ${s.nickname_for}` : "",
       extra: `x${s.count}`, where: (s.documents || []).join("; "),
+      likely: s.likely !== false,
     })),
   ], [state.captions, state.suggestions, state.suggCats]);
+  // headings, merchants, places and payment rails the model called names:
+  // listed apart and unticked, so "Tick all" does not send them through
+  const likely = rows.filter((row) => row.likely !== false);
+  const unlikely = rows.filter((row) => row.likely === false);
 
   const nameCategories = meta.name_categories || ["person", "minor", "organization", "location"];
   const labelFor = (key) =>
     (meta.categories.find((c) => c.key === key) || { label: key }).label;
+  const suggestionRow = (row) => html`<tr key=${row.id}>
+    <td><input type="checkbox" checked=${state.suggChecked.has(row.id)}
+               onChange=${() => actions.toggleSuggestion(row.id)} /></td>
+    <td>${row.name}</td>
+    <td><select value=${row.category}
+                onChange=${(e) => actions.retypeSuggestion(row, e.target.value)}>
+      ${nameCategories.map((key) => html`<option key=${key} value=${key}>${labelFor(key)}</option>`)}
+    </select></td>
+    <td>${row.role || row.extra}</td>
+    <td class="hint">${row.where}</td>
+  </tr>`;
 
   return html`
     <div class="card">
@@ -353,22 +369,23 @@ function NamesStep({ state, set, actions, meta }) {
         <div class="tablewrap"><table>
           <thead><tr><th></th><th>Name</th><th>Type</th><th>Found as</th><th>Where</th></tr></thead>
           <tbody>
-            ${rows.map((row) => html`<tr key=${row.id}>
-              <td><input type="checkbox" checked=${state.suggChecked.has(row.id)}
-                         onChange=${() => actions.toggleSuggestion(row.id)} /></td>
-              <td>${row.name}</td>
-              <td><select value=${row.category}
-                          onChange=${(e) => actions.retypeSuggestion(row, e.target.value)}>
-                ${nameCategories.map((key) => html`<option key=${key} value=${key}>${labelFor(key)}</option>`)}
-              </select></td>
-              <td>${row.role || row.extra}</td>
-              <td class="hint">${row.where}</td>
-            </tr>`)}
+            ${likely.map((row) => suggestionRow(row))}
           </tbody>
         </table></div>
+        ${unlikely.length ? html`<details class="unlikely">
+          <summary>${unlikely.length} more the scan proposed that are probably not names -
+            headings, merchants, places, payment services. Tick any that is a person.</summary>
+          <div class="tablewrap"><table><tbody>
+            ${unlikely.map((row) => suggestionRow(row))}
+          </tbody></table></div>
+          <div class="bar">
+            <button onClick=${() => actions.tickAllSuggestions(unlikely, true)}>Tick all of these</button>
+            <button onClick=${() => actions.tickAllSuggestions(unlikely, false)}>Untick all of these</button>
+          </div>
+        </details>` : null}
         <div class="bar">
           <button onClick=${() => actions.addTicked(rows)}>Add ticked to the name list →</button>
-          <button onClick=${() => actions.tickAllSuggestions(rows, true)}>Tick all</button>
+          <button onClick=${() => actions.tickAllSuggestions(likely, true)}>Tick all</button>
           <button onClick=${() => actions.tickAllSuggestions(rows, false)}>Untick all</button>
           <span class="spacer"></span>
           <button disabled=${state.busy.active} onClick=${actions.readCaptions}>Re-read captions</button>

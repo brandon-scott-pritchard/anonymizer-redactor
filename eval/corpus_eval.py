@@ -64,11 +64,14 @@ def case_of(path: Path, root: Path) -> str:
 
 
 def discover(root: Path, limit_batches: int | None = None,
-             match: str | None = None, photos: bool = False) -> tuple[dict, dict]:
+             match: str | None = None, photos: bool = False,
+             whole_case: bool = False) -> tuple[dict, dict]:
     """``{case: [pdf,...]}`` and ``{batch_id: [pdf,...]}``.
 
     ``photos`` adds the corpus's phone photos and screenshots, which the app
-    makes into PDFs on the way in.
+    makes into PDFs on the way in. ``whole_case`` makes each case one batch -
+    every folder of a household together, as an attorney's set is - so that
+    one person keeping one stand-in across all of it is tested at all.
     """
     from redactor import photo
     cases: dict[str, list[Path]] = {}
@@ -80,7 +83,7 @@ def discover(root: Path, limit_batches: int | None = None,
         cases.setdefault(case_of(pdf, root), []).append(pdf)
         if match and not re.search(match, str(pdf.relative_to(root))):
             continue
-        batch = str(pdf.parent.relative_to(root))
+        batch = case_of(pdf, root) if whole_case else str(pdf.parent.relative_to(root))
         batches.setdefault(batch, []).append(pdf)
     if limit_batches:
         batches = dict(list(batches.items())[:limit_batches])
@@ -156,7 +159,14 @@ def run_flow(files: list[Path], out_dir: Path, mode: str, operator_names: list[s
                                                       caption_names=caps)
     timings["suggestions"] = time.time() - t0
     have = {name.casefold() for name, _c in entries}
+    # "Tick all", as the name screen does it: the suggestions it lists as
+    # likely names, not the headings and merchants it lists apart
+    from redactor import ner
+    known = frozenset(w for name, _c in entries for w in (ner._plain(t) for t in name.split())
+                      if len(w) > 2)
     for s in suggestions:
+        if not (s.nickname_for or ner.likely_name(s.text, s.category, known)):
+            continue
         if s.text.casefold() not in have:
             entries.append((s.text, s.category))
             have.add(s.text.casefold())
@@ -175,6 +185,7 @@ def run_flow(files: list[Path], out_dir: Path, mode: str, operator_names: list[s
         "suggestions": [(s.text, s.category) for s in suggestions],
         "entities": [(e.category, e.canonical) for e in store.entities.values()],
         "timings": timings,
+        "store": store,
     }
 
 
@@ -213,9 +224,13 @@ _CHANGED_GREY = 60
 # A figure was touched when this share of its box changed.
 _TOUCHED_SHARE = 0.25
 _FIGURE_DPI = 100
+# a whited-out figure: most of what was ink before is paper after
+_INK_GREY = 110
+_PAPER_GREY = 200
+_INK_GONE_SHARE = 0.5
 
 
-def _figures_covered(before: bytes, after: bytes) -> Counter:
+def _figures_covered(before: bytes, after: bytes, output_text: str = "") -> Counter:
     """Dollar figures on a scan or photo that the run painted over.
 
     Comparing OCR of the page before and after counted every misread on
@@ -224,6 +239,11 @@ def _figures_covered(before: bytes, after: bytes) -> Counter:
     its figures are; whether each was touched is then measured on the
     pixels under it, which OCR cannot misread. A page whose size changed is
     not measured.
+
+    A figure whited out - anonymize mode clears a word before writing over
+    it - changes only its ink, too few pixels for the share above: it counts
+    when most of its ink is gone and ``output_text`` (what the delivered page
+    reads as) no longer has it, so a figure written back in place is kept.
     """
     import numpy as np
     import pymupdf
@@ -255,8 +275,16 @@ def _figures_covered(before: bytes, after: bytes) -> Counter:
                 box = (slice(max(0, int(y0 * scale)), int(y1 * scale) + 1),
                        slice(max(0, int(x0 * scale)), int(x1 * scale) + 1))
                 region = np.abs(grey[0][box] - grey[1][box])
-                if region.size and (region > _CHANGED_GREY).mean() >= _TOUCHED_SHARE:
-                    touched[re.sub(r"[^\d,.]", "", word)] += 1
+                if not region.size:
+                    continue
+                figure = re.sub(r"[^\d,.]", "", word)
+                if (region > _CHANGED_GREY).mean() >= _TOUCHED_SHARE:
+                    touched[figure] += 1
+                    continue
+                ink = grey[0][box] < _INK_GREY
+                if ink.sum() and (grey[1][box][ink] > _PAPER_GREY).mean() >= _INK_GONE_SHARE \
+                        and figure not in re.sub(r"[^\d,.]", "", output_text):
+                    touched[figure] += 1
     return touched
 
 
@@ -307,15 +335,22 @@ def run_batch(batch_id: str, pdfs: list[str], root: str, out: str, mode: str,
                         docx_mode=docx_mode, use_ner=use_ner, pdf_mode=pdf_mode)
         result = flow["result"]
         record.update({k: flow[k] for k in ("captions", "suggestions", "entities", "timings")})
+        from eval import consistency
+        record["consistency"] = consistency.score(flow["store"], secrets)
+        record["review"] = [(e.category, e.canonical, e.replacement, e.parent or "")
+                            for e in flow["store"].entities.values() if e.enabled]
         archive = zipfile.ZipFile(result.archive) if result.archive else None
         by_source = {o.source.stem: o for o in result.outcomes}
+        # a whole case repeats file names across its folders: match on the path
+        by_path = {str(Path(o.source)): o for o in result.outcomes}
+        input_of = dict(zip(files, inputs)) if not docx else {}
         given = {Path(p).stem: Path(p) for p in inputs}
         for pdf in files:
             label = truth.load_label(pdf)
             source_text, scanned = _source_text(pdf)
             if docx and scanned:
                 continue                    # nothing to render; PDF-only case
-            outcome = by_source.get(pdf.stem)
+            outcome = by_path.get(str(input_of.get(pdf, ""))) or by_source.get(pdf.stem)
             entry = {"file": str(pdf.relative_to(root_p)), "doc_type": _doc_type(label, pdf),
                      "scanned": scanned, "status": outcome.status if outcome else "missing",
                      "error": outcome.error if outcome else "not converted",
@@ -338,11 +373,15 @@ def run_batch(batch_id: str, pdfs: list[str], root: str, out: str, mode: str,
                                    for f in truth.leaks(outcome.delivered_name.replace("_", " "), secrets)
                                    if f.category not in {"masked_tail", "ssn_shape"}]
                 if not scanned:
+                    from eval import consistency
+                    entry["words"] = consistency.word_count(source_text)
+                    entry["lost_words"] = dict(consistency.lost_words(source_text, text, secrets))
+                    entry["lost_dates"] = dict(consistency.lost_dates(source_text, text))
                     entry["destroyed_money"] = dict(truth.destroyed_money(source_text, text))
                     entry["lost_merchants"] = truth.lost_merchants(source_text, text, merchants, secrets)
-                elif scan_money and not docx and pdf.stem in given:
+                elif scan_money and not docx and pdf in input_of:
                     entry["destroyed_money_ocr"] = dict(
-                        _figures_covered(given[pdf.stem].read_bytes(), data))
+                        _figures_covered(input_of[pdf].read_bytes(), data, text))
             record["files"].append(entry)
     except Exception as exc:
         record["error"] = f"{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=6)}"
@@ -404,6 +443,8 @@ def main(argv=None) -> int:
     parser.add_argument("--keep-outputs", action="store_true")
     parser.add_argument("--scan-money", action="store_true",
                         help="also find the figures on each scan or photo as received and count those painted over")
+    parser.add_argument("--whole-case", action="store_true",
+                        help="one batch per case (a household's every folder together), as a set is")
     parser.add_argument("--photos", action="store_true",
                         help="also run the phone photos and screenshots (made into PDFs)")
     args = parser.parse_args(argv)
@@ -422,7 +463,8 @@ def main(argv=None) -> int:
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "_tmp").mkdir(exist_ok=True)
     _snapshot_code(args.out)
-    cases, batches = discover(root, args.limit, args.match, photos=args.photos)
+    cases, batches = discover(root, args.limit, args.match, photos=args.photos,
+                              whole_case=args.whole_case)
     print(f"{sum(len(v) for v in batches.values())} PDFs in {len(batches)} batches, "
           f"{len(cases)} cases", flush=True)
 

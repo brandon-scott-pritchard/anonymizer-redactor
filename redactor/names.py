@@ -246,6 +246,60 @@ def match_case(original: str, replacement: str) -> str:
     return replacement
 
 
+# OCR's usual confusions, folded before two spellings are compared:
+# "HARRlNGTON", "Harr1ngton", "HARRINGT0N" are one surname
+_OCR_FOLD = str.maketrans({"0": "o", "1": "l", "i": "l", "|": "l", "!": "l",
+                           "5": "s", "$": "s"})
+# a misread or dropped letter is allowed in a word at least this long - a
+# shorter one changed by a letter is another name ("Larsen", "Larson")
+ALIKE_MIN_LENGTH = 7
+
+
+def _ocr_folded(word: str) -> str:
+    word = re.sub(r"[^a-z0-9|!$]", "", word.casefold())
+    return word.replace("rn", "m").replace("vv", "w").translate(_OCR_FOLD)
+
+
+def _one_edit(a: str, b: str) -> bool:
+    if abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        diff = [i for i in range(len(a)) if a[i] != b[i]]
+        return len(diff) == 1 or (len(diff) == 2 and diff[1] == diff[0] + 1
+                                  and a[diff[0]] == b[diff[1]] and a[diff[1]] == b[diff[0]])
+    short, long_ = (a, b) if len(a) < len(b) else (b, a)
+    return any(long_[:i] + long_[i + 1:] == short for i in range(len(long_)))
+
+
+def alike(a: str, b: str) -> bool:
+    """One written name, allowing for how OCR and typing get it wrong.
+
+    The same surname misread on a scan - "HARRlNGTON", "Harringten" - was
+    taken for another family's and handed another invented surname, so one
+    household read as two. Equal once OCR's usual confusions are folded, or
+    one letter out in a long name, with the first letter kept.
+    """
+    x, y = a.strip(".").casefold(), b.strip(".").casefold()
+    if x == y:
+        return True
+    fx, fy = _ocr_folded(x), _ocr_folded(y)
+    if not fx or not fy:
+        return False
+    if fx == fy and len(fx) >= 3:
+        return True
+    return (min(len(fx), len(fy)) >= ALIKE_MIN_LENGTH and fx[0] == fy[0]
+            and _one_edit(fx, fy))
+
+
+def same_given(a: str, b: str) -> bool:
+    """One given name: alike, or one the other's usual short form."""
+    if alike(a, b):
+        return True
+    x, y = a.strip(".").casefold(), b.strip(".").casefold()
+    return (x in _BY_NICKNAME and y in _BY_NICKNAME[x]) or \
+        (y in _BY_NICKNAME and x in _BY_NICKNAME[y])
+
+
 def _part_compatible(x: str, y: str) -> bool:
     """Equal, one missing, or one the initial of the other."""
     x, y = x.strip(".").casefold(), y.strip(".").casefold()
@@ -262,6 +316,8 @@ def same_person(a: PersonName, b: PersonName) -> bool:
     are not. Registering them as separate entities would hand one person
     two different pseudonyms.
     """
+    # exactly: a misread or shortened form is grouped under this one instead
+    # (grouping.py), keeping its own spelling for the matcher to find
     if not a.last or not b.last or a.last.casefold() != b.last.casefold():
         return False
     if a.suffix and b.suffix and a.suffix.casefold() != b.suffix.casefold():

@@ -618,9 +618,15 @@ async def suggestions(request: Request):
             found, notes = pipeline.collect_suggestions(
                 files, store, settings, progress, caption_names=captions_now)
         SESSION.suggestions = found
+        # the words of the names already listed: a suggestion sharing one is
+        # one of them, or their business
+        known = frozenset(
+            w for name in [*(e[0] for e in _entries), *(c.name for c in captions_now)]
+            for w in (ner._plain(t) for t in name.split()) if len(w) > 2)
         return {"suggestions": [
             {"text": s.text, "category": s.category, "count": s.count,
-             "documents": sorted(s.documents), "nickname_for": s.nickname_for}
+             "documents": sorted(s.documents), "nickname_for": s.nickname_for,
+             "likely": bool(s.nickname_for) or ner.likely_name(s.text, s.category, known)}
             for s in found],
             "notes": notes, **_guard_payload()}
 
