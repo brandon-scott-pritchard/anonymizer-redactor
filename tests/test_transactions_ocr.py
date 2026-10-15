@@ -179,3 +179,24 @@ def test_the_employer_on_a_glued_or_misread_pay_line_is_found(line, expected):
 ])
 def test_a_bill_a_transfer_or_a_purchase_is_not_an_employer(line):
     assert transactions.employers(line) == []
+
+
+@pytest.mark.parametrize("line,expected", [
+    ("MEGAN L   HOLBROOK", ["MEGAN L HOLBROOK"]),
+    ("TYSON   OKAFOR", ["TYSON OKAFOR"]),
+    ("Megan L   Holbrook", ["Megan L Holbrook"]),
+    ("KAYLA J RUIZ   Current", ["KAYLA J RUIZ"]),
+    ("KAYLA J RUIZ   CURRENT", ["KAYLA J RUIZ"]),
+    ("MEGAN L HOLBROOK   YTD", ["MEGAN L HOLBROOK"]),
+])
+def test_a_holder_spaced_like_a_column_gap_is_one_name(line, expected):
+    """OCR spaces a typed name as widely as a column gap: cut at the gap, the
+    holder "MEGAN L   HOLBROOK" was lost whole; the next column's heading
+    still stays out."""
+    assert transactions._names_on_line(line) == expected
+
+
+def test_a_bill_payment_row_names_a_merchant_not_a_person():
+    text = ("06/21/2025   Paid   COSTCO WHOLESALE   groceries   $45.00\n"
+            "07/02/2025   Sent   KAYLA RUIZ   $40.00\n")
+    assert [p.name for p in transactions.direction_rows(text)] == ["KAYLA RUIZ"]

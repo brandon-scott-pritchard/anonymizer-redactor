@@ -181,3 +181,17 @@ def test_the_word_on_the_next_row_is_not_a_handle(text):
 ])
 def test_a_handle_is_still_a_handle(text, handle):
     assert handle in {m.text for m in patterns.scan(text) if m.category == "payment_handle"}
+
+
+@pytest.mark.parametrize("text,handle", [
+    ("Venmo:\njohn-smith-12", "john-smith-12"),
+    ("Cash App\n  kaylaruiz88", "kaylaruiz88"),
+    ("PayPal\n  kayla.ruiz88", "kayla.ruiz88"),
+    ("Zelle\nPage 2 of 4", None),
+    ("Zelle\nSee reverse", None),
+])
+def test_a_handle_printed_under_its_rail_is_still_a_handle(text, handle):
+    """A form prints "Venmo:" over the handle, mostly without its "@";
+    a ledger's next row ("Page", "See") under "Zelle" is not one."""
+    found = [m.text for m in patterns.scan(text) if m.category == "payment_handle"]
+    assert found == ([handle] if handle else [])

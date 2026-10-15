@@ -289,7 +289,7 @@ def _direction_at(turned, rect: pymupdf.Rect) -> tuple:
 
 
 def _rects_for_hit(hit: Hit, spans, padding: float = BOX_PADDING,
-                   ocr: bool = False, turned=()) -> list[pymupdf.Rect]:
+                   ocr: bool = False, turned=(), text: str = "") -> list[pymupdf.Rect]:
     """Boxes covering a hit, one per line the hit crosses.
 
     On a scan the box is padded outward on every side, because there it is the
@@ -303,7 +303,8 @@ def _rects_for_hit(hit: Hit, spans, padding: float = BOX_PADDING,
         if end <= hit.start or start >= hit.end:
             continue
         if ocr:
-            rect = _share_of_word(rect, start, end, hit.start, hit.end)
+            rect = _share_of_word(rect, start, end, hit.start, hit.end,
+                                  text[start:end] if text else None)
         direction = ACROSS if ocr else _direction_at(turned, rect)
         axis = _axis(direction)
         placed = False
@@ -332,7 +333,54 @@ def _rects_for_hit(hit: Hit, spans, padding: float = BOX_PADDING,
     return [_box(r, padding, direction) for r, direction in lines]
 
 
-def _share_of_word(rect: pymupdf.Rect, start: int, end: int, lo: int, hi: int) -> pymupdf.Rect:
+# A character's width in a proportional face, as a share of the type size -
+# by kind, which is as much as an OCR box says about what is inside it.
+_NARROW = set("ijlt.,:;'")
+_WIDE = set("mwMW")
+_FIGURE_AFTER = re.compile(r"\$?\d[\d,]*\.\d{2}")
+_FIGURE_BEFORE = re.compile(r"\$?\d[\d,]*\.\d{2}$")
+
+
+def _glyph_weight(ch: str) -> float:
+    if ch in _NARROW:
+        return 0.28
+    if ch in _WIDE:
+        return 0.9
+    if ch.isdigit():
+        return 0.56
+    if ch.isupper():
+        return 0.70
+    if ch.islower():
+        return 0.52
+    return 0.35
+
+
+def _slice_x(x0: float, x1: float, word: str, lo: int, hi: int) -> tuple[float, float]:
+    """Where characters ``lo:hi`` of an OCR word sit along it.
+
+    Two estimates, and the box takes in both. Each character the same width,
+    a character's slack either side, is right for a typewriter face; it
+    started the box late in a proportional one - after "Tuition2409059000",
+    narrow digits and lower case, the first letters of "CODYBASHWORTH" stayed
+    readable. Each character by its kind's width is right there and wrong
+    the other way in a typewriter face. Beside a dollar figure the slack is
+    dropped: it blacked out the "$8" of "$872.94" glued on after a mask.
+    """
+    n = max(len(word), 1)
+    width = (x1 - x0) / n
+    left = 0 if _FIGURE_BEFORE.search(word[:lo]) else 1
+    right = 0 if _FIGURE_AFTER.match(word[hi:]) else 1
+    weights = [_glyph_weight(ch) for ch in word] or [1.0]
+    total = sum(weights)
+    by_kind = (x0 + (x1 - x0) * sum(weights[:max(lo - left, 0)]) / total,
+               x0 + (x1 - x0) * sum(weights[:hi + right]) / total)
+    a = min(x0 + width * (lo - left), by_kind[0])
+    b = max(x0 + width * (hi + right), by_kind[1])
+    return max(a, x0), min(b, x1)
+
+
+def _share_of_word(rect: pymupdf.Rect, start: int, end: int, lo: int, hi: int,
+                   word: str | None = None) -> pymupdf.Rect:
     """The part of one recognised word that characters ``lo:hi`` take up.
 
     OCR glues a scanned row into one "word" as often as it splits it - a
@@ -344,12 +392,18 @@ def _share_of_word(rect: pymupdf.Rect, start: int, end: int, lo: int, hi: int) -
     """
     length = max(end - start, 1)
     inside = min(end, hi) - max(start, lo)
-    if inside >= WORD_SHARE_WHOLE * length:
+    if word is None or len(word) != length:
+        word = "x" * length                    # no text to go by: even widths
+    # most of the word is the hit: the whole word - unless what is left of it
+    # is a dollar figure, which the whole word's box would black out
+    beside_figure = bool(_FIGURE_AFTER.match(word[min(end, hi) - start:])
+                         or _FIGURE_BEFORE.search(word[:max(start, lo) - start]))
+    if inside >= WORD_SHARE_WHOLE * length and not beside_figure:
         return pymupdf.Rect(rect)
-    width = rect.width / length
-    cut = pymupdf.Rect(rect.x0 + width * (max(start, lo) - start - 1), rect.y0,
-                       rect.x0 + width * (min(end, hi) - start + 1), rect.y1)
-    return cut & rect
+    if inside >= length:
+        return pymupdf.Rect(rect)
+    a, b = _slice_x(rect.x0, rect.x1, word, max(start, lo) - start, min(end, hi) - start)
+    return pymupdf.Rect(a, rect.y0, b, rect.y1)
 
 
 # --------------------------------------------------------------------------
@@ -1531,9 +1585,8 @@ def _name_span(text: str, part: str, bits: list[str]) -> tuple[int, int]:
 def _share_rect(x0, y0, x1, y1, text: str, start: int, end: int) -> pymupdf.Rect:
     """The box of ``text[start:end]`` inside an OCR word, by its share of the
     characters, a character's slack either side."""
-    width = (x1 - x0) / max(len(text), 1)
-    rect = pymupdf.Rect(x0 + width * (start - 1), y0, x0 + width * (end + 1), y1)
-    return _pad_ocr(rect & pymupdf.Rect(x0, y0, x1, y1))
+    a, b = _slice_x(x0, x1, text, start, end)
+    return _pad_ocr(pymupdf.Rect(a, y0, b, y1))
 
 
 def _slice_hit(x0, y0, x1, y1, text: str, start: int, end: int, entity, bits) -> list:
@@ -1759,7 +1812,13 @@ def _plan_edits(word_sets: list[list], store, anon_settings, matcher, settings,
                     # "SOURCE" and a garbled "**+#7039", and its edit to
                     # "SOURCE" counted the wide word as claimed - so the
                     # masked digits it held were never covered at all.
-                    bare = [rect for rect in words_in if _covered(rect, claimed) < 0.9]
+                    # Only the hit's share of such a word, as a box would be:
+                    # "Acct1234567890Balance1,234.56" read as one word lost its
+                    # balance to a white-out of the whole of it.
+                    lo = min(h.start for h in run_hits)
+                    hi = max(h.end for h in run_hits)
+                    bare = [_share_of_word(rect, s_, e_, lo, hi, text[s_:e_]) if ocr else rect
+                            for s_, e_, rect in run if _covered(rect, claimed) < 0.9]
                     if bare:
                         edits.append(_Edit(bare, "", run_hits[0]))
                         counted.extend(h for h in run_hits if h not in counted)
@@ -2548,7 +2607,7 @@ def process(
                     found += _name_tails(text, spans, found, store, settings)
                 for hit in found:
                     rects = _rects_for_hit(hit, spans, padding, ocr=report.ocr_used,
-                                           turned=turned)
+                                           turned=turned, text=text)
                     # the second reading finds most things the first did; count
                     # each place once, so the report and review counts hold
                     if rects and all(any(r in b for b in boxed) for r in rects):

@@ -593,8 +593,19 @@ def _names_on_line(line: str) -> list[str]:
     # the employee beside the next column's heading - "KAYLA J RUIZ   Current"
     # - and the two together were proposed as one person, boxed across the
     # row and through the figure under it. The address block is the first
-    # cell; what lies past the gap is another column's.
-    line = re.split(r"[^\S\n]{3,}", line.strip())[0]
+    # cell; what lies past the gap is another column's - unless it reads as
+    # more of the same name: OCR spaces a typed name as widely as a column
+    # gap ("MEGAN L   HOLBROOK"), and that holder was lost whole.
+    cells = re.split(r"[^\S\n]{3,}", line.strip())
+    kept = [cells[0]]
+    for cell in cells[1:]:
+        tokens = cell.split()
+        if not tokens or cell.isupper() != cells[0].isupper() or not all(
+                re.fullmatch(rf"{_TOKEN}|{_INITIAL}", t) for t in tokens) or any(
+                t.strip(".,").casefold() in _FORM_WORDS | _STUB_ROW_WORDS for t in tokens):
+            break
+        kept.append(cell)
+    line = " ".join(kept)
     parts = [" ".join(p.split()).strip(" ,.") for p in _JOINT.split(line.strip())]
     # "Colby & Jess Morgan" - the first holder borrows the shared surname
     if len(parts) == 2 and len(parts[0].split()) == 1 and len(parts[1].split()) >= 2:
@@ -1315,8 +1326,10 @@ def ledger_parties(text: str, source: str = "") -> list[Party]:
 # "KELSEYAOKI" - where no rule can tell the given name from the surname. The
 # run is proposed as printed: ticked, it is the word on the page, which is
 # what gets covered.
+# not "Paid": that is bill pay, and the cell after it is a merchant -
+# "Paid   COSTCO WHOLESALE" was proposed as a person
 _P2P_DIRECTION = re.compile(
-    r"(?i)^(?:sent|rec[eiaow]{1,3}[vwu]?e?d|request(?:ed)?|paid|you\s+(?:sent|received))$")
+    r"(?i)^(?:sent|rec[eiaow]{1,3}[vwu]?e?d|request(?:ed)?|you\s+(?:sent|received))$")
 GLUED_NAME_LETTERS = 8
 _MONEY = re.compile(r"\$[^\S\n]?\d")
 

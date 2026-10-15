@@ -106,3 +106,55 @@ def test_a_card_tail_ocr_misread_on_a_photo_is_taken(line, value):
 @pytest.mark.parametrize("line", ["EXXON 1234", "boxxxxx12", "Visa 1.25"])
 def test_ordinary_text_is_not_a_mask(line):
     assert patterns.scan(line) == []
+
+
+def _glyphs(word, font):
+    """Each character's real box, set in a proportional or typewriter face."""
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((50, 100), word, fontsize=10, fontname=font)
+    boxes = [pymupdf.Rect(ch["bbox"]) for block in page.get_text("rawdict")["blocks"]
+             for line in block["lines"] for span in line["spans"] for ch in span["chars"]]
+    assert len(boxes) == len(word)
+    return boxes
+
+
+@pytest.mark.parametrize("font", ["helv", "tiro", "cour", "hebo"])
+@pytest.mark.parametrize("word,hit", [
+    ("LittleSproutsAcademyTuition2409059000000000CODYBASHWORTH", "CODYBASHWORTH"),
+    ("LittleSproutsAcademyTuition2409059000000000CODYBASHWORTH", "2409059000000000"),
+    ("iiiiiiii1234WWWWWWWW", "1234"),
+    ("lllllllll123-45-6789MMMMMMMM", "123-45-6789"),
+    ("Routing(RTNj:124000054Account", "124000054"),
+])
+def test_a_hit_inside_a_glued_word_is_covered_to_its_first_glyph(word, hit, font):
+    """Sliced as if every character were as wide as the next, the box started
+    late after narrow digits and lower case: the "CO" of CODYBASHWORTH stayed
+    readable on a payroll line."""
+    boxes = _glyphs(word, font)
+    whole = boxes[0]
+    for box in boxes[1:]:
+        whole |= box
+    lo = word.index(hit)
+    truth = boxes[lo]
+    for box in boxes[lo + 1:lo + len(hit)]:
+        truth |= box
+    got, = pp._rects_for_hit(_hit(lo, lo + len(hit)), [(0, len(word), whole)],
+                             pp.OCR_BOX_PADDING, ocr=True, text=word)
+    assert got.x0 <= truth.x0 and got.x1 >= truth.x1
+
+
+@pytest.mark.parametrize("word,hit,figure", [
+    ("xxxxxx1741$872.94", "xxxxxx1741", "$872.94"),
+    ("CODYBASHWORTH1,234.56", "CODYBASHWORTH", "1,234.56"),
+])
+def test_a_figure_glued_on_after_a_hit_is_not_blacked_out(word, hit, figure):
+    boxes = _glyphs(word, "helv")
+    whole = boxes[0]
+    for box in boxes[1:]:
+        whole |= box
+    lo = word.index(hit)
+    got, = pp._rects_for_hit(_hit(lo, lo + len(hit)), [(0, len(word), whole)],
+                             pp.OCR_BOX_PADDING, ocr=True, text=word)
+    digits = boxes[word.index(figure) + (1 if figure.startswith("$") else 0) + 1]
+    assert got.x1 < digits.x0, "the figure's digits went under the box"

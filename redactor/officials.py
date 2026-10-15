@@ -122,6 +122,16 @@ _BY_THE_COURT_LINES = 6
 _NOT_THE_COURT = re.compile(
     rf"(?i)\b(?:{caption.ROLE_ALT}|attorneys?\s+for|counsel\s+for|pro\s+se|"
     r"approved\s+as\s+to\s+(?:form|content)|stipulated|agreed|bar\s+(?:no|number|#))\b")
+# Under a signature, only the signer's own role line says it is not the
+# court's: "Respondent", "Attorney for Petitioner". An "Approved as to form"
+# heading there starts the parties' block after the judge's, and "as
+# stipulated" is ordinary order prose - neither unseats the judge above it.
+_ROLE_UNDER = re.compile(
+    rf"(?i)^[\s_]*(?:{caption.ROLE_ALT}|attorneys?\s+for|counsel\s+for|pro\s+se|"
+    r"bar\s+(?:no|number|#))\b")
+ROLE_LINE_CHARS = 60       # a role line is short; a sentence starting "Petitioner shall" is not one
+_ROLE_ON_LINE = re.compile(
+    rf"(?i)\b(?:{caption.ROLE_ALT}|attorneys?\s+for|counsel\s+for|pro\s+se)\b")
 
 # Trailing furniture that rides along with a harvested name.
 _TRAILING = re.compile(
@@ -278,9 +288,11 @@ def harvest(text: str, source: str = "") -> list[Official]:
             candidate = caption._first_name_in(stripped.lstrip("/s "))
             if not candidate:
                 continue
-            # the line over the signer, theirs and the two under it say who
-            # signed: "APPROVED AS TO FORM:" sits above, "Respondent" below
-            if _NOT_THE_COURT.search("\n".join(block[max(0, at - 1): at + 3])):
+            # who signed: a heading above the signer ("APPROVED AS TO FORM:")
+            # or the signer's own role, on their line or the next ("Respondent")
+            under = next((b for b in block[at + 1:] if b.strip(" _\t")), "")
+            if (_NOT_THE_COURT.search("\n".join(block[:at])) or _ROLE_ON_LINE.search(stripped)
+                    or (_ROLE_UNDER.match(under) and len(under.strip()) <= ROLE_LINE_CHARS)):
                 continue
             name = _acceptable(candidate)
             if name:

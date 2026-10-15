@@ -1071,9 +1071,16 @@ def _handle_from_another_row(value: str, label: str) -> bool:
     after a label crosses line breaks so a form's "Venmo:" can sit over its
     value. Read across rows, "Zelle" took the next row's first word - "Page",
     "See", an OCR fragment - as the payer's handle. A handle printed on its own
-    line under its label carries its "@" or "$".
+    line under its label carries its "@" or "$" - or looks like one: digits,
+    dots, dashes or underscores ("john-smith-12", "kayla.ruiz88"), camel case,
+    or a long run of lower case ("kaylaruiz"). Most Venmo and PayPal handles
+    are written without the "@", and a form prints them under the rail's name.
     """
-    return "\n" in label and not value.startswith(("@", "$"))
+    return ("\n" in label and not value.startswith(("@", "$"))
+            and not _HANDLE_LIKE.search(value))
+
+
+_HANDLE_LIKE = re.compile(r"[\d._\-]|^[a-z]+[A-Z]|^[a-z]{6,}$")
 
 
 def _wrong_shape(category: str, value: str, label: str = "") -> bool:

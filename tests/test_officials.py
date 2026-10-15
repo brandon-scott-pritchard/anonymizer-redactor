@@ -446,3 +446,15 @@ def test_a_caption_party_is_never_shielded_as_the_bench():
     assert "John Michael Smith" not in protection.terms
     assert "Amber M. Cordova" in protection.terms
     assert protection.dropped == ["John Michael Smith"]
+
+
+@pytest.mark.parametrize("under", [
+    "\nAPPROVED AS TO FORM:\n/s/ John Lawyer\nAttorney for Petitioner",
+    "\n\nAPPROVED AS TO FORM:\n/s/ John Lawyer",
+    "\nThe parties shall comply as stipulated above.",
+])
+def test_a_judge_signing_bare_keeps_the_bench_whatever_follows(under):
+    """The parties' approval block, or "as stipulated" in the order's own
+    words, under the judge's bare signature left the judge unprotected."""
+    text = f"IT IS SO ORDERED.\nBY THE COURT:\n\n/s/ Amber M. Cordova\n{under}\n"
+    assert [o.name for o in officials.harvest(text)] == ["Amber M. Cordova"]
