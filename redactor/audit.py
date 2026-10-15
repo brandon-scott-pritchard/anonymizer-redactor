@@ -790,7 +790,7 @@ def read_flagged(check: Check, result, store, settings, out_dir: Path, kev_url: 
         for round_ in range(LLM_ROUNDS + 1):
             to_fix: dict[tuple[str, int], tuple[Flag, list]] = {}
             for index, flag in enumerate(pending):
-                progress(f"The local model is reading flagged page {index + 1:,} of "
+                progress(f"The local model is checking page {index + 1:,} of "
                          f"{len(pending):,}", index / max(len(pending), 1))
                 found, missing = _confirmed(_ask_page(llm_url, flag.text, heads, store),
                                             flag.text, heads, store)

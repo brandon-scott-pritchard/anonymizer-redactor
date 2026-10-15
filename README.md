@@ -132,9 +132,16 @@ report says so. It adds about half a second a page on an M3 Max.
 
 ### The local model
 
-An optional local language model (`redactor/llm.py`) is asked two things
-the rules cannot settle alone:
+An optional local language model (`redactor/llm.py`, Qwen3.6-35B-A3B on
+MLX) is asked three things the rules cannot settle alone:
 
+- **On the name screen**, which of the scan's suggestions are names at all
+  (`redactor/llm_names.py`). The scan proposes a store ("Dollar Tree
+  Layton"), a heading ("Promo Expiration Date") or a town as a person as
+  readily as a person; the model tells "Megan Layton" from "Dawgs Layton",
+  which no word list can. Those it calls no name are listed apart, unticked,
+  and "Tick all" leaves them; nothing is dropped. Without the model, word
+  lists do the sorting.
 - **At review**, after the scan, which of the people and businesses found are
   the same real person or business—OCR misreadings ("HARRlNGTON",
   "Harringten"), nicknames, initials, hyphenated or maiden forms
@@ -148,7 +155,8 @@ the rules cannot settle alone:
   registered apart on purpose are never merged. A business that carries a
   person's name keeps its business words and takes their invented surname
   ("Harrington Enterprises" becomes "<invented surname> Enterprises").
-- **After the final check**, what on each flagged page still names a ticked
+- **After the final check**, what on each flagged page - and each page Kev
+  scored 0.3 or more without flagging it (`KEV_ASK_LLM`) - still names a ticked
   person, quoted word for word with the few words either side of it. A quote
   found on the page with those words around it becomes
   one more written form of that person, the file is made again from its
@@ -172,7 +180,7 @@ every step runs as it did and the review page or `final-check.txt` says so.
 started with the app: each step that needs one takes its turn at a single
 slot, in the order asked; the slot stops the other model, waits for it to be
 gone, then starts the one wanted. A queued run asks for Kev for its final
-check, then—only if a page was flagged—for the local model in its place. A
+check, then—only if a page was flagged or doubtful—for the local model in its place. A
 model left loaded is stopped after two minutes nobody has asked for it.
 
 ### OCR

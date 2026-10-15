@@ -493,3 +493,12 @@ def test_one_ssn_however_it_is_masked():
 def test_two_full_ssns_sharing_a_last_four_leave_the_mask_alone():
     store = _store(values=[("ssn", "923-90-9016"), ("ssn", "931-22-9016"), ("ssn", "XXX-XX-9016")])
     assert grouping.head_of(store, _row(store, "XXX-XX-9016")).canonical == "XXX-XX-9016"
+
+
+def test_an_address_ocr_glued_together_is_the_same_address():
+    store = _store(values=[("street_address", "1734 W GENTILE ST LAYTON UT 84041", 3),
+                           ("street_address", "1734W Gentile St,LaytonUT 84041"),
+                           ("street_address", "1734 E GENTILE ST")])
+    head = _row(store, "1734 W GENTILE ST LAYTON UT 84041").replacement
+    assert _row(store, "1734W Gentile St,LaytonUT 84041").replacement == head
+    assert _row(store, "1734 E GENTILE ST").replacement != head

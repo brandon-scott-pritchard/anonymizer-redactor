@@ -706,6 +706,11 @@ class _Address:
 
 def parse_address(text: str) -> _Address | None:
     """House number, street, unit, city and ZIP, each written one way."""
+    # OCR glues an address together: "1734W Gentile St,LaytonUT 84041" is
+    # "1734 W Gentile St, Layton UT 84041" - the direction run into the house
+    # number, the state into the town
+    text = re.sub(r"^\s*(\d+)([NSEW])(?=\s+[A-Za-z])", r"\1 \2", text)
+    text = re.sub(r"(?<=[a-z])(?=[A-Z]{2}\s*\d{5}(?:-\d{4})?\s*$)", " ", text)
     raw = text.casefold().replace("#", " # ")
     words = re.findall(r"[a-z0-9#]+(?:-\d+)?", raw)
     while words and words[-1] in {"usa", "us", "states", "united", "america"}:

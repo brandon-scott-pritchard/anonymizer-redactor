@@ -454,6 +454,7 @@ function NamesStep({ state, actions, meta, busy }) {
     <div class="columns">
       <div class="card">
         <h2>Suggestions</h2>
+        ${state.sortedBy ? html`<p class="hint">${state.sortedBy}</p>` : null}
         <div class="tablewrap"><table>
           <thead><tr><th></th><th>Name</th><th>Type</th><th>Found as</th><th>Where</th></tr></thead>
           <tbody>
@@ -889,7 +890,8 @@ function App() {
     const scanSuggestions = async () => {
       const body = { options, names: parseNameLines(state.namesText) };
       const result = await runJob(id, "/api/suggestions", body, `Names for ${nameOf(id)}`);
-      patch(id, { scanned: true, suggestions: result.suggestions, ...absorbGuard(result) });
+      patch(id, { scanned: true, suggestions: result.suggestions, sortedBy: result.sorted_by || "",
+                  ...absorbGuard(result) });
     };
 
     const actions = {

@@ -695,11 +695,22 @@ async def suggestions(request: Request):
         known = frozenset(
             w for name in [*(e[0] for e in _entries), *(c.name for c in captions_now)]
             for w in (ner._plain(t) for t in name.split()) if len(w) > 2)
+        parties = [*(e[0] for e in _entries), *(c.name for c in captions_now)]
+        labels, sorted_by = _sort_with_llm([s.text for s in found], parties, progress)
+
+        def likely(s) -> bool:
+            if s.nickname_for or any(ner._plain(t) in known for t in s.text.split()):
+                return True
+            label = labels.get(s.text)
+            if label is not None:
+                return label != "other"
+            return ner.likely_name(s.text, s.category, known)
         return {"suggestions": [
             {"text": s.text, "category": s.category, "count": s.count,
              "documents": sorted(s.documents), "nickname_for": s.nickname_for,
-             "likely": bool(s.nickname_for) or ner.likely_name(s.text, s.category, known)}
+             "likely": likely(s)}
             for s in found],
+            "sorted_by": sorted_by,
             "notes": notes, **_guard_payload()}
 
     return {"job": _start_job(work, None if prepared else lambda: pipeline.count_pages(files))}
@@ -731,6 +742,28 @@ async def build_review(request: Request):
         return {**_entities_payload(), **_guard_payload()}
 
     return {"job": _start_job(work, lambda: pipeline.count_pages(files))}
+
+
+def _sort_with_llm(texts: list[str], parties: list[str], progress) -> tuple[dict, str]:
+    """The local model's sort of the suggestions into names and not names -
+    see :mod:`llm_names`. Empty, and the word lists' sort stands, where the
+    model is missing or does not answer."""
+    from . import llm, llm_names, models
+
+    if not texts or os.environ.get("REDACTOR_LLM", "1") == "0" or not llm.llm_python().is_file():
+        return {}, ""
+
+    def waiting() -> None:
+        progress("Waiting for the local model (another step is using it)", 0.95)
+
+    with models.SLOT.use("llm", on_wait=waiting) as url:
+        if url is None:
+            return {}, ""
+        try:
+            labels = llm_names.classify(texts, parties, url, progress)
+        except Exception:                          # the word lists' sort stands
+            return {}, ""
+    return labels, llm_names.describe(labels)
 
 
 def _merge_with_llm(store: MappingStore, progress) -> None:
