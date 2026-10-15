@@ -91,6 +91,18 @@ class _PerSet:
         setattr(session.current, self.name, value)
 
 
+# What the run does with each document, set once for every set in the
+# window: a night's cases are run the same way, and a setting changed in one
+# set and not the next was a difference nobody would see until a set came
+# back redacted when it should have been anonymized.
+DEFAULT_OPTIONS = {
+    "docx_mode": "anonymize", "pdf_mode": "redact", "metadata": True, "comments": True,
+    "embedded": True, "filenames": True, "images": True, "ocr": True, "ner": True,
+    "labels": False, "allowlist": "",
+}
+_MODES = {"docx_mode": ("anonymize", "redact"), "pdf_mode": ("redact", "anonymize")}
+
+
 class Session:
     """One operator, any number of sets - see :mod:`redactor.sets`.
 
@@ -122,6 +134,7 @@ class Session:
         pdf_processor.keep_ocr_on_disk(self.ocr_dir)
         self.sets: dict[str, sets.DocSet] = {}
         self.selected = self.new_set().id
+        self.options: dict = dict(DEFAULT_OPTIONS)        # every set's, see above
         self.results_root: Path | None = None
         self.jobs: dict[str, Job] = {}
         self.busy = threading.Lock()
@@ -158,7 +171,9 @@ class Session:
                 self.queue = sets.RunQueue(self.ocr_dir)
                 self.preparer = sets.Preparer(
                     self.ocr_dir, lambda: sorted(self.sets.values(), key=lambda s: s.rank),
-                    lambda doc_set: _settings({}))
+                    # with the options the run will use: worked out with the
+                    # model on and opened with it off, the screen is scanned again
+                    lambda doc_set: _settings(self.options))
                 self.awake = sets.KeepAwake(self.anything_going)
                 # registered after the temporary folder's removal, so run
                 # first: the run and the preparing are stopped before their
@@ -228,6 +243,13 @@ def _start_job(work, pages=None) -> str:
     return job_id
 
 
+def _options(body: dict) -> dict:
+    """The options a request runs with: the ones it sends, or else the
+    window's shared ones (``PUT /api/options``)."""
+    given = body.get("options")
+    return given if isinstance(given, dict) else SESSION.options
+
+
 def _settings(options: dict) -> Settings:
     extra = [line.strip() for line in options.get("allowlist", "").splitlines()
              if line.strip()]
@@ -274,7 +296,7 @@ def _prepare(body: dict) -> tuple[Settings, MappingStore, list[tuple[str, str]]]
     """
     entries = _name_entries(body.get("names", []))
     _reprotect(entries)
-    settings = _settings(body.get("options", {}))
+    settings = _settings(_options(body))
     roles = {c.name.casefold(): c.role for c in SESSION.caption_names}
     store, overlaps = review.build_store(entries, roles)
     SESSION.overlaps = overlaps
@@ -401,8 +423,38 @@ def state():
         # middleware above for why a cookie is not enough
         "download_token": TOKEN,
         "kev": _kev_note(),
+        "options": dict(SESSION.options),
         **_sets_payload(),
     }
+
+
+@app.get("/api/options")
+def get_options():
+    return dict(SESSION.options)
+
+
+@app.put("/api/options")
+async def put_options(request: Request):
+    """The one set of options every set is prepared and run with. Unknown
+    keys are dropped and a mode is one of its two values, so a typo cannot
+    reach a run as an option nobody chose."""
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(422, "Options are a JSON object.")
+    merged = dict(SESSION.options)
+    for key, value in body.items():
+        if key not in DEFAULT_OPTIONS:
+            continue
+        if key in _MODES:
+            if value not in _MODES[key]:
+                raise HTTPException(422, f"{key} is one of: {', '.join(_MODES[key])}.")
+            merged[key] = value
+        elif key == "allowlist":
+            merged[key] = str(value or "")
+        else:
+            merged[key] = bool(value)
+    SESSION.options = merged
+    return dict(merged)
 
 
 def _files_payload() -> dict:
@@ -462,6 +514,12 @@ def _keep(relative: str, write) -> Path | None:
     return target
 
 
+@app.get("/api/files")
+def list_files():
+    """The set's documents - for a page opened again over sets already filled."""
+    return _files_payload()
+
+
 @app.post("/api/files")
 async def upload(files: list[UploadFile] = File(default=[]),
                  paths: list[str] = Form(default=[]),
@@ -497,11 +555,21 @@ async def upload(files: list[UploadFile] = File(default=[]),
     return {"added": len(added), **_files_payload()}
 
 
-def add_paths(paths: list[str | Path]) -> dict:
+def add_paths(paths: list[str | Path], set_id: str | None = None) -> dict:
     """Add files and whole folders straight from disk - the app window's
     "Choose folder" button, which has no browser in the way to upload through.
     The documents are copied into the session; the originals are not touched.
+    ``set_id`` names the set whose button it was: every set's card has one,
+    and the folder goes to that set, not to whichever was made last.
     """
+    if set_id:
+        if set_id not in SESSION.sets:
+            raise HTTPException(404, "That set has been removed.")
+        marker = _current_set.set(set_id)
+        try:
+            return add_paths(paths)
+        finally:
+            _current_set.reset(marker)
     _not_while_run("given more documents")
     gathered = pipeline.gather([Path(p) for p in paths])
     added: list[Path] = []
@@ -742,7 +810,7 @@ async def run(request: Request):
     files = list(SESSION.files)
     if not files:
         raise HTTPException(422, "Add at least one document first.")
-    settings = _settings(body.get("options", {}))
+    settings = _settings(_options(body))
     store = SESSION.store
 
     def work(progress):
@@ -881,7 +949,7 @@ async def queue_run(request: Request):
         raise HTTPException(422, "Add at least one document first.")
     if not doc_set.store.entities:
         raise HTTPException(422, "Build the review list first - the run uses what it says.")
-    settings = _settings(body.get("options", {}))
+    settings = _settings(_options(body))
     SESSION.run_queue().add(doc_set, settings, password, SESSION.results_root)
     return _sets_payload()
 

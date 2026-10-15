@@ -47,21 +47,44 @@ The frozen `.app` and `.exe` open the window version by default. Pass
 
 ### Several sets, run overnight
 
-The row across the top of the window holds any number of **sets**—separate
-cases, each with its own documents, names, review decisions, invented names
-and mapping-key password (`redactor/sets.py`). Make a set, name it, drop its
-documents in; make the next. The sets' scans are read in the background in
-the order the sets were made, each with its own counter ("Reading 340 of
-1,200 scanned pages"). Once a set is read, everything its name screen shows
-—the captions, the children, the bench, the suggestions—is worked out ahead
-in a process of its own ("working out the name lists"), so a set reads
-"ready to review" with its name screen ready to open at once: drop every set
-in at night and review them all in the morning. A set given more files is
-worked out again. Review a set while the next one reads, then **Queue this
-set to run** on the Run step.
+The window holds any number of **sets**—separate cases, each with its own
+documents, names, review decisions, invented names and mapping-key password
+(`redactor/sets.py`)—and takes them all through the four steps together:
+
+1. **Documents & options.** Every set is a card on one screen: name it, drop
+   its documents or a folder on it (or **Choose folder…** on the card), and
+   **Add another set** for the next case. The options—Word and PDF mode,
+   what else to scrub, the terms never to change, the name model, OCR,
+   labels—are chosen once, beside the cards, and every set is read, scanned
+   for names and run with them. The sets' scans are read in the background
+   in the order the sets were made, each card with its own counter
+   ("Reading 340 of 1,200 scanned pages") and one line for the whole stage
+   ("Reading set 2 of 5 - page 340 of 1,605"). Once a set is read,
+   everything its name screen shows—the captions, the children, the bench,
+   the suggestions—is worked out ahead in a process of its own ("working out
+   the name lists"), and the card says **Ready**. A set given more files is
+   worked out again. **Continue to names** stays shut, saying why, until
+   every set with documents is ready; a set left empty is left out, and the
+   screen says so.
+2. **Names**, one set at a time: "Names - Set 2 of 5: Harrington", with
+   **Previous set** and **Next set**. Each opens at once, worked out ahead;
+   what is typed and ticked stays with its set while you move between them.
+3. **Review.** Every set's review list is built on the way in, one set after
+   another ("Building the review list for set 3 of 5"), and you step through
+   them the same way—a set already built can be looked over while the next
+   builds. A set whose names, files or options changed since is built again
+   when the step is next opened; its ticks and edits are kept.
+4. **Run.** A table of every set: its documents, the items it will replace,
+   its own mapping-key password (made for it automatically; show, copy, or
+   make a new one—or **Copy all passwords**), and how its run is going.
+   **Run all** queues every set, in order, with its password and the shared
+   options. A set still waiting can be taken back out of the queue.
+
+Drop every set in at night, name and review them in the morning, and run
+them all with one button.
 
 Queued sets run one at a time, in the order queued, with no further input,
-into the results folder chosen at the top of the window—a folder per set,
+into the results folder chosen on the Documents or Run step—a folder per set,
 named after it, holding the archive, the encrypted mapping key and the
 report. Each run happens in a process of its own, so the window stays free
 for reviewing while one runs; it reads its pages from the copy of the
@@ -176,8 +199,8 @@ Windows machine with Tesseract installed. Skip it and RapidOCR covers you.
 
 ### 1. Documents & options
 
-Add DOCX and PDF files, photos of documents, or whole folders: drop a folder on the window, or use
-**Choose folder…** (**Add folder…** in the Tk version). Every PDF and Word file
+Add DOCX and PDF files, photos of documents, or whole folders to a set: drop a folder on
+its card, or use the card's **Choose folder…** (**Add folder…** in the Tk version). Every PDF and Word file
 inside it, at any depth, is processed as one batch, and the results come back
 in the same tree:
 

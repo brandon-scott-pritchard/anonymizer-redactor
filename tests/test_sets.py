@@ -424,3 +424,78 @@ def test_a_set_queued_while_still_reading_waits_for_it(tmp_path, monkeypatch):
         queue._run(doc_set, None, "pw", tmp_path)
     assert time.time() - began >= 1.5                    # waited, then went on
     assert messages == ["Starting"]
+
+
+# --------------------------------------------------------------------------
+# the window's stages: one set of options, every set taken through together
+# --------------------------------------------------------------------------
+
+
+def test_the_options_are_set_once_for_every_set(quiet, tmp_path, monkeypatch):
+    """Chosen once on the Documents screen, they are what every set's name
+    lists are worked out with and what every queued run is given."""
+    assert quiet.get("/api/state").json()["options"] == webapp.DEFAULT_OPTIONS
+    saved = quiet.put("/api/options", json={"pdf_mode": "anonymize", "ner": 0,
+                                            "allowlist": "Zions Bank", "typo": True}).json()
+    assert saved["pdf_mode"] == "anonymize" and saved["ner"] is False
+    assert saved["allowlist"] == "Zions Bank" and "typo" not in saved
+    assert quiet.get("/api/options").json() == saved
+    refused = quiet.put("/api/options", json={"ner": True, "docx_mode": "shred"})
+    assert refused.status_code == 422
+    assert quiet.get("/api/options").json() == saved           # nothing half applied
+
+    # the name lists worked out ahead use them
+    webapp.SESSION.run_queue()
+    prepared_with = webapp.SESSION.preparer.settings_for(webapp.SESSION.current)
+    assert prepared_with.pdf_mode == "anonymize" and prepared_with.use_ner is False
+
+    # and a set queued without options of its own runs with them
+    queued = []
+    monkeypatch.setattr(sets.RunQueue, "add",
+                        lambda self, doc_set, settings, password, root:
+                        queued.append((doc_set.id, settings, password)))
+    quiet.post("/api/results-folder", json={"path": str(tmp_path)})
+    for name in ("Kyle D Harrington", "Rosa M Valdez"):
+        set_id = quiet.post("/api/sets", json={"name": name}).json()["selected"]
+        head = {"X-Set": set_id}
+        quiet.post("/api/files", headers=head,
+                   files=[("files", ("a.pdf", _typed(f"Dear {name}"), "application/pdf"))])
+        body = {"names": [{"name": name, "category": "person"}]}
+        _job(quiet, quiet.post("/api/review", headers=head, json=body), set_id)
+        assert quiet.post("/api/queue", headers=head,
+                          json={"password": f"pw-{set_id}"}).status_code == 200
+    assert len(queued) == 2
+    for set_id, settings, password in queued:
+        assert settings.pdf_mode == "anonymize" and settings.use_ner is False
+        assert "Zions Bank" in settings.extra_allowlist and password == f"pw-{set_id}"
+
+
+def test_each_sets_documents_are_listed_for_a_window_opened_again(quiet):
+    first = quiet.get("/api/sets").json()["sets"][0]["id"]
+    second = quiet.post("/api/sets", json={"name": "B"}).json()["selected"]
+    quiet.post("/api/files", headers={"X-Set": first},
+               files=[("files", ("a.pdf", _typed("Kyle D Harrington"), "application/pdf"))],
+               data={"skipped": ["Case/ledger.xlsx"]})
+    assert quiet.get("/api/files", headers={"X-Set": first}).json() == {
+        "files": [{"name": "a.pdf", "kind": "pdf"}], "skipped": ["Case/ledger.xlsx"]}
+    assert quiet.get("/api/files", headers={"X-Set": second}).json() == \
+        {"files": [], "skipped": []}
+
+
+def test_a_cards_folder_button_fills_that_set_not_the_newest(quiet, tmp_path):
+    """Every set's card has its own Choose folder button: the app window's
+    folder panel names the set, and the folder goes to it."""
+    case = tmp_path / "Case"
+    case.mkdir()
+    (case / "a.pdf").write_bytes(_typed("Kyle D Harrington"))
+    first = quiet.get("/api/sets").json()["sets"][0]["id"]
+    newest = quiet.post("/api/sets", json={"name": "Newest"}).json()["selected"]
+    added = webapp.add_paths([case], first)
+    assert [f["name"] for f in added["files"]] == ["Case/a.pdf"]
+    assert len(webapp.SESSION.sets[first].files) == 1
+    assert not webapp.SESSION.sets[newest].files
+    quiet.delete(f"/api/sets/{first}")
+    with pytest.raises(webapp.HTTPException) as refused:
+        webapp.add_paths([case], first)
+    assert refused.value.status_code == 404
+    assert not webapp.SESSION.sets[newest].files
