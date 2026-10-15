@@ -732,7 +732,7 @@ the language model, and copy the result back into `dist/`.
 ~/.venvs/anonymizer-redactor/bin/python -m pytest tests/ -q
 ```
 
-1,060 tests covering detector accuracy, allowlist protection, judicial-officer
+1,061 tests covering detector accuracy, allowlist protection, judicial-officer
 harvesting in every layout a court prints, child rosters and custody clauses,
 name-variant expansion and merging, overlapping-name folding, typo matching,
 Word's own run and tab structure, surrogate determinism, image redaction,

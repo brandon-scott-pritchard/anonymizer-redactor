@@ -42,10 +42,12 @@ from pathlib import Path
 
 KEV_RUN = "jaredpalmer/kev-4b@v1.0"
 # Kev's "yes" probability at or above which a page is flagged. On the corpus
-# test: 0.5 flagged no clean page and, with the matcher, caught 70 of 77
-# leaks; 0.4 caught 71 and flagged 2 of 120 clean pages. Over-checking beats
-# leaking, so the lower one.
-KEV_THRESHOLD = 0.4
+# test: 0.5 flagged none of 120 clean anonymized pages and, with the matcher,
+# caught 70 of 77 leaks; 0.4 caught one more and flagged two clean pages.
+# Short pages score higher at random - a one-line letter carrying only its
+# invented name scored 0.61 - so the higher one: a flag should be worth a look.
+# (Telling Kev the invented names lowered leaks' scores as much as clean ones.)
+KEV_THRESHOLD = 0.5
 # Names asked about in one question - a long list dilutes the question, so a
 # long list is asked in parts, all against the same page (Kev keeps the page).
 NAMES_PER_QUESTION = 20

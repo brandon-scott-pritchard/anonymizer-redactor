@@ -139,3 +139,43 @@ def test_every_step_that_reads_whole_documents_reads_them_ahead(step, monkeypatc
     doc.save(path)
     getattr(pipeline, step)([path])
     assert ([path], None) in calls
+
+
+def test_readers_leave_when_the_app_dies_without_closing(tmp_path):
+    """A force-quit app cannot stop its readers; they must notice and go."""
+    import os
+    import subprocess
+    import sys
+    import textwrap
+    import time
+    script = textwrap.dedent(f'''
+        import os, sys
+        sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r})
+        os.environ["REDACTOR_OCR_WORKERS"] = "2"
+        from redactor import ocr_pool
+        if __name__ == "__main__":
+            scheduler = ocr_pool._get_scheduler()
+            pids = [p.pid for p in scheduler.readers._processes.values()] if \\
+                scheduler.readers._processes else []
+            future = scheduler.surveyor.submit(os.getpid)
+            future.result(timeout=60)
+            scheduler.readers.submit(os.getpid).result(timeout=60)
+            pids = list(scheduler.readers._processes) + list(scheduler.surveyor._processes)
+            print(" ".join(map(str, pids)), flush=True)
+            os._exit(1)                              # no clean-up at all
+    ''')
+    path = tmp_path / "dies.py"
+    path.write_text(script)
+    out = subprocess.run([sys.executable, str(path)], capture_output=True, text=True, timeout=120)
+    pids = [int(p) for p in out.stdout.split()]
+    assert pids, out.stderr[-500:]
+    deadline = time.time() + 20
+    def alive(pid):
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+    while any(alive(p) for p in pids) and time.time() < deadline:
+        time.sleep(0.5)
+    assert not any(alive(p) for p in pids), "a reader outlived the app"

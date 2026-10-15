@@ -36,6 +36,7 @@ import itertools
 import os
 import queue
 import threading
+import time
 from concurrent.futures import Future, ProcessPoolExecutor
 from pathlib import Path
 from typing import Callable, Iterable
@@ -71,10 +72,26 @@ def worker_count() -> int:
     return max(1, min(MAX_WORKERS, (os.cpu_count() or 2) // 4))
 
 
-def _start_worker(threads: int) -> None:
+def _start_worker(threads: int, parent: int) -> None:
     # every worker sharing the cores rather than each taking all of them
     os.environ["REDACTOR_OCR_THREADS"] = str(threads)
     os.environ["OMP_THREAD_LIMIT"] = "1"
+    _exit_with(parent)
+
+
+def _exit_with(parent: int) -> None:
+    """Worker side: leave the moment the app does.
+
+    An app that quits cleanly stops its workers; one that crashed or was
+    force-quit cannot, and its readers - each holding an OCR model - were left
+    running with nothing to read for.
+    """
+    def watch() -> None:
+        while os.getppid() == parent:
+            time.sleep(2)
+        os._exit(0)
+
+    threading.Thread(target=watch, daemon=True, name="exit-with-app").start()
 
 
 def _survey(path: str) -> list[int]:
@@ -111,8 +128,10 @@ class _Scheduler:
         spawn = multiprocessing.get_context("spawn")
         threads = max(1, (os.cpu_count() or 2) // workers)
         self.readers = ProcessPoolExecutor(workers, mp_context=spawn,
-                                           initializer=_start_worker, initargs=(threads,))
-        self.surveyor = ProcessPoolExecutor(1, mp_context=spawn)
+                                           initializer=_start_worker,
+                                           initargs=(threads, os.getpid()))
+        self.surveyor = ProcessPoolExecutor(1, mp_context=spawn, initializer=_exit_with,
+                                            initargs=(os.getpid(),))
         self.slots = workers + 1                  # one ready as each finishes
         self.heap: list[tuple[tuple, int, tuple]] = []
         self.order = itertools.count()
