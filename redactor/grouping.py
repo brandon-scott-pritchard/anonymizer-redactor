@@ -85,6 +85,17 @@ def sync(store: MappingStore) -> None:
                 word = entity.canonical.split()[-1]
                 entity.replacement = f"{_names.match_case(core.canonical, stand_in.canonical)} {word}"
                 continue
+            segments = _glued_segments(entity.person, head.person)
+            if segments is not None and head.surrogate is not None:
+                # each word glued back the way it was found: "COSMO ISATO"
+                fake = dict(head.surrogate.ordered)
+                words = []
+                for (_k, written), pieces in zip(entity.person.ordered, segments):
+                    joined = "".join((fake.get(key) or "")[:1] if initial
+                                     else (fake.get(key) or "") for key, initial in pieces)
+                    words.append(_names.match_case(written, joined))
+                entity.replacement = " ".join(words)
+                continue
             if _glued_into(entity.person, head.person) and head.surrogate is not None:
                 # glued back the way it was found, in its own capitals
                 stand_in = head.surrogate
@@ -256,6 +267,40 @@ def _fits(part: str, whole: str) -> bool:
     return len(whole) > 1 and _names.same_given(part, whole)
 
 
+def _glued_segments(part: _names.PersonName | None,
+                    whole: _names.PersonName | None) -> list[list[tuple[str, bool]]] | None:
+    """For each word of ``part``, the components of ``whole`` it runs together,
+    in order - [(component, as an initial)] - or None. "NATHAN CBLACKBURN"
+    under "NATHAN C BLACKBURN": [[first], [middle0 initial, last]]. At least
+    one word glues two components, or this is no glued form."""
+    if part is None or whole is None:
+        return None
+    theirs = [(key, _names._ocr_folded(value)) for key, value in whole.ordered]
+    out: list[list[tuple[str, bool]]] = []
+    position = 0
+    glued = False
+    for _key, value in part.ordered:
+        word = _names._ocr_folded(value)
+        pieces: list[tuple[str, bool]] = []
+        at = 0
+        while at < len(word) and position < len(theirs):
+            key, full = theirs[position]
+            if full and word.startswith(full, at):
+                pieces.append((key, len(full) == 1))   # an initial stays one
+                at += len(full)
+            elif full and word[at] == full[0] and at + 1 < len(word):
+                pieces.append((key, True))            # its initial, glued on
+                at += 1
+            else:
+                break
+            position += 1
+        if at != len(word) or not pieces:
+            return None
+        glued |= len(pieces) > 1
+        out.append(pieces)
+    return out if glued else None
+
+
 def _glued_into(part: _names.PersonName | None, whole: _names.PersonName | None) -> bool:
     """One word that is the whole name run together: "ThomasLarsen",
     "KYLEDHARRINGTON". OCR glues a name as often as it splits it, and the
@@ -360,6 +405,7 @@ def _group_people(store: MappingStore) -> None:
                       if h.category == entity.category and not h.candidates
                       and (_partial_mapping(entity.person, h.person) is not None
                            or _glued_into(entity.person, h.person)
+                           or _glued_segments(entity.person, h.person) is not None
                            or (core is not None and _same_name(core, h.person)))]
         if len(candidates) > 1 and _one_family(entity, candidates):
             # a bare surname the whole family shares: whichever of them it

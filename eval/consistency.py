@@ -82,7 +82,10 @@ def _whose(canonical: str, people: list[truth.Person]) -> list[truth.Person]:
     for person in people:
         last = person.last
         surname = [t for t in tokens if _close(t, last)]
-        glued = [t for t in tokens if len(t) > len(last) + 2 and _fold(last) in _fold(t)]
+        # glued: the word holds the first name too - "toABIGAILOKAFOR" is
+        # Abigail; "CRUMBLCOOKIES" and a tracking number holding "COX" are not
+        glued = [t for t in tokens if len(t) > len(last) + 2 and _fold(last) in _fold(t)
+                 and person.first and _fold(person.first) in _fold(t)]
         if not surname and not glued:
             continue
         others = [t for t in tokens if t not in surname and t not in glued]

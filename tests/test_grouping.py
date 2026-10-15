@@ -530,11 +530,40 @@ def test_two_documents_with_one_name_are_both_read(tmp_path):
 
 def test_a_name_with_a_payment_lines_word_on_its_end_is_the_person():
     """"Whitney Lewis Cont" and "Whitney Lewis Conf" were proposed - and
-    given - an invented person each."""
+    given - an invented person each. Now the line's word is dropped from the
+    name, and stays in the text."""
     store = _store(["Whitney Lewis", "Whitney Lewis Cont", "Whitney Lewis Conf", "WHITNEY LEWIS REF"])
-    head = _row(store, "Whitney Lewis")
-    assert head.parent is None
-    for form, word in (("Whitney Lewis Cont", "Cont"), ("Whitney Lewis Conf", "Conf"),
-                       ("WHITNEY LEWIS REF", "REF")):
-        assert _head(store, form) == "Whitney Lewis"
-        assert _row(store, form).replacement.casefold() == f"{head.replacement} {word}".casefold()
+    assert [e.canonical for e in store.entities.values()] == ["Whitney Lewis"]
+    stand_in = _row(store, "Whitney Lewis").replacement
+    assert _apply(store, "Paid Whitney Lewis Cont and WHITNEY LEWIS REF") == \
+        f"Paid {stand_in} Cont and {stand_in.upper()} REF"
+
+
+def test_an_account_or_payment_word_on_a_name_is_not_its_surname():
+    """"Rebecca L Blackburn Ret" (a retirement account's line) read "Ret" as
+    the surname and swallowed the household's own Rebecca L Blackburn; every
+    "... Conf" and "... ID" shared one invented surname."""
+    store = _store(["NATHAN C BLACKBURN", "REBECCA L BLACKBURN", "Rebecca L Blackburn Ret",
+                    "MARY COX Conf", "MARK MORGAN Conf", "Mary Pratt ID"])
+    family = _row(store, "NATHAN C BLACKBURN").surrogate.last
+    assert _row(store, "REBECCA L BLACKBURN").surrogate.last == family
+    assert not any(e.canonical.endswith(("Ret", "Conf", "ID")) for e in store.entities.values())
+    surnames = {_row(store, n).surrogate.last for n in ("MARY COX", "MARK MORGAN", "Mary Pratt")}
+    assert len(surnames) == 3
+
+
+def test_a_glued_initial_is_the_same_person_written_glued():
+    store = _store(["NATHAN C BLACKBURN", "NATHAN CBLACKBURN"])
+    stand_in = _row(store, "NATHAN C BLACKBURN").surrogate
+    assert _head(store, "NATHAN CBLACKBURN") == "NATHAN C BLACKBURN"
+    assert _row(store, "NATHAN CBLACKBURN").replacement == \
+        f"{stand_in.first} {stand_in.middles[0][:1]}{stand_in.last}".upper()
+
+
+def test_a_person_ending_in_a_business_word_is_the_business():
+    store, _ = review.build_store([("NATHAN C BLACKBURN", "person"), ("Blackburn Law", "person"),
+                                   ("BLACKBURN LAW, PLLC", "organization")])
+    grouping.group(store)
+    firm = next(e for e in store.entities.values() if e.canonical == "Blackburn Law")
+    assert firm.category == "organization"
+    assert "blackburn" not in firm.replacement.casefold()

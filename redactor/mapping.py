@@ -103,7 +103,7 @@ class MappingStore:
         include_single_tokens: bool = True,
         distinct: bool = False,
     ) -> Entity | None:
-        parsed = _names.parse(full_name)
+        parsed = _names.parse(_names.without_tail(full_name))
         if not parsed.canonical:
             return None
         # the suffix is part of who the person IS - father and son share the

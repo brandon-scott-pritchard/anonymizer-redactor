@@ -71,6 +71,16 @@ def build_store(
     roles: dict[str, str] | None = None,
 ) -> tuple[MappingStore, list[_names.Overlap]]:
     """A store built from the step 2 name list, overlaps resolved first."""
+    # a payment line's or an account's words off the end of a person's name
+    # first, so "Rebecca L Blackburn Ret" does not swallow Rebecca L Blackburn
+    entries = [(_names.without_tail(name) if categories.style_for(category) == "person" else name,
+                category) for name, category in entries]
+    # and a "person" that is a business, a business
+    entries = [(name, "organization" if category == "person" and _names.is_business(name)
+                else category) for name, category in entries]
+    seen: set[tuple[str, str]] = set()
+    entries = [e for e in entries if not ((e[0].casefold(), e[1]) in seen
+                                          or seen.add((e[0].casefold(), e[1])))]
     kept, overlaps = resolve_overlaps(entries)
     roles = roles or {}
     store = MappingStore()

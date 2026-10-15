@@ -34,6 +34,40 @@ RISKY_SINGLE_TOKENS = {
 }
 
 
+# Words a statement prints on the end of a holder's or payee's name: an
+# account's kind ("Rebecca L Blackburn Ret", "... IRA", "... Jt"), a payment
+# line's confirmation ("Mary Cox Conf", "Mary Pratt ID"). Read as the surname,
+# "Ret" swallowed the household's own Rebecca L Blackburn as a shorter form
+# of it, and every "... Conf" shared one invented surname.
+NOT_A_NAME_TAIL = frozenset("""
+ret retirement ira roth sep trust ttee trustee cust custodian acct account accounts jt jtwros
+joint pod tod est sav savings chk checking conf cont confirmation ref memo pmt payment id p2p
+txn trans dda
+""".split())
+
+
+# A "person" ending in one of these is a business: "Blackburn Law" was given
+# an invented person beside "BLACKBURN LAW, PLLC" made "SATO LAW, PLLC"
+BUSINESS_TAIL = frozenset("""
+law llc pllc inc corp co company group firm associates partners services enterprises holdings
+dental clinic plumbing construction landscaping realty insurance cpa cpas pc lp llp ltd studio
+""".split())
+
+
+def is_business(name: str) -> bool:
+    words = name.split()
+    return len(words) >= 2 and words[-1].strip(".,:#()").casefold() in BUSINESS_TAIL
+
+
+def without_tail(name: str) -> str:
+    """``name`` without the account or payment words on its end, keeping two
+    words at least."""
+    words = name.split()
+    while len(words) > 2 and words[-1].strip(".,:#()").casefold() in NOT_A_NAME_TAIL:
+        words.pop()
+    return " ".join(words)
+
+
 # Words no name is ever written as on its own. A heading or a merchant ticked
 # as a person - "The Home Depot", "Statement of Account" - made every "the"
 # in the case a stand-in: 1,456 of them in one household's statements.
