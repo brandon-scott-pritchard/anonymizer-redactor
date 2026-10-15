@@ -164,8 +164,23 @@ def run_flow(files: list[Path], out_dir: Path, mode: str, operator_names: list[s
     from redactor import ner
     known = frozenset(w for name, _c in entries for w in (ner._plain(t) for t in name.split())
                       if len(w) > 2)
+    # the local model's sort, as the name screen asks it, from one server the
+    # whole run shares (EVAL_LLM_URL) - each worker loading its own would not fit
+    labels = {}
+    if os.environ.get("EVAL_LLM_URL") and suggestions:
+        from redactor import llm_names
+        try:
+            labels = llm_names.classify([s.text for s in suggestions],
+                                        [name for name, _c in entries], os.environ["EVAL_LLM_URL"])
+        except Exception:
+            labels = {}
     for s in suggestions:
-        if not (s.nickname_for or ner.likely_name(s.text, s.category, known)):
+        if s.nickname_for or any(ner._plain(t) in known for t in s.text.split()):
+            pass
+        elif s.text in labels:
+            if labels[s.text] == "other":
+                continue
+        elif not ner.likely_name(s.text, s.category, known):
             continue
         if s.text.casefold() not in have:
             entries.append((s.text, s.category))

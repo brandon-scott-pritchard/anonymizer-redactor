@@ -508,3 +508,20 @@ def test_a_name_that_is_an_everyday_word_is_matched_only_with_its_capital():
 def test_a_rows_reference_is_not_a_card_and_a_masked_ssn_is_an_ssn(line, category):
     from redactor import patterns
     assert [m.category for m in patterns.scan(line)] == [category]
+
+
+def test_a_year_like_tail_is_never_searched_for_and_a_date_is_never_an_account():
+    """A tail of "2021" registered as an account took the year out of 1,234
+    dates across one household's documents."""
+    from redactor import patterns
+    from redactor.engine import Settings, apply_hits, scan_text
+
+    for value, category in [("2021-03-30", "bank_account"), ("July1", "bank_account"),
+                            ("period08/01/2021-07/31/2022", "policy_number")]:
+        assert patterns._wrong_shape(category, value)
+    store = MappingStore()
+    store.add_value("masked_account", "2021")
+    store.add_value("credit_card", "4417")
+    text = "Statement 08/31/2021 card ending 4417; paid 2021 taxes"
+    out = apply_hits(text, scan_text(text, store, Settings(use_ner=False)))
+    assert "08/31/2021" in out and "paid 2021 taxes" in out and "4417" not in out

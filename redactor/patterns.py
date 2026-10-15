@@ -1047,6 +1047,17 @@ _DATE_ONLY = re.compile(rf"^(?:[A-Za-z]{{2,12}})?(?:{V_DATE})$|^\d{{1,2}}[/\-]\d
 _MONTH_DAY = re.compile(r"^(?:0?[1-9]|1[0-2])/(?:0?[1-9]|[12]\d|3[01])$")
 _DATE_REJECTING = frozenset({"check_number", "case_number", "case_designator", "order_number",
                              "tracking_number", "prescription", "loan_number"})
+# A date read as an account - "2021-03-30", "July1", "period08/01/2021-07/31/2022"
+# - was then replaced in every document of the case, wherever it was written.
+# Only shapes no account takes: "3-6815" is a card tail, not March of 6815.
+_PLAIN_DATE_REJECTING = frozenset({"bank_account", "masked_account", "investment_account",
+                                   "credit_card", "policy_number", "claim_number",
+                                   "employee_id"})
+_MONTH_NAME_DAY = re.compile(
+    r"(?i)^(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?[^\S\n]?\d{1,2}$")
+_DATE_RANGE = re.compile(
+    r"^[A-Za-z]*\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}[^\S\n]*[\-–—][^\S\n]*\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}$")
+_ISO_DATE = re.compile(r"^(?:19|20)\d\d[\-/.](?:0?[1-9]|1[0-2])[\-/.](?:0?[1-9]|[12]\d|3[01])$")
 # "Lot size 0.21ac" - an area, not the parcel's number
 _ACREAGE = re.compile(r"(?i)^\d*\.\d+[^\S\n]?(?:ac|acres?)\.?$")
 # A bare year is the commonest number after a financial label - "Roth IRA 2024
@@ -1099,7 +1110,11 @@ def _wrong_shape(category: str, value: str, label: str = "") -> bool:
     if (category in _YEAR_REJECTING and _YEAR_ONLY.match(cleaned)
             and not _IDENTIFIER_CUE.search(label)):
         return True
-    if category in _DATE_REJECTING and (_DATE_ONLY.match(cleaned) or _MONTH_DAY.match(cleaned)):
+    if category in _DATE_REJECTING and (_DATE_ONLY.match(cleaned) or _MONTH_DAY.match(cleaned)
+                                        or _ISO_DATE.match(cleaned) or _DATE_RANGE.match(cleaned)):
+        return True
+    if category in _PLAIN_DATE_REJECTING and (
+            _ISO_DATE.match(cleaned) or _MONTH_NAME_DAY.match(cleaned) or _DATE_RANGE.match(cleaned)):
         return True
     if category == "parcel_number" and _ACREAGE.match(cleaned):
         return True

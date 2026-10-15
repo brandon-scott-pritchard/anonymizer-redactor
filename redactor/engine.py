@@ -246,6 +246,11 @@ class EntityMatcher:
             # this stops it being applied even if something else registers it.
             if patterns._wrong_shape(entity.category, text):
                 continue
+            # A card or account tail that is also a year - "card ending in 2021"
+            # - is covered where it was found, never searched for: a literal
+            # "2021" took the year out of 1,234 dates across one household.
+            if patterns._YEAR_ONLY.match(text):
+                continue
             body = r"\s+".join(_names.escape_token(tok) for tok in text.split())
             # same underscore reasoning as the person boundary, plus the
             # address characters that must not abut a matched value
