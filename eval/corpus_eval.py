@@ -237,6 +237,7 @@ def _parties_flow(core, files: list[Path], out_dir: Path, sheet: dict, docx_mode
         "entities": [(e.category, e.canonical) for e in store.entities.values()],
         "timings": timings,
         "store": store,
+        "settings": settings,
         "parties_first": True,
         "party_forms": [{k: f.get(k) for k in ("party", "text", "kind", "why", "count")}
                         | {"ticked": _pre_ticked(f)} for f in forms],
@@ -328,6 +329,7 @@ def run_flow(files: list[Path], out_dir: Path, mode: str, operator_names: list[s
         "entities": [(e.category, e.canonical) for e in store.entities.values()],
         "timings": timings,
         "store": store,
+        "settings": settings,
     }
 
 
@@ -588,6 +590,9 @@ def run_batch(batch_id: str, pdfs: list[str], root: str, out: str, mode: str,
                     entry["phones"] = truth.phones_mistyped(source_text, text, party_phones, took)
                     entry["third_replaced"] = truth.third_replaced(
                         source_text, text, parties.third_people, parties.third_values)
+                    from eval import precision
+                    entry["hit_audit"] = precision.audit(source_text, flow["store"],
+                                                         flow["settings"], secrets)
                 elif scan_money and not docx and pdf in input_of:
                     entry["destroyed_money_ocr"] = dict(
                         _figures_covered(input_of[pdf].read_bytes(), data, text))
