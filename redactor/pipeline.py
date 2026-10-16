@@ -297,6 +297,12 @@ def collect_suggestions(
 ) -> tuple[list[ner.Suggestion], list[str]]:
     """Proposals for people, organisations and places, minus what we have."""
     notes: list[str] = []
+    if settings.parties_first:
+        # With a party sheet, third parties are not proposed: payees,
+        # merchants and landlords are left as written. The name screen lists
+        # the forms of the parties' own names instead - collect_party_forms.
+        return [], ["Third parties are left as written: only the parties on the sheet, "
+                    "their children and the family surname are replaced."]
     texts = document_texts(files, progress)
 
     from . import patterns
@@ -371,6 +377,18 @@ def collect_suggestions(
 
     notes.append(note)
     return _as_diminutives(filtered, store, caption_names), notes
+
+
+def collect_party_forms(files: Sequence[Path], store: MappingStore,
+                        progress: Progress = _noop) -> list[dict]:
+    """The forms of the parties' names and the family surname the documents
+    use - misreadings, glued forms, nicknames, former names - for the name
+    screen to tick. ``store`` holds the registered party sheet."""
+    from . import parties
+
+    texts = document_texts(files, progress)
+    progress("Looking for the parties' names", 0.9)
+    return parties.party_forms(texts, store)
 
 
 def _known_names(store: MappingStore, settings: Settings,
@@ -564,6 +582,13 @@ def register_address_blocks(files: Sequence[Path], store: MappingStore,
                     block.append(candidate)
                 if len(block) < 2:
                     continue            # a city line with no street is not a block
+                if settings.parties_first and getattr(store, "parties", None) is not None:
+                    # only a party's address block, and only as forms of it
+                    from . import parties
+                    if any(parties.file_address_line(store, value) is not None
+                           for value in block[1:]):
+                        found += 1
+                    continue
                 for value in block:
                     if store.get("street_address", value) is None:
                         store.add_value("street_address", value, source="address block")

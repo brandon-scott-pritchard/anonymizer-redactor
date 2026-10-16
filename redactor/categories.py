@@ -45,6 +45,8 @@ CATEGORIES: tuple[Category, ...] = (
     # its own row rather than hiding among them.
     _c("employer", "Employer / payroll source", "EMPLOYER", "People"),
     _c("location", "Location / city / facility", "LOCATION", "People"),
+    # anything else the operator put on the party sheet under "other"
+    _c("party_value", "Other party identifier", "OTHER", "People"),
 
     # --------------------------------------------------------------- contact
     _c("email", "Email address", "EMAIL", "Contact"),

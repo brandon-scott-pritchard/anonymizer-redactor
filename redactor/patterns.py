@@ -32,6 +32,9 @@ class Match:
     category: str
     source: str = "pattern"   # pattern | name-list | ner | caption
     priority: int = 50
+    # found by a rule with no label and no mask - a bare run of digits that
+    # happens to pass a checksum. With a party sheet it proposes, never files.
+    bare: bool = False
 
     @property
     def length(self) -> int:
@@ -50,6 +53,7 @@ class Detector:
     # keywords only where every possible match contains one of them.
     needs_digit: bool = False
     keywords: tuple[str, ...] = ()
+    bare: bool = False
 
 
 # Test hook: turning this off must never change scan()/allowlist_spans()
@@ -252,8 +256,11 @@ def _not_words(value: str) -> bool:
 
 
 def valid_vin(value: str) -> bool:
+    # and a letter: a card statement's seventeen-digit transaction reference
+    # ("24460412651906981", before every merchant) is no car's
     v = value.upper()
-    return len(v) == 17 and not any(c in v for c in "IOQ") and any(c.isdigit() for c in v)
+    return (len(v) == 17 and not any(c in v for c in "IOQ") and any(c.isdigit() for c in v)
+            and any(c.isalpha() for c in v))
 
 
 # --------------------------------------------------------------------------
@@ -425,9 +432,9 @@ _I = re.IGNORECASE
 
 
 def _d(category, pattern, group=0, validator=None, priority=50, flags=_I,
-       digit=False, kw=()):
+       digit=False, kw=(), bare=False):
     return Detector(category, re.compile(pattern, flags), group, validator, priority,
-                    needs_digit=digit, keywords=tuple(kw))
+                    needs_digit=digit, keywords=tuple(kw), bare=bare)
 
 
 DETECTORS: tuple[Detector, ...] = (
@@ -436,14 +443,14 @@ DETECTORS: tuple[Detector, ...] = (
        kw=("@",)),
     _d("url", r"\b(?:https?://|ftp://|www\.)[^\s<>\"'\)\]]+", priority=88,
        kw=("http", "ftp", "www.")),
-    _d("fax", rf"(?:fa(?:csimile|x(?:simile)?)|telecopier){_SEP}((?:\+?1[\s.\-]?)?(?:\(\d{{3}}\)\s?|\d{{3}}[\s.\-])\d{{3}}[\s.\-]?\d{{4}})", group=1, priority=86,
+    _d("fax", rf"(?:fa(?:csimile|x(?:simile)?)|telecopier){_SEP}((?:\+?1[\s.\-]?)?(?:\(\d{{3}}\)\s?|\d{{3}}[\s.\-])\d{{3}}[\s.\-]?\d{{4}})", group=1, priority=95,
        digit=True, kw=("fax", "facsimile", "telecopier")),
-    _d("phone", r"(?:\+?1[\s.\-]?)?\(\d{3}\)\s?\d{3}[\s.\-]?\d{4}(?:\s*(?:x|ext\.?|extension)\s*\d{1,6})?", priority=80,
+    _d("phone", r"(?:\+?1[\s.\-]?)?\(\d{3}\)\s?\d{3}[\s.\-]?\d{4}(?:\s*(?:x|ext\.?|extension)\s*\d{1,6})?", priority=94,
        digit=True),
-    _d("phone", r"(?<![\d\-])(?:\+?1[\s.\-])?\d{3}[\s.\-]\d{3}[\s.\-]\d{4}(?:\s*(?:x|ext\.?|extension)\s*\d{1,6})?(?![\d\-])", priority=80,
+    _d("phone", r"(?<![\d\-])(?:\+?1[\s.\-])?\d{3}[\s.\-]\d{3}[\s.\-]\d{4}(?:\s*(?:x|ext\.?|extension)\s*\d{1,6})?(?![\d\-])", priority=94,
        digit=True),
     _d("phone", labeled(("telephone", "phone", "cell(?:ular)?", "mobile", "tel\\.?"),
-                        r"\d{10}"), group=1, priority=79,
+                        r"\d{10}"), group=1, priority=93,
        digit=True, kw=("tel", "phone", "cell", "mobile")),
     _d("ip_address", r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b", priority=85,
        digit=True),
@@ -571,7 +578,7 @@ DETECTORS: tuple[Detector, ...] = (
     # statement prints a YYMMDD date and a ten-digit company ID side by side,
     # "200110 7148234928", and one in ten of those passes the Luhn check.
     _d("credit_card", rf"(?<![\d\-]){V_CARD}(?![\d\-])", validator=luhn_valid, priority=93,
-       digit=True),
+       digit=True, bare=True),
     # Bare "card" is admitted as a label, but only in front of a masked form or
     # a four-digit tail - "card ending in 4417" is how every statement prints
     # it, and it was the worst-caught identifier in the audit. Restricting the
@@ -787,7 +794,8 @@ DETECTORS: tuple[Detector, ...] = (
     # The OCR scanline across the foot of a remittance coupon. It encodes the
     # account number and the amount due, and nothing else in a document is
     # twenty unbroken digits, so it needs no label.
-    _d("bank_account", r"(?<![\d\-])\d{20,60}(?![\d\-])", priority=74, digit=True),
+    _d("bank_account", r"(?<![\d\-])\d{20,60}(?![\d\-])", priority=74, digit=True,
+       bare=True),
 
     # ----------------------------------------------------------- property ----
     # A street address wraps - "771 N" and "1200 E" land on separate lines in a
@@ -1181,6 +1189,86 @@ def _wrong_shape(category: str, value: str, label: str = "") -> bool:
     return False
 
 
+# --------------------------------------------------------------------------
+# what a number found under a number's label is not
+# --------------------------------------------------------------------------
+
+# The overnight run took transaction and reference numbers, dates and phone
+# numbers as accounts - thousands of rows, and a phone that lost to the
+# account rule beside it was boxed as an account. Whatever its label, a
+# number with one of these shapes is not an identifier of the kind its
+# detector names. Every number category but the phone's own.
+ACCOUNT_CATEGORIES = frozenset({"bank_account", "masked_account", "credit_card",
+                                "investment_account"})
+NUMBER_CATEGORIES = ACCOUNT_CATEGORIES | frozenset({
+    "loan_number", "policy_number", "claim_number", "check_number", "case_number",
+    "employee_id", "health_plan", "order_number", "tracking_number", "routing_number",
+    "drivers_license", "passport", "student_id", "mrn", "parcel_number", "case_designator",
+    "professional_license", "alien_number", "military_id", "inmate_number", "voter_id",
+    "tribal_id", "prescription", "deed_reference", "ein"})
+
+# A North American number written as one: a valid area code (not 0 or 1 to
+# open, not N11) and exchange, with its separators or its parentheses.
+_PHONE_SHAPED = re.compile(
+    r"^(?:\+?1[\s.\-]?)?(?:\(\s*[2-9](?!11)\d{2}\s*\)[\s.\-]?|[2-9](?!11)\d{2}[\s.\-])"
+    r"[2-9]\d{2}[\s.\-]\d{4}$")
+_TEN_DIGITS = re.compile(r"^[2-9](?!11)\d{2}[2-9]\d{6}$")
+_PHONE_LABEL_BEFORE = re.compile(
+    r"(?i)\b(?:tel(?:ephone)?|phone|ph|cell(?:ular)?|mobile|fax|contact)\.?\b[^\n\d]{0,12}$")
+# "the label directly before it says account/acct/card": then a phone-shaped
+# value is the account after all - a utility prints its account number in
+# threes and fours
+_ACCOUNT_LABEL_BEFORE = re.compile(
+    r"(?i)\b(?:account|acct|a/c|card)\.?(?:[^\S\n]*(?:no\.?|nos\.?|number|num|#|ending(?:"
+    r"[^\S\n]+in)?))?[^\S\n]*[:#\-]?[^\S\n]*$")
+# a reference, not an account: "Transaction 4417 8825", "Conf # 99187263"
+_REFERENCE_LABEL_BEFORE = re.compile(
+    r"(?i)\b(?:check|chk|cheque|ck|transaction|trans|txn|tran|ref(?:erence)?|confirmation|"
+    r"conf|trace|order|tracking|auth(?:orization)?|invoice|receipt)\b\.?"
+    r"[^\S\n]*(?:no\.?|number|num|id|#|code)?[^\S\n]*[:#\-]?[^\S\n]*$")
+_ZIP_PLUS4 = re.compile(r"^\d{5}-\d{4}$")
+_STATE_BEFORE = re.compile(rf"(?:^|[\s,])(?:{_US_STATE})\.?[^\S\n]*$")
+_ROUTING_ON_LINE = re.compile(r"(?i)\b(?:routing|aba|rtn|transit)\b")
+
+
+def phone_shaped(value: str) -> bool:
+    """Written as a North American phone number - see above."""
+    return bool(_PHONE_SHAPED.match(" ".join(value.split())))
+
+
+def _line_before(text: str, start: int, reach: int = 40) -> str:
+    line_start = text.rfind("\n", 0, start) + 1
+    return text[max(line_start, start - reach):start]
+
+
+def _not_a_number_of_its_kind(category: str, value: str, text: str, start: int) -> bool:
+    """True when ``value``, found by a ``category`` detector, is a phone, a
+    date, money, a ZIP, a routing number or a reference instead."""
+    if category not in NUMBER_CATEGORIES:
+        return False
+    cleaned = value.strip()
+    before = _line_before(text, start)
+    account = category in ACCOUNT_CATEGORIES
+    if phone_shaped(cleaned) and not (account and _ACCOUNT_LABEL_BEFORE.search(before)):
+        return True
+    if _TEN_DIGITS.match(cleaned) and _PHONE_LABEL_BEFORE.search(before):
+        return True
+    if category not in _DECIMAL_NATIVE and _CURRENCY_SHAPE.match(cleaned):
+        return True
+    if not account:
+        return False
+    if _ZIP_PLUS4.match(cleaned) or (re.fullmatch(r"\d{5}", cleaned)
+                                     and _STATE_BEFORE.search(before)):
+        return True
+    line_end = text.find("\n", start)
+    line = text[text.rfind("\n", 0, start) + 1:len(text) if line_end < 0 else line_end]
+    if valid_routing(cleaned) and _ROUTING_ON_LINE.search(line):
+        return True
+    if _REFERENCE_LABEL_BEFORE.search(before):
+        return True
+    return False
+
+
 # A decimal fraction, or a thousands group: a comma, exactly three digits and
 # then no more. "44821903,44821904" is two account numbers glued by a comma,
 # and reading that comma as a thousands separator dropped both of them.
@@ -1316,6 +1404,8 @@ def scan(
                 continue
             if _wrong_shape(det.category, value, text[m.start():start]):
                 continue
+            if _not_a_number_of_its_kind(det.category, value, text, start):
+                continue
             if det.category == "payment_handle" and _handle_from_another_row(
                     value, text[m.start():start]):
                 continue
@@ -1332,13 +1422,21 @@ def scan(
                 # Summit Home" - a card number is never printed whole in a row,
                 # and one random number in ten passes the card checksum
                 category = "check_number"
-            found.append(Match(start, end, value, category, "pattern", det.priority))
+            found.append(Match(start, end, value, category, "pattern", det.priority,
+                               bare=det.bare))
 
     if any(m.category == "credit_card" and _CARD_TAIL.fullmatch(m.text) for m in found):
         streets = _street_starts(text)
         found = [m for m in found
                  if not (m.category == "credit_card" and _CARD_TAIL.fullmatch(m.text)
                          and m.start in streets)]
+    # A phone outranks the account and number rules - unless the label right
+    # in front of it says it is an account or a card.
+    found = [m for m in found
+             if not (m.category in ("phone", "fax")
+                     and _ACCOUNT_LABEL_BEFORE.search(_line_before(text, m.start))
+                     and any(o.category in ACCOUNT_CATEGORIES and o.start <= m.start
+                             and m.end <= o.end for o in found))]
     return resolve(found)
 
 

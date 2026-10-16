@@ -42,7 +42,7 @@ RISKY_SINGLE_TOKENS = {
 NOT_A_NAME_TAIL = frozenset("""
 ret retirement ira roth sep trust ttee trustee cust custodian acct account accounts jt jtwros
 joint pod tod est sav savings chk checking conf cont confirmation ref memo pmt payment id p2p
-txn trans dda
+txn trans dda statement summary holder holders owner owners member primary secondary
 """.split())
 
 

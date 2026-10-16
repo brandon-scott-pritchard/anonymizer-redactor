@@ -285,8 +285,12 @@ class Check:
 
 
 def _ticked_people(store) -> list[str]:
+    # With a party sheet the check reads back for the parties, the children
+    # and the family surname only: everyone else was left as written on purpose
+    sheet = getattr(store, "parties", None) is not None
     return sorted({e.canonical for e in store.entities.values()
-                   if e.enabled and e.category in ("person", "minor")})
+                   if e.enabled and e.category in ("person", "minor")
+                   and (not sheet or (e.fixed and e.party))})
 
 
 def _page_texts(path: Path):
@@ -499,8 +503,10 @@ PAGE_SCHEMA = ('{"found": [{"before": "<3-4 words just before it>", '
 
 
 def _heads(store) -> list:
+    sheet = getattr(store, "parties", None) is not None
     return [e for e in store.entities.values()
-            if e.enabled and e.category in ("person", "minor") and e.parent is None]
+            if e.enabled and e.category in ("person", "minor") and e.parent is None
+            and (not sheet or (e.fixed and e.party))]
 
 
 def _forms(store, head) -> list[str]:

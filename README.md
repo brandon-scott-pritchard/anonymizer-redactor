@@ -335,6 +335,60 @@ whose box touches a redaction, and in a tightly set table a character's box is
 taller than the gap between rows, so a full-height box took letters off the
 lines above and below it.
 
+### The parties
+
+Before the scan, each set can be given a **party sheet**: the petitioner, the
+respondent, each child, and any other party you choose, with whatever you know
+of them - every name (former and maiden names too), dates of birth, SSN/TIN,
+driver's licence, passport, addresses, phones, emails, employers, the family's
+businesses, account and card numbers (a last four is enough), public handles,
+vehicles, case numbers and parcels. The sheet stays in memory with its set; it
+is never written to disk, and the mapping key holds only the usual
+original-to-replacement table.
+
+With a sheet filled in, the run replaces what a member of the public could use
+to identify a party or a child - and leaves everyone else as written:
+
+- **Replaced:** the parties' and children's names in every form (any order,
+  each name piece alone, OCR misreadings, glued forms, nicknames you tick,
+  former names), and the **family surname** wherever it appears - a relative,
+  a business carrying it ("Smith Landscaping LLC" keeps "Landscaping LLC");
+  addresses; phones; emails; SSN/TIN; dates of birth; licence and passport;
+  account and card numbers, including masked tails in transfer lines; court case
+  numbers; handles; VIN and plate; parcels; employers and the family's
+  businesses.
+- **Left as written:** everyone who is not a party or a child - payees, payers,
+  merchants, landlords, other attorneys (judges stay protected as before) -
+  unless the family surname is part of the name; policy, claim, member and group
+  numbers; loan and mortgage numbers; employee and payroll IDs; check,
+  transaction, confirmation, reference, routing, order and tracking numbers;
+  health-plan IDs.
+
+**Role labels.** Names become invented names, fixed per party, with one
+invented surname for the family. Every other value becomes a label that says
+whose it is: `[PETITIONER-SSN]`, `[RESPONDENT-PHONE-2]`, `[CHILD-1-DOB]`,
+`[PETITIONER-ACCOUNT-1]`, `[CASE-NUMBER-1]`, and `[PARTIES-ACCOUNT-3]` or
+`[PARTIES-SSN-1]` where the holder is not one party. Each value is one review
+row, with every printed form of it underneath ("528-41-9963", "XXX-XX-9963",
+"528419963"; "1734 W Gentile St" under the full address with its city and ZIP).
+
+**What counts as a party's.** Every printed form of what was entered is matched
+exactly. A value the detectors find that was not entered is the party's only
+when it is anchored to them: on the same line as one of their names, in the few
+lines under it, or in the header block of a statement's first page. Otherwise it
+is left as written - except a valid SSN, and a masked account tail on a transfer
+line, which are always replaced.
+
+**Accounts.** An account is only a number entered on the sheet, a value under an
+account or card label, or a masked tail (`****1234`, `XXXX1234`, `...1234`). A
+bare number equal to a known account, or its last six digits or more, is that
+account. Never an account: anything shaped like a phone number, a date, money, a
+ZIP or ZIP+4, a routing number, or a check, transaction, reference,
+confirmation, trace, order or tracking number. A phone-shaped number is a phone
+unless the label right before it says account or card.
+
+Without a sheet, the run works as it always has.
+
 ### 2. Names
 
 Opens pre-populated with the party names harvested from the document captions:

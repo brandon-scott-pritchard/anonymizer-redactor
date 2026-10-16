@@ -53,6 +53,8 @@ TYPO_MIN_LENGTH = 4
 def group(store: MappingStore) -> None:
     """Recompute every group in the store from scratch. Idempotent."""
     for entity in store.entities.values():
+        if entity.fixed:
+            continue            # grouped by the party sheet, and kept so
         entity.parent = None
         entity.candidates = ()
         entity.group_note = ""
@@ -74,6 +76,10 @@ def sync(store: MappingStore) -> None:
     for entity in store.entities.values():
         head = head_of(store, entity)
         if head is entity:
+            continue
+        if entity.fixed and entity.is_person:
+            # a party's former name or a found form of it: its stand-in was
+            # shaped from the party's when it was filed (parties.settle)
             continue
         if entity.is_person and head.is_person:
             core = _without_line_word(entity)
@@ -124,9 +130,13 @@ def _one_replacement_per_head(store: MappingStore) -> None:
     numbered one more value and the operator's own was no longer free. Two
     things the operator called different then read as one.
     """
-    seen: set[str] = set()
+    # a party's role label ("[RESPONDENT-SSN]") is unique by construction and
+    # never renumbered; everything else steps round it
+    seen: set[str] = {e.replacement for e in store.entities.values()
+                      if e.fixed and e.parent is None and e.replacement}
     changed = False
-    for entity in sorted((e for e in store.entities.values() if e.parent is None),
+    for entity in sorted((e for e in store.entities.values()
+                          if e.parent is None and not e.fixed),
                          key=lambda e: (e.key in store.split_out, e.key)):
         if entity.replacement and entity.replacement in seen:
             if entity.is_person and entity.person is not None:
@@ -148,7 +158,7 @@ def attach(store: MappingStore, entity: Entity) -> None:
     street out in full - and a fresh placeholder for each would undo the
     grouping on exactly the pages that differ.
     """
-    if entity.is_person or entity.key in store.split_out:
+    if entity.is_person or entity.key in store.split_out or entity.fixed:
         return
     tail = _SSN_TAIL.fullmatch(entity.canonical.strip())
     digits = re.sub(r"\D", "", entity.canonical)
@@ -173,9 +183,14 @@ def attach(store: MappingStore, entity: Entity) -> None:
         heads = [e for e in store.entities.values()
                  if e.category in family and e.parent is None and e is not entity
                  and _could_join(family, entity, e)]
+        # a party's row takes the value in before any other: it is the one
+        # the operator entered
+        heads.sort(key=lambda e: not e.fixed)
         for members in finder(heads + [entity]):
             if entity in members and len(members) > 1:
-                head = next(e for e in members if e is not entity and e.parent is None)
+                head = next((e for e in members if e is not entity and e.parent is None
+                             and e.fixed), None) or next(
+                    e for e in members if e is not entity and e.parent is None)
                 # left ticked even under an unticked head: a form nobody has
                 # reviewed is redacted rather than shipped
                 entity.parent = head.key
@@ -236,6 +251,8 @@ def split(store: MappingStore, entity: Entity) -> None:
         return
     store.split_out.add(entity.key)
     entity.parent = None
+    # out of a party's group it is nobody's: it reads as itself again
+    entity.fixed, entity.party, entity.kind = False, "", ""
     if entity.is_person:
         # someone else: no longer a misreading of this family's surname
         entity.surrogate = store._unique_person_surrogate(entity.person, misread=False)
@@ -390,14 +407,15 @@ def _shaped_surrogate(part: _names.PersonName, stand_in: _names.PersonName,
 
 def _group_people(store: MappingStore) -> None:
     people = [e for e in store.entities.values()
-              if e.category in PEOPLE and e.person is not None]
+              if e.category in PEOPLE and e.person is not None
+              and not (e.fixed and e.parent)]
     # richest first: a head is decided before anything that could hang off it
     # a name with a payment line's word on its end never leads its group
     people.sort(key=lambda e: (_without_line_word(e) is not None,
                                -len(e.person.ordered), -len(e.canonical)))
     heads: list[Entity] = []
     for entity in people:
-        if entity.key in store.split_out or entity.distinct:
+        if entity.key in store.split_out or entity.distinct or entity.fixed:
             heads.append(entity)
             continue
         core = _without_line_word(entity)
@@ -465,13 +483,17 @@ def _one_family(entity: Entity, heads: list[Entity]) -> bool:
 def _group_values(store: MappingStore, family: set[str],
                   finder: Callable[[list[Entity]], Iterable[list[Entity]]]) -> None:
     pool = [e for e in store.entities.values()
-            if e.category in family and e.key not in store.split_out]
+            if e.category in family and e.key not in store.split_out
+            and not (e.fixed and e.parent)]
     for found in finder(pool):
         if len(found) < 2:
             continue
-        head = max(found, key=_prevalence)
+        # a party's row heads any group it is in, and two parties' rows are
+        # never folded into one another - the sheet said what each one is
+        fixed = [e for e in found if e.fixed]
+        head = max(fixed or found, key=_prevalence)
         for entity in found:
-            if entity is not head:
+            if entity is not head and not entity.fixed:
                 entity.parent = head.key
 
 
@@ -651,7 +673,7 @@ def _ssn_forms(store: MappingStore) -> None:
     last four are one. Two full numbers sharing a last four are two people,
     and a mask that could be either is left on its own."""
     ssns = [e for e in store.entities.values()
-            if e.category == "ssn" and e.key not in store.split_out]
+            if e.category == "ssn" and e.key not in store.split_out and not e.fixed]
     full: dict[str, list[Entity]] = defaultdict(list)
     for entity in ssns:
         digits = re.sub(r"\D", "", entity.canonical)
@@ -659,7 +681,7 @@ def _ssn_forms(store: MappingStore) -> None:
             full[digits[-4:]].append(entity)
     masked = [e for e in ssns if len(re.sub(r"\D", "", e.canonical)) == 4]
     masked += [e for e in store.entities.values()
-               if e.category in ACCOUNTS and e.key not in store.split_out
+               if e.category in ACCOUNTS and e.key not in store.split_out and not e.fixed
                and _SSN_TAIL.fullmatch(e.canonical.strip())
                and (full.get(_SSN_TAIL.fullmatch(e.canonical.strip()).group(1))
                     or any(re.sub(r"\D", "", m.canonical) == _SSN_TAIL.fullmatch(

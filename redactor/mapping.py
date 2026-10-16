@@ -56,6 +56,13 @@ class Entity:
     # brackets - for the local model to tell a business from a person and a
     # misreading from another family. Never written into the key or report.
     contexts: list[str] = field(default_factory=list)
+    # Off the party sheet (see parties.py): the row's owner ("petitioner",
+    # "child-1", "parties"), what it is ("ssn", "phone", "name"...), and
+    # ``fixed`` - its group and its role-based replacement were decided by
+    # the sheet, so a regrouping from scratch leaves both where they are.
+    fixed: bool = False
+    party: str = ""
+    kind: str = ""
 
     @property
     def is_person(self) -> bool:
@@ -92,6 +99,11 @@ class MappingStore:
         self.merged: dict[str, tuple[str, str, str]] = {}
         self.named_after: dict[str, tuple[str, str, str]] = {}
         self.merge_note = ""
+        # the set's party sheet (parties.PartySheet), when one was filled in,
+        # and what was found but left as written because it is nobody's on it:
+        # kind -> the distinct values, counted for the review list
+        self.parties = None
+        self.left_as_written: dict[str, set[str]] = {}
 
     # ------------------------------------------------------------- people --
     def add_person(
@@ -135,7 +147,10 @@ class MappingStore:
                     or entity.person is None):
                 continue
             if _names.same_person(entity.person, parsed):
-                if _names.richness(parsed) > _names.richness(entity.person):
+                # a party off the sheet keeps the name it was entered as: its
+                # key is what its forms hang off
+                if (_names.richness(parsed) > _names.richness(entity.person)
+                        and not entity.fixed):
                     self._upgrade_person(entity, parsed, category,
                                          include_single_tokens)
                 if role and not entity.role:

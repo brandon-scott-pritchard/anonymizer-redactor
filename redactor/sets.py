@@ -81,6 +81,18 @@ class DocSet:
     results: Path | None = None
     queued_at: float = 0.0
     lock: threading.Lock = field(default_factory=threading.Lock)
+    # The party sheet (parties.PartySheet), in memory only - never written
+    # to disk. Each save bumps the version: what was worked out ahead for an
+    # older sheet is worked out again, and the review list must be rebuilt.
+    parties: object = None
+    parties_version: int = 0
+    prepared_sheet: int = 0
+    review_stale: bool = False
+
+    def sheet(self):
+        """The party sheet, or None when there is none or it is empty."""
+        sheet = self.parties
+        return sheet if sheet is not None and not sheet.empty() else None
 
     def __post_init__(self) -> None:
         from . import officials
@@ -138,15 +150,17 @@ class DocSet:
     def ready_prepared(self) -> dict | None:
         """The name screen worked out ahead - if it is for these very files."""
         prepared = self.prepared
-        if prepared is not None and self.prepared_for == self._file_set():
+        if (prepared is not None and self.prepared_for == self._file_set()
+                and self.prepared_sheet == self.parties_version):
             return prepared
         return None
 
     def should_prepare(self, settle: float) -> bool:
         files = self._file_set()
+        stale = files != self.prepared_for or self.prepared_sheet != self.parties_version
         return (self.prepare_wanted and bool(files) and not self.run_state
                 and not self.preparing and self.read_through()
-                and files != self.prepared_for and files != self.prepare_failed_for
+                and stale and files != self.prepare_failed_for
                 and time.time() - self.last_added >= settle)
 
     # ---------------------------------------------------------- summary --
@@ -335,22 +349,32 @@ def _stop(child, patience: float = 30) -> None:
         time.sleep(0.5)
 
 
-def _prepare_set(events, files, settings, spill_dir) -> None:
-    """Child side: everything the name screen shows, worked out ahead."""
+def _prepare_set(events, files, settings, spill_dir, sheet=None) -> None:
+    """Child side: everything the name screen shows, worked out ahead - with
+    the set's party sheet, once one is saved: the forms of the parties' names
+    the documents use, and no third parties."""
     os.environ["REDACTOR_OCR_WORKERS"] = "0"
     try:
         _own_group()
-        from . import officials, pdf_processor, pipeline
+        from . import officials, parties, pdf_processor, pipeline
 
         pdf_processor.keep_ocr_on_disk(spill_dir)
         caption_names = pipeline.collect_caption_names(files)
         bench = pipeline.collect_officials(files)
-        protection = officials.protected_terms(bench, avoid=officials.parties_of(caption_names))
+        avoid = officials.parties_of(caption_names)
+        if sheet is not None:
+            avoid += [name for party in sheet.parties for name in party.names]
+        protection = officials.protected_terms(bench, avoid=avoid)
         settings.protected_names = list(protection.terms)
-        found, notes = pipeline.collect_suggestions(files, MappingStore(), settings,
+        store = MappingStore()
+        if sheet is not None:
+            parties.register(sheet, store)
+        found, notes = pipeline.collect_suggestions(files, store, settings,
                                                     caption_names=caption_names)
+        forms = pipeline.collect_party_forms(files, store) if sheet is not None else []
         events.put(("done", {"caption_names": caption_names, "officials": bench,
                              "protection": protection, "suggestions": found,
+                             "party_forms": forms,
                              "notes": notes, "use_ner": settings.use_ner}))
     except BaseException as exc:
         events.put(("error", f"{type(exc).__name__}: {exc}"))
@@ -401,13 +425,15 @@ class Preparer:
 
         files = list(doc_set.files)
         covered = doc_set._file_set()
+        version = doc_set.parties_version
+        sheet = doc_set.sheet()
         doc_set.preparing = True
         try:
             context = multiprocessing.get_context("spawn")
             events = context.Queue()
             child = context.Process(target=_prepare_set, name=f"prepare-{doc_set.id}",
                                     args=(events, files, self.settings_for(doc_set),
-                                          self.spill_dir))
+                                          self.spill_dir, sheet))
             child.start()
             self.child = child
             outcome = _next_event(events, child) or \
@@ -416,6 +442,7 @@ class Preparer:
             self.child = None
             if outcome[0] == "done":
                 doc_set.prepared, doc_set.prepared_for = outcome[1], covered
+                doc_set.prepared_sheet = version
             else:
                 # opened, the set works its names out at the keyboard as before
                 doc_set.prepare_failed_for = covered

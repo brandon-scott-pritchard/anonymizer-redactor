@@ -159,14 +159,15 @@ def retype_entity(store: MappingStore, entity: Entity, new_category: str) -> Ent
 def snapshot_decisions(store: MappingStore) -> dict[str, tuple[bool, str, str, bool]]:
     """What the operator decided, keyed by the found text.
 
-    The fourth field is whether the operator split the row out of its group.
-    A variant's replacement is its head's, so only a head's is carried.
+    The fourth field is whether the operator split the row out of its group,
+    the fifth whether the row came off the party sheet. A variant's
+    replacement is its head's, so only a head's is carried.
     """
     return {
         entity.canonical.casefold():
             (entity.enabled, entity.category,
              "" if entity.parent else entity.replacement,
-             entity.key in store.split_out)
+             entity.key in store.split_out, entity.fixed)
         for entity in store.entities.values()
     }
 
@@ -187,6 +188,13 @@ def carry_decisions(store: MappingStore,
         if previous is None:
             continue
         enabled, category, replacement = previous[:3]
+        was_fixed = len(previous) > 4 and previous[4]
+        if entity.fixed:
+            # a party's row keeps its type and its role label - unless it was
+            # a party's row before too, and the operator edited it there
+            category = entity.category
+            if not was_fixed:
+                replacement = ""
         if category != entity.category and category in valid:
             moved = retype_entity(store, entity, category)
             if moved is not None:

@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pymupdf
 
-from . import categories, engine, names as _names, ocr, patterns
+from . import categories, engine, names as _names, ocr, parties, patterns
 from .engine import Hit, PersonMatcher, Settings
 from .mapping import MappingStore
 
@@ -688,13 +688,20 @@ def extract_text(path: Path, max_pages: int | None = None) -> dict[str, str]:
 
 def iter_text_units(path: Path):
     """The exact per-page text :func:`process` will scan, in the same order."""
+    from . import parties
+
     with pymupdf.open(path) as doc:
-        for index, page in enumerate(doc):
-            sets, _scanned = _page_words(page, path, index)
-            for words in sets or []:      # none: a scan nothing can read; refused
-                for text, _spans in _readings(words):
-                    if text.strip():
-                        yield text
+        try:
+            for index, page in enumerate(doc):
+                # a statement's header block is on its first page
+                parties.PAGE.set(index)
+                sets, _scanned = _page_words(page, path, index)
+                for words in sets or []:      # none: a scan nothing can read; refused
+                    for text, _spans in _readings(words):
+                        if text.strip():
+                            yield text
+        finally:
+            parties.PAGE.set(None)
 
 
 # A line that ends in "UT 84606" or "IA 50306-0522" - a state and a ZIP, which
@@ -2547,6 +2554,7 @@ def process(
         for index, page in enumerate(doc):
             report = PageReport(number=index + 1)
             _page_read(source, index)
+            parties.PAGE.set(index)            # the header block is page 1's
 
             if settings.scrub_embedded:
                 removed, links = _strip_page_extras(page)
@@ -2773,6 +2781,7 @@ def process(
         output.parent.mkdir(parents=True, exist_ok=True)
         doc.save(output, garbage=4, deflate=True, clean=True)
     finally:
+        parties.PAGE.set(None)
         doc.close()
 
     return result

@@ -33,7 +33,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import (__version__, caption, categories, feedback, grouping, llm_grouping, llm_names,
-               names as _names, ner, ocr_pool, officials, pdf_processor, pipeline, review, sets)
+               names as _names, ner, ocr_pool, officials, parties, pdf_processor, pipeline,
+               review, sets)
 from .engine import Settings
 from .mapping import MappingStore
 
@@ -173,7 +174,7 @@ class Session:
                     self.ocr_dir, lambda: sorted(self.sets.values(), key=lambda s: s.rank),
                     # with the options the run will use: worked out with the
                     # model on and opened with it off, the screen is scanned again
-                    lambda doc_set: _settings(self.options))
+                    lambda doc_set: _settings(self.options, doc_set))
                 self.awake = sets.KeepAwake(self.anything_going)
                 # registered after the temporary folder's removal, so run
                 # first: the run and the preparing are stopped before their
@@ -250,10 +251,14 @@ def _options(body: dict) -> dict:
     return given if isinstance(given, dict) else SESSION.options
 
 
-def _settings(options: dict) -> Settings:
+def _settings(options: dict, doc_set: sets.DocSet | None = None) -> Settings:
     extra = [line.strip() for line in options.get("allowlist", "").splitlines()
              if line.strip()]
+    doc_set = doc_set or SESSION.current
     return Settings(
+        # a set with a party sheet replaces the parties' details and leaves
+        # everyone else as written - see parties.py
+        parties_first=doc_set.sheet() is not None,
         docx_mode=options.get("docx_mode", "anonymize"),
         # anything but an explicit "anonymize" redacts: the safe default
         pdf_mode="anonymize" if options.get("pdf_mode") == "anonymize" else "redact",
@@ -281,8 +286,10 @@ def _name_entries(lines: list[dict]) -> list[tuple[str, str]]:
 
 def _reprotect(entries: list[tuple[str, str]]) -> list[str]:
     """Rebuild the do-not-change list against the current party names."""
+    sheet = SESSION.current.sheet()
+    on_sheet = [name for party in sheet.parties for name in party.names] if sheet else []
     SESSION.protection = officials.protected_terms(
-        SESSION.officials, avoid=[name for name, _category in entries]
+        SESSION.officials, avoid=[name for name, _category in entries] + on_sheet
         + officials.parties_of(SESSION.caption_names))
     return list(SESSION.protection.terms)
 
@@ -297,6 +304,16 @@ def _prepare(body: dict) -> tuple[Settings, MappingStore, list[tuple[str, str]]]
     entries = _name_entries(body.get("names", []))
     _reprotect(entries)
     settings = _settings(_options(body))
+    sheet = SESSION.current.sheet()
+    if sheet is not None:
+        # the parties first; a name ticked on the name screen is a form of
+        # one of them, and one typed that is nobody on the sheet is added
+        store = MappingStore()
+        parties.register(sheet, store)
+        parties.add_found_forms(store, [*body.get("party_forms", []), *entries])
+        parties.settle(store)
+        SESSION.overlaps = []
+        return settings, store, entries
     roles = {c.name.casefold(): c.role for c in SESSION.caption_names}
     store, overlaps = review.build_store(entries, roles)
     SESSION.overlaps = overlaps
@@ -331,10 +348,14 @@ def _entity_row(entity, store=None) -> dict:
         "is_person": entity.is_person,
         "parent": entity.parent,
         "note": review.review_note(entity),
+        "party": parties.api_owner(entity.party),
+        "kind": parties.kind_of(entity) if entity.party else "",
     }
     if store is not None and entity.parent is None:
-        # a head row: its forms ride along, and Times counts all of them
-        row["forms"] = [_entity_row(e) for e in grouping.members(store, entity)]
+        # a head row: its forms ride along, and Times counts all of them -
+        # but not a printed form made off the party sheet that was never found
+        row["forms"] = [_entity_row(e) for e in grouping.members(store, entity)
+                        if e.occurrences or e.source != parties.FORM_SOURCE]
         row["occurrences"] = grouping.group_total(store, entity)
         if not row["note"] and any(f["note"].startswith(llm_grouping.NOTE)
                                    for f in row["forms"]):
@@ -348,8 +369,12 @@ def _entities_payload() -> dict:
                    key=lambda e: (0 if e.is_person else 1, e.category,
                                   -grouping.group_total(store, e), e.canonical.casefold()))
     risky = sorted({v.text for e in store.persons() for v in e.variants if v.risky})
-    unused = sum(1 for e in store.entities.values() if e.occurrences == 0)
+    unused = sum(1 for e in store.entities.values()
+                 if e.occurrences == 0 and e.source != parties.FORM_SOURCE)
     return {"entities": [_entity_row(e, store) for e in heads],
+            # one row per party per value, and what was found but is nobody's
+            "groups": parties.groups(store),
+            "left_as_written": parties.left_counts(store),
             "risky": risky[:12], "unused": unused,
             "active": sum(1 for e in store.entities.values() if e.enabled),
             "instructions": review.REVIEW_INSTRUCTIONS,
@@ -689,6 +714,11 @@ async def suggestions(request: Request):
         else:
             found, notes = pipeline.collect_suggestions(
                 files, store, settings, progress, caption_names=captions_now)
+        forms: list = []
+        if settings.parties_first:
+            forms = (prepared or {}).get("party_forms")
+            if forms is None or prepared is None:
+                forms = pipeline.collect_party_forms(files, store, progress)
         SESSION.suggestions = found
         # the words of the names already listed: a suggestion sharing one is
         # one of them, or their business
@@ -710,10 +740,54 @@ async def suggestions(request: Request):
              "documents": sorted(s.documents), "nickname_for": s.nickname_for,
              "likely": likely(s)}
             for s in found],
+            "party_forms": forms,
             "sorted_by": sorted_by,
             "notes": notes, **_guard_payload()}
 
     return {"job": _start_job(work, None if prepared else lambda: pipeline.count_pages(files))}
+
+
+# --------------------------------------------------------------------------
+# the parties
+# --------------------------------------------------------------------------
+
+
+def _sheet_payload(doc_set: sets.DocSet) -> dict:
+    sheet = doc_set.parties
+    if sheet is None:
+        return {"parties": [], "family_surnames": []}
+    return sheet.to_json()
+
+
+@app.get("/api/parties")
+def get_parties():
+    """The set's party sheet. In memory with the set only - never on disk."""
+    return _sheet_payload(SESSION.current)
+
+
+@app.put("/api/parties")
+async def put_parties(request: Request):
+    """Validate and keep the set's party sheet; what was worked out for the
+    last one - the name screen ahead, the review list - is stale."""
+    _not_while_run()
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(422, "The party sheet is a JSON object.")
+    try:
+        sheet = parties.PartySheet.from_json(body)
+    except parties.PartyError as exc:
+        raise HTTPException(422, exc.detail())
+    doc_set = SESSION.current
+    doc_set.parties = sheet
+    doc_set.parties_version += 1
+    doc_set.prepare_failed_for = frozenset()
+    if doc_set.store.entities:
+        doc_set.review_stale = True
+    if doc_set.files and ocr_pool.worker_count() >= 1:
+        doc_set.prepare_wanted = True
+        SESSION.run_queue()                          # the preparer works it out again
+    return _sheet_payload(doc_set)
 
 
 # --------------------------------------------------------------------------
@@ -728,6 +802,7 @@ async def build_review(request: Request):
     files = list(SESSION.files)
     carryover = review.snapshot_decisions(SESSION.store)
     settings, store, entries = _prepare(body)
+    doc_set = SESSION.current
 
     def work(progress):
         # reaching review without ever opening the name screen would otherwise
@@ -737,8 +812,11 @@ async def build_review(request: Request):
             settings.protected_names = _reprotect(entries)
         pipeline.prescan(files, store, settings, progress)
         review.carry_decisions(store, carryover)
-        _merge_with_llm(store, progress)
+        if not settings.parties_first:
+            # with a party sheet the forms come from the sheet, not the model
+            _merge_with_llm(store, progress)
         SESSION.store = store
+        doc_set.review_stale = False
         return {**_entities_payload(), **_guard_payload()}
 
     return {"job": _start_job(work, lambda: pipeline.count_pages(files))}
@@ -1027,6 +1105,9 @@ async def queue_run(request: Request):
         raise HTTPException(422, "Add at least one document first.")
     if not doc_set.store.entities:
         raise HTTPException(422, "Build the review list first - the run uses what it says.")
+    if doc_set.review_stale:
+        raise HTTPException(422, "The party sheet changed - build the review list again "
+                                 "before queueing.")
     settings = _settings(_options(body))
     SESSION.run_queue().add(doc_set, settings, password, SESSION.results_root)
     return _sets_payload()

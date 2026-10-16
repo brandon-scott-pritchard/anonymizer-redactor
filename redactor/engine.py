@@ -72,6 +72,11 @@ class Settings:
     # a scanned signature, or a screenshot of a statement is confidential by
     # default and no text scan can read it
     redact_images: bool = True
+    # The set has a party sheet (see parties.py): the detectors propose, and
+    # only what is the parties' is registered - their exact forms, a value
+    # anchored to one of them, a valid SSN, a masked tail in a transfer line.
+    # Everyone else is left as written.
+    parties_first: bool = False
 
     def category_enabled(self, key: str) -> bool:
         return key in self.enabled_categories
@@ -513,11 +518,22 @@ def register_text(text: str, store: MappingStore, settings: Settings) -> int:
     enabled = [k for k in settings.enabled_categories
                if categories.style_for(k) != "person"]
     added = 0
+    context = None
     for match in patterns.scan(text, enabled=enabled, protected=protected):
         if store.get(match.category, match.text) is None:
+            if _parties_first(store, settings):
+                from . import parties
+                context = context or parties.Context(text, store, page=-1)
+                if parties.file_match(store, match, context) is not None:
+                    added += 1
+                continue
             store.add_value(match.category, match.text, source="table")
             added += 1
     return added
+
+
+def _parties_first(store: MappingStore, settings: Settings) -> bool:
+    return settings.parties_first and getattr(store, "parties", None) is not None
 
 
 def scan_text(
@@ -539,12 +555,22 @@ def scan_text(
 
     enabled = [k for k in settings.enabled_categories
                if categories.style_for(k) != "person"]
+    parties_first = _parties_first(store, settings)
+    context = None
     for match in patterns.scan(text, enabled=enabled, protected=protected):
         entity = store.get(match.category, match.text)
         if entity is None:
             if not register:
                 continue
-            entity = store.add_value(match.category, match.text)
+            if parties_first:
+                from . import parties
+                # where the parties are named in this text, worked out once
+                context = context or parties.Context(text, store, hits)
+                entity = parties.file_match(store, match, context)
+                if entity is None:
+                    continue                       # nobody's on the sheet: as written
+            else:
+                entity = store.add_value(match.category, match.text)
         if not entity.enabled:
             continue
         replacement = REDACTION_TEXT if redact else entity.replacement
@@ -557,6 +583,9 @@ def scan_text(
     # bare recurrence of one must be matched in this same piece of text.
     hits.extend(matcher.find_values(text, protected, redact))
     hits.extend(run_together_hits(text, store, redact, protected))
+    if getattr(store, "parties", None) is not None:
+        from . import parties
+        hits.extend(parties.extra_hits(text, store, redact, protected, hits))
     # Nothing but a date of birth is taken from inside a written date: a
     # date read as an account, or a "May" ticked as a name, took "May 31,
     # 2021" apart - see patterns.looks_like_date.
