@@ -529,6 +529,12 @@ def run_batch(batch_id: str, pdfs: list[str], root: str, out: str, mode: str,
         record["consistency"] = consistency.score(flow["store"], secrets)
         record["party_consistency"] = consistency.party_consistency(flow["store"], parties)
         record["review_rows"] = consistency.review_rows(flow["store"], flow.get("groups"))
+        # every row the operator would see, with the documents it was found in:
+        # what a 2x / 3x filter would be decided on (eval.recurrence_test)
+        record["rows"] = [{"key": e.key, "category": e.category, "canonical": e.canonical,
+                           "parent": e.parent or "", "replacement": e.replacement,
+                           "documents": sorted(e.documents), "occurrences": e.occurrences}
+                          for e in flow["store"].entities.values() if e.enabled]
         record["review"] = [(e.category, e.canonical, e.replacement, e.parent or "")
                             for e in flow["store"].entities.values() if e.enabled]
         took = consistency.taker(flow["store"])
