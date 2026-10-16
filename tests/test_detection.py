@@ -603,3 +603,21 @@ def test_nothing_but_a_birth_date_is_taken_from_inside_a_date():
     out = apply_hits(text, scan_text(text, store, Settings(use_ner=False, pdf_mode="anonymize")))
     assert "May 31, 2021" in out and "12/21/2023" in out
     assert "Thompson" not in out and "12/06/1986" not in out
+
+
+@pytest.mark.parametrize("text", ["Call 1-800-555-0155 today", "Customer service: 1.888.555.0177",
+                                  "(866) 712-7753 Apple.com/bill", "+1 877 555 0171", "844-555-0100",
+                                  "Phone: (800) 555-0100 ext 4", "833.555.0101", "1 (855) 555-0102"])
+def test_a_toll_free_number_is_never_found(text):
+    """A toll-free number is a business's line - the bank's, the card issuer's,
+    the utility's on every statement - and was filed as the parties' phone."""
+    from redactor import patterns
+
+    assert patterns.scan(text) == []
+
+
+def test_a_private_number_beside_a_toll_free_one_is_still_found():
+    from redactor import patterns
+
+    found = [(m.category, m.text) for m in patterns.scan("Call 1-800-555-0155 or (801) 555-0143")]
+    assert found == [("phone", "(801) 555-0143")]

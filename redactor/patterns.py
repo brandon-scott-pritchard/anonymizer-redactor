@@ -1366,6 +1366,23 @@ def _street_starts(text: str) -> set[int]:
     return starts
 
 
+# The toll-free area codes. A number in one is a business's customer line -
+# the banks', card issuers', brokerages', utilities' on every statement - and
+# was being filed as the parties' own phone. Never searched for, never listed.
+TOLL_FREE_CODES = ("800", "833", "844", "855", "866", "877", "888")
+_TOLL_FREE = re.compile(
+    r"(?<![\w\-.])(?:\+?1[\s.\-]?)?(?:\((?:" + "|".join(TOLL_FREE_CODES) + r")\)\s?|(?:"
+    + "|".join(TOLL_FREE_CODES) + r")[\s.\-])\d{3}[\s.\-]?\d{4}(?![\w\-])")
+
+
+def toll_free_spans(text: str) -> list[tuple[int, int]]:
+    return [m.span() for m in _TOLL_FREE.finditer(text)]
+
+
+def is_toll_free(value: str) -> bool:
+    return bool(_TOLL_FREE.fullmatch(value.strip()))
+
+
 def scan(
     text: str,
     enabled: Sequence[str] | None = None,
@@ -1374,7 +1391,9 @@ def scan(
     """Run every enabled detector over ``text`` and return resolved matches."""
     if not text:
         return []
-    protected = list(protected or [])
+    # a toll-free number is a business's - a bank's, a store's, a utility's -
+    # never a party's: nothing is found in one, as a phone or as anything else
+    protected = list(protected or []) + toll_free_spans(text)
     allowed = set(enabled) if enabled is not None else None
     found: list[Match] = []
     lower = text.lower()
