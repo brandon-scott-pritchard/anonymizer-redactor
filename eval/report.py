@@ -61,7 +61,21 @@ def summarise(records: list[dict]) -> dict:
                     if "added on top of the page" in w)
     hard = sum(n for c, n in by_cat.items() if c not in SOFT)
     leaky = sum(1 for f in files if any(l["category"] not in SOFT for l in f["leaks"]))
-    return {"files": len(files), "status": status, "hard": hard, "leaky_files": leaky,
+    # the party scores (eval.sheet): counted on every run, parties first or not
+    party = {
+        "party_hard": sum(1 for f in files for l in f.get("party_leaks", [])
+                          if l["category"] not in SOFT),
+        "accounts_left": sum(len(f.get("accounts_left", [])) for f in files),
+        "numbers_replaced": sum((f.get("numbers_replaced") or {}).get("count", 0) for f in files),
+        "phones_mistyped": sum((f.get("phones") or {}).get("mistyped", 0) for f in files),
+        "third_replaced": sum(sum(v for k, v in (f.get("third_replaced") or {}).items()
+                                  if k != "examples") for f in files),
+        "review_rows": sum((r.get("review_rows") or {}).get("rows", 0) for r in records),
+        "party_splits": sum(1 for r in records for kinds in (r.get("party_consistency") or {}).values()
+                            for values in kinds.values() for v in values if v["stand_ins"] > 1),
+        "parties_first": sum(1 for r in records if r.get("parties_first")),
+    }
+    return {**party, "files": len(files), "status": status, "hard": hard, "leaky_files": leaky,
             "by_cat": by_cat, "files_by_cat": files_by_cat, "values_by_cat": values_by_cat,
             "examples": examples, "by_type": by_type, "type_files": type_files,
             "money": money, "money_files": money_files, "merchants": merchants,
@@ -98,6 +112,15 @@ def main(argv=None) -> int:
         print(f"anonymized pages that fell back to appended text: {s['fallbacks']}")
     print(f"merchant names lost {sum(s['merchants'].values())} ({len(s['merchants'])} distinct)"
           + delta(0, base and sum(base['merchants'].values())))
+    print(f"party scores ({s['parties_first']} of {len(load(args.run, args.mode))} batches parties first):")
+    for key, label in (("party_hard", "party leaks (hard)"),
+                       ("accounts_left", "party accounts left showing"),
+                       ("numbers_replaced", "numbers replaced that are not the parties' accounts"),
+                       ("phones_mistyped", "phones replaced as something else"),
+                       ("third_replaced", "third parties replaced"),
+                       ("party_splits", "one party value, several stand-ins"),
+                       ("review_rows", "review rows")):
+        print(f"   {label} {s[key]}" + delta(0, base and base[key]))
     print(f"\n{'category':28} {'leaks':>7} {'files':>6} {'values':>7}" + ("   baseline" if base else ""))
     cats = sorted(set(s["by_cat"]) | set(base["by_cat"] if base else ()),
                   key=lambda c: -s["by_cat"].get(c, 0))

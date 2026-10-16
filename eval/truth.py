@@ -509,6 +509,260 @@ def lost_merchants(source: str, output: str, merchants: set[str],
     return sorted(lost)
 
 
+# --------------------------------------------------------------------------
+# scoring against the party sheet (see eval.sheet)
+# --------------------------------------------------------------------------
+
+# A phone as printed: parentheses or a separator after the area code, a
+# separator before the last four, a valid NANP area code and exchange.
+PHONE_SHAPE = re.compile(
+    r"(?<![\w(])(?:\+?1[\s.-]?)?(?:\(([2-9]\d{2})\)\s?|([2-9]\d{2})[\s.-])([2-9]\d{2})[\s.-](\d{4})(?!\d)")
+# what a number token is when it is a date or a time: scored by lost_dates
+_DATE_SPAN = re.compile(
+    r"\b\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2})?)?\b|\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b"
+    r"|\b\d{1,2}/\d{4}\b|\b\d{1,2}:\d{2}(?::\d{2})?\b"
+    r"|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.? \d{1,2},? \d{4}\b", re.I)
+NUMBER_TOKEN = re.compile(r"\d+(?:[-./]\d+)*")
+# Before a bare last four: the words that make it an account's tail.
+_TAIL_MASK = re.compile(r"(?:[xX*•#]{2,}|\.{2,})[\s-]*$")
+_TAIL_CUE = re.compile(
+    r"(?i)(?:ending(?:\s+in)?|last\s+(?:4|four)(?:\s+digits)?|acct|account|card|visa|mastercard|"
+    r"amex|discover|debit|savings|checking|bank)\b\W{0,6}[xX*•#.\s-]{0,12}$")
+
+
+def party_leaks(output: str, party_secrets: Secrets, *, ocr: bool = False,
+                anonymized: bool = False) -> list[Finding]:
+    """:func:`leaks`, against only what the party sheet says must go.
+
+    ``party_secrets`` is :meth:`eval.sheet.PartyTruth.secrets`. A third
+    party's email now survives on purpose, so the sweep for any email shape
+    is dropped; an SSN shape or a masked tail is still the parties' (the
+    specification replaces both wherever they are).
+    """
+    return [f for f in leaks(output, party_secrets, ocr=ocr, anonymized=anonymized)
+            if f.category != "email_shape"]
+
+
+def account_forms_left(output: str, accounts: list[dict]) -> list[dict]:
+    """The parties' account and card numbers still readable, in any form.
+
+    ``accounts`` is :meth:`eval.sheet.PartyTruth.accounts`. Full digits
+    (spaced or dashed - the lines are collapsed), two-thirds of a long one,
+    or the last four behind a mask or a word that makes them a tail:
+    "****1234", "xxxx-1234", "ending in 1234", "Card 1234".
+    """
+    collapsed = _collapsed(output)
+    found = []
+    for account in accounts:
+        forms = []
+        context = ""
+        number = account.get("number", "")
+        if len(number) >= 6:
+            index = collapsed.find(number)
+            if index >= 0 and _bounded(collapsed, index, len(number)):
+                forms.append("full")
+                context = collapsed[max(0, index - 30):index + len(number) + 30]
+            elif len(number) >= 10:
+                part = _partial(collapsed, number)
+                if part:
+                    forms.append("partial")
+                    context = part
+        last4 = account["last4"]
+        for match in re.finditer(rf"(?<!\d){last4}(?!\d)", output):
+            before = output[max(0, match.start() - 28):match.start()]
+            if _TAIL_MASK.search(before):
+                form = "masked"
+            elif _TAIL_CUE.search(before):
+                form = "labelled tail"
+            else:
+                continue
+            if form not in forms:
+                forms.append(form)
+                context = context or _context(output, match.start(), match.end())
+        if forms:
+            found.append({**{k: account.get(k, "") for k in ("party", "kind", "institution", "written")},
+                          "forms": forms, "context": " ".join(context.split())[:120]})
+    return found
+
+
+def _spans(pattern: re.Pattern, text: str) -> list[tuple[int, int]]:
+    return [m.span() for m in pattern.finditer(text)]
+
+
+def _inside(spans: list[tuple[int, int]], start: int, end: int) -> bool:
+    return any(a <= start and end <= b for a, b in spans)
+
+
+def number_tokens(text: str) -> list[tuple[str, str, int]]:
+    """(written, digits, start) for each number of four digits or more that is
+    not money, a date, a time or a phone - those are scored apart."""
+    skip = _spans(MONEY, text) + _spans(_DATE_SPAN, text) + _spans(PHONE_SHAPE, text)
+    out = []
+    for match in NUMBER_TOKEN.finditer(text):
+        digits = re.sub(r"\D", "", match.group())
+        if len(digits) < 4 or _inside(skip, *match.span()):
+            continue
+        out.append((match.group(), digits, match.start()))
+    return out
+
+
+def numbers_replaced(source: str, output: str, protected: set[str], account_digits: list[str],
+                     other_numbers: dict[str, str], took=None, examples: int = 30) -> dict:
+    """Numbers on the page that are none of the parties' and did not survive.
+
+    The attorney's complaint: transaction, reference and check numbers, ZIPs
+    and years taken as accounts. ``protected`` holds every digit string the
+    parties own (accounts, their last fours, SSNs, ZIPs and house numbers of
+    their addresses...), ``account_digits`` their full account numbers (a
+    number ending one of them is that account). ``took(digits)`` names the
+    category of the entity that took a number - ``""`` when none did - and
+    ``other_numbers`` what the labels call it (order, tracking, check...).
+    """
+    def theirs(digits: str) -> bool:
+        if digits in protected:
+            return True
+        return any(len(digits) >= 4 and full.endswith(digits) for full in account_digits)
+
+    before = [t for t in number_tokens(source) if not theirs(t[1])]
+    after = Counter(t[1] for t in number_tokens(output))
+    counted = Counter(t[1] for t in before)
+    lost = counted - after
+    by_took: Counter = Counter()
+    by_known: Counter = Counter()
+    shown: list[dict] = []
+    first = {}
+    for written, digits, start in before:
+        first.setdefault(digits, (written, start))
+    for digits, count in sorted(lost.items(), key=lambda kv: -kv[1]):
+        written, start = first[digits]
+        category = (took(digits) if took else "") or "(not traced)"
+        known = _known(written, digits, source, start, other_numbers)
+        by_took[category] += count
+        by_known[known] += count
+        if len(shown) < examples:
+            shown.append({"written": written, "count": count, "took": category, "known": known,
+                          "context": _context(source, start, start + len(written), 30)})
+    return {"count": sum(lost.values()), "of": len(before), "by_took": dict(by_took),
+            "by_known": dict(by_known), "examples": shown}
+
+
+_CHECK_CUE = re.compile(r"(?i)\b(?:check|chk|ck)\b\W{0,3}(?:no\.?|#)?\s*$")
+
+
+def _known(written: str, digits: str, source: str, start: int, other_numbers: dict) -> str:
+    """What the labels call a number. Four or five digits recur by chance - a
+    store's "Swig 1156" is not check 1156 - so a short one is a check only
+    when the page says so in front of it."""
+    if len(digits) >= 6:
+        found = other_numbers.get(_alnum(written)) or other_numbers.get(digits)
+        if found:
+            return found
+    elif _CHECK_CUE.search(source[max(0, start - 14):start]):
+        return "check"
+    return _shape(written)
+
+
+def _shape(written: str) -> str:
+    digits = re.sub(r"\D", "", written)
+    if re.fullmatch(r"(?:19|20)\d{2}", written):
+        return "year-shaped"
+    if re.fullmatch(r"\d{5}(?:-\d{4})?", written):
+        return "zip-shaped"
+    return f"{len(digits)}-digit number"
+
+
+PHONE_CATEGORIES = {"phone", "fax"}
+
+
+def phones_mistyped(source: str, output: str, party_phones: set[str], took=None,
+                    examples: int = 20) -> dict:
+    """Phone-shaped strings that did not survive, by what took them.
+
+    A phone must lose to nothing: taken as an account, an ID or a check
+    number it reads as one. Counted: the parties' phones replaced as phones
+    (right), anyone else's replaced as phones (over-redaction under parties
+    first), and any replaced as something else (``mistyped``).
+    """
+    def phones(text):
+        out = Counter()
+        where = {}
+        for match in PHONE_SHAPE.finditer(text):
+            digits = "".join(g for g in match.groups() if g)
+            out[digits] += 1
+            where.setdefault(digits, match)
+        return out, where
+
+    src, where = phones(source)
+    out, _ = phones(output)
+    lost = src - out
+    result = {"party_as_phone": 0, "other_as_phone": 0, "mistyped": 0, "of": sum(src.values()),
+              "by_took": {}, "examples": []}
+    by_took: Counter = Counter()
+    for digits, count in lost.items():
+        category = (took(digits) if took else "") or "(not traced)"
+        if category in PHONE_CATEGORIES:
+            result["party_as_phone" if digits in party_phones else "other_as_phone"] += count
+            continue
+        result["mistyped"] += count
+        by_took[category] += count
+        if len(result["examples"]) < examples:
+            match = where[digits]
+            result["examples"].append({"written": match.group(), "took": category,
+                                       "party": digits in party_phones,
+                                       "context": _context(source, match.start(), match.end(), 30)})
+    result["by_took"] = dict(by_took)
+    return result
+
+
+def third_replaced(source: str, output: str, people: list[Person],
+                   values: dict[str, set[str]], examples: int = 20) -> dict:
+    """Third parties' names and values a page had and its delivered copy does not.
+
+    Under parties first they should all survive: payees, payers, the other
+    end of a Venmo row, a comparable sale's address.
+    """
+    result = {"names": 0, "phones": 0, "emails": 0, "handles": 0, "addresses": 0,
+              "examples": []}
+
+    def note(kind, value, lost):
+        result[kind] += lost
+        if lost and len(result["examples"]) < examples:
+            result["examples"].append({"kind": kind, "value": value, "lost": lost})
+
+    for person in people:
+        forms = {person.full, f"{person.first} {person.last}"}
+        pattern = re.compile("|".join(_word(f).pattern for f in sorted(forms, key=len, reverse=True)),
+                             re.IGNORECASE)
+        lost = len(pattern.findall(source)) - len(pattern.findall(output))
+        if lost > 0:
+            note("names", person.full, lost)
+    src_lines = Counter(d for line in source.splitlines() for d in _ten_digit(line))
+    out_lines = Counter(d for line in output.splitlines() for d in _ten_digit(line))
+    for phone in values.get("phones", ()):
+        lost = src_lines[phone] - out_lines[phone]
+        if lost > 0:
+            note("phones", phone, lost)
+    low_src, low_out = source.casefold(), output.casefold()
+    for email in values.get("emails", ()):
+        lost = low_src.count(email) - low_out.count(email)
+        if lost > 0:
+            note("emails", email, lost)
+    for handle in values.get("handles", ()):
+        lost = low_src.count(handle.casefold()) - low_out.count(handle.casefold())
+        if lost > 0:
+            note("handles", handle, lost)
+    for street in values.get("addresses", ()):
+        pattern = _word(street)
+        lost = len(pattern.findall(source)) - len(pattern.findall(output))
+        if lost > 0:
+            note("addresses", street, lost)
+    return result
+
+
+def _ten_digit(line: str) -> list[str]:
+    return ["".join(m.groups()) for m in PHONE.finditer(line)]
+
+
 def load_label(pdf: Path) -> dict | None:
     sidecar = pdf.with_suffix(".json")
     if not sidecar.exists():
