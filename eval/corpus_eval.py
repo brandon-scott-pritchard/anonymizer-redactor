@@ -102,26 +102,35 @@ def _source_text(pdf: Path) -> tuple[str, bool]:
     return text, len(text.strip()) < 20
 
 
-def build_case(case: str, pdfs: list[Path], root: Path) -> tuple[str, truth.Secrets, set[str]]:
+def build_case(case: str, pdfs: list[Path], root: Path, typed_tails: bool = False):
+    """``(case, secrets, merchants, party truth)`` - see :mod:`eval.sheet`."""
+    from eval import sheet
+
     secrets = truth.Secrets()
     merchants: set[str] = set()
     # every label in the case directory, not just those beside a PDF: the CSV
     # exports and phone screenshots carry the same people
     base = root / case
     labels = sorted(base.rglob("*.json")) if base.is_dir() else [p.with_suffix(".json") for p in pdfs]
+    read: list[tuple[Path, dict]] = []
     for sidecar in labels:
         try:
-            truth.collect(json.loads(sidecar.read_text()), secrets, merchants)
+            label = json.loads(sidecar.read_text())
         except (OSError, ValueError):
             continue
+        truth.collect(label, secrets, merchants)
+        if isinstance(label, dict):
+            read.append((sidecar, label))
+    texts: dict[Path, str] = {}
     for pdf in pdfs:
         try:
             text, _scanned = _source_text(pdf)
         except Exception:
             continue
+        texts[pdf] = text
         truth.collect_text(text, secrets)
     truth.finalize(secrets, merchants)
-    return case, secrets, merchants
+    return case, secrets, merchants, sheet.build(read, texts, secrets, typed_tails)
 
 
 # --------------------------------------------------------------------------
@@ -129,9 +138,125 @@ def build_case(case: str, pdfs: list[Path], root: Path) -> tuple[str, truth.Secr
 # --------------------------------------------------------------------------
 
 
+def parties_core():
+    """``redactor.parties`` where the code under test has the parties-first core."""
+    try:
+        from redactor import parties
+    except ImportError:
+        return None
+    return parties if hasattr(parties, "register") and hasattr(parties, "PartySheet") else None
+
+
+def _pre_ticked(form: dict) -> bool:
+    """Whether the name screen pre-ticks a found form of a party's name.
+
+    The core says so on each form (``preticked``); the specification's rule
+    where it does not: exact and misread forms ticked, a nickname waits for
+    the operator."""
+    for key in ("preticked", "ticked", "pre_ticked"):
+        if form.get(key) is not None:
+            return bool(form[key])
+    return str(form.get("why", "")).casefold() != "nickname"
+
+
+def _parties_flow(core, files: list[Path], out_dir: Path, sheet: dict, docx_mode: str,
+                  use_ner: bool, pdf_mode: str) -> dict:
+    """The parties-first flow, step for step as the window drives the server.
+
+    ``PUT /api/parties`` (the sheet, validated by ``PartySheet.from_json``);
+    the name screen (``collect_suggestions`` proposes no third parties; the
+    forms of the parties' names the scan found, ``collect_party_forms``,
+    ticked as the window pre-ticks them); review and run on a store built as
+    webapp's ``_prepare`` builds it - the sheet registered, the ticked forms
+    added under their parties, the stand-ins settled - and the review rows
+    counted from ``parties.groups``, the list the window shows.
+    """
+    import dataclasses
+
+    from redactor import officials, pipeline
+    from redactor.engine import Settings
+    from redactor.mapping import MappingStore
+
+    timings = {}
+    t0 = time.time()
+    caps = pipeline.collect_caption_names(files)
+    offs = pipeline.collect_officials(files)
+    timings["captions"] = time.time() - t0
+    model = core.PartySheet.from_json(sheet)
+    names = [n for p in sheet["parties"] for n in p.get("names", [])]
+    avoid = [*names, *(officials.parties_of(caps) if hasattr(officials, "parties_of") else [])]
+    fields = {f.name for f in dataclasses.fields(Settings)}
+
+    def settings_for():
+        protection = officials.protected_terms(offs, avoid=avoid)
+        settings = Settings(docx_mode=docx_mode, pdf_mode=pdf_mode, use_ner=use_ner,
+                            protected_names=list(protection.terms))
+        if "parties_first" in fields:
+            settings.parties_first = True
+        return settings
+
+    def store_for(ticked):
+        store = MappingStore()
+        core.register(model, store)
+        if hasattr(core, "add_found_forms"):
+            core.add_found_forms(store, ticked)
+        if hasattr(core, "settle"):
+            core.settle(store)
+        return store
+
+    settings = settings_for()
+    store = store_for([])
+    t0 = time.time()
+    suggestions, _notes = pipeline.collect_suggestions(files, store, settings, caption_names=caps)
+    if hasattr(pipeline, "collect_party_forms"):
+        forms = pipeline.collect_party_forms(files, store)
+    elif hasattr(core, "party_forms"):
+        forms = core.party_forms(pipeline.document_texts(files), store)
+    else:
+        forms = []
+    timings["suggestions"] = time.time() - t0
+    forms = [dict(f) for f in forms or []]
+    # "Add ticked": what the window sends back is the ticked forms alone; the
+    # third-party list is empty under parties first and nothing of it is taken
+    ticked = [{"party": f.get("party", ""), "text": f.get("text", "")}
+              for f in forms if _pre_ticked(f)]
+
+    settings = settings_for()
+    store = store_for(ticked)
+    t0 = time.time()
+    pipeline.prescan(files, store, settings)
+    timings["prescan"] = time.time() - t0
+    groups = core.groups(store) if hasattr(core, "groups") else None
+    t0 = time.time()
+    result = pipeline.run_job(files, store, settings, out_dir, "corpus-eval")
+    timings["run"] = time.time() - t0
+    return {
+        "result": result,
+        "captions": [(c.name, c.category, c.confidence) for c in caps],
+        "suggestions": [(s.text, s.category) for s in suggestions or []],
+        "entities": [(e.category, e.canonical) for e in store.entities.values()],
+        "timings": timings,
+        "store": store,
+        "parties_first": True,
+        "party_forms": [{k: f.get(k) for k in ("party", "text", "kind", "why", "count")}
+                        | {"ticked": _pre_ticked(f)} for f in forms],
+        "groups": [{k: g.get(k) for k in ("key", "party", "kind", "label", "replacement",
+                                          "count", "enabled")}
+                   | {"forms": len(g.get("forms", []))} for g in groups]
+        if groups is not None else None,
+        "left_as_written": core.left_counts(store) if hasattr(core, "left_counts") else {},
+    }
+
+
 def run_flow(files: list[Path], out_dir: Path, mode: str, operator_names: list[str],
              docx_mode: str = "redact", use_ner: bool = False,
-             pdf_mode: str = "redact") -> dict:
+             pdf_mode: str = "redact", sheet: dict | None = None) -> dict:
+    """One batch through the app's steps. With ``sheet`` and a core that has
+    ``redactor.parties``, the parties-first flow; otherwise today's."""
+    if sheet is not None:
+        core = parties_core()
+        if core is not None:
+            return _parties_flow(core, files, out_dir, sheet, docx_mode, use_ner, pdf_mode)
     from redactor import officials, pipeline, review
     from redactor.engine import Settings
 
@@ -315,6 +440,39 @@ def _doc_type(label: dict | None, pdf: Path) -> str:
     return "unlabelled"
 
 
+def _party_digits(parties) -> set[str]:
+    """Every digit string the parties own: a number that is one of these and
+    went is a correct replacement, not "a number that is not an account"."""
+    out: set[str] = set()
+
+    def digits(value) -> str:
+        return re.sub(r"\D", "", str(value))
+
+    for party in parties.parties:
+        sheet = party.sheet
+        for _kind, item in parties.party_accounts(party):
+            d = digits(item["number"])
+            if len(d) >= 4:
+                out.update({d, d[-4:]})
+        for value in [*sheet["ssn"], *sheet["tin"], *sheet["parcels"], *sheet["case_numbers"],
+                      *sheet["passport"], *(d["number"] for d in sheet["dl"]), *sheet["dob"]]:
+            d = digits(value)
+            if d:
+                out.update({d, d[-4:]})
+        for phone in sheet["phones"]:
+            d = digits(phone)[-10:]
+            out.update({d, d[3:], d[-4:]})
+        for vehicle in sheet["vehicles"]:
+            for part in (vehicle.get("vin", ""), vehicle.get("plate", "")):
+                out.update(run for run in re.findall(r"\d{4,}", part))
+        for address in sheet["addresses"]:
+            # the house number and the ZIP go with the address they are part of
+            out.update(run for run in re.findall(r"\d{4,}", address))
+    for z in parties.zip4:
+        out.update({digits(z), z.split("-")[-1]})
+    return out
+
+
 def pipeline_classify(path: Path) -> str | None:
     from redactor import pipeline
     return pipeline.classify(path)
@@ -322,17 +480,26 @@ def pipeline_classify(path: Path) -> str | None:
 
 def run_batch(batch_id: str, pdfs: list[str], root: str, out: str, mode: str,
               secrets_path: str, docx: bool, docx_mode: str, use_ner: bool,
-              keep_outputs: bool, pdf_mode: str = "redact", scan_money: bool = False) -> dict:
+              keep_outputs: bool, pdf_mode: str = "redact", scan_money: bool = False,
+              parties_first: bool = False) -> dict:
     root_p, out_p = Path(root), Path(out)
     files = [Path(p) for p in pdfs]
     with open(secrets_path, "rb") as handle:
         cases = pickle.load(handle)
     case = case_of(files[0], root_p)
-    secrets, merchants = cases[case]
+    secrets, merchants, parties = cases[case]
+    party_secrets = parties.secrets()
+    accounts = parties.accounts()
+    protected = _party_digits(parties)
+    account_digits = [a["number"] for a in accounts if len(a["number"]) >= 6]
+    party_phones = {re.sub(r"\D", "", p)[-10:] for party in parties.parties
+                    for p in party.sheet["phones"]}
     import redactor
     anonymized = (docx_mode == "anonymize") if docx else (pdf_mode == "anonymize")
     record = {"batch": batch_id, "case": case, "mode": mode, "docx": docx, "pdf_mode": pdf_mode,
-              "code": redactor.__file__, "files": [], "error": ""}
+              "code": redactor.__file__, "files": [], "error": "",
+              "parties_first": False, "parties_requested": parties_first,
+              "roles": {p.key: p.sheet["names"][:1] for p in parties.parties}}
     work = Path(tempfile.mkdtemp(prefix="corpus-", dir=out_p / "_tmp"))
     try:
         inputs = files
@@ -349,13 +516,20 @@ def run_batch(batch_id: str, pdfs: list[str], root: str, out: str, mode: str,
                 if to_docx.convert(pdf, target):
                     inputs.append(target)
         flow = run_flow(inputs, work / "run", mode, secrets.household_names(),
-                        docx_mode=docx_mode, use_ner=use_ner, pdf_mode=pdf_mode)
+                        docx_mode=docx_mode, use_ner=use_ner, pdf_mode=pdf_mode,
+                        sheet=parties.sheet() if parties_first else None)
         result = flow["result"]
         record.update({k: flow[k] for k in ("captions", "suggestions", "entities", "timings")})
+        record["parties_first"] = bool(flow.get("parties_first"))
+        record["party_forms"] = flow.get("party_forms", [])
+        record["left_as_written"] = flow.get("left_as_written", {})
         from eval import consistency
         record["consistency"] = consistency.score(flow["store"], secrets)
+        record["party_consistency"] = consistency.party_consistency(flow["store"], parties)
+        record["review_rows"] = consistency.review_rows(flow["store"], flow.get("groups"))
         record["review"] = [(e.category, e.canonical, e.replacement, e.parent or "")
                             for e in flow["store"].entities.values() if e.enabled]
+        took = consistency.taker(flow["store"])
         archive = zipfile.ZipFile(result.archive) if result.archive else None
         by_source = {o.source.stem: o for o in result.outcomes}
         # a whole case repeats file names across its folders: match on the path
@@ -373,7 +547,8 @@ def run_batch(batch_id: str, pdfs: list[str], root: str, out: str, mode: str,
                      "error": outcome.error if outcome else "not converted",
                      "hits": outcome.hits if outcome else 0,
                      "delivered": outcome.delivered_name if outcome else "",
-                     "leaks": [], "destroyed_money": {}, "lost_merchants": [],
+                     "leaks": [], "party_leaks": [], "accounts_left": [],
+                     "destroyed_money": {}, "lost_merchants": [],
                      "warnings": [w.splitlines()[0][:200] for w in (outcome.warnings if outcome else [])]}
             if outcome and outcome.status == "processed" and archive is not None:
                 data = archive.read(outcome.delivered_name)
@@ -383,12 +558,24 @@ def run_batch(batch_id: str, pdfs: list[str], root: str, out: str, mode: str,
                     (keep / outcome.delivered_name).write_bytes(data)
                 suffix = ".docx" if docx else ".pdf"
                 text = _output_text(data, suffix, ocr_it=scanned and not docx)
-                entry["leaks"] = [asdict(f) for f in truth.leaks(
+                delivered = outcome.delivered_name.replace("_", " ")
+                legacy = [asdict(f) for f in truth.leaks(
                     text, secrets, ocr=scanned, anonymized=anonymized)]
                 # the filename is delivered too
-                entry["leaks"] += [asdict(f) | {"category": "filename:" + f.category}
-                                   for f in truth.leaks(outcome.delivered_name.replace("_", " "), secrets)
-                                   if f.category not in {"masked_tail", "ssn_shape"}]
+                legacy += [asdict(f) | {"category": "filename:" + f.category}
+                           for f in truth.leaks(delivered, secrets)
+                           if f.category not in {"masked_tail", "ssn_shape"}]
+                # the parties' secrets alone: under parties first everyone
+                # else is meant to survive, so these are the leaks
+                party = [asdict(f) for f in truth.party_leaks(
+                    text, party_secrets, ocr=scanned, anonymized=anonymized)]
+                party += [asdict(f) | {"category": "filename:" + f.category}
+                          for f in truth.party_leaks(delivered, party_secrets)
+                          if f.category not in {"masked_tail", "ssn_shape"}]
+                entry["leaks"] = party if parties_first else legacy
+                entry["legacy_leaks"] = len(legacy)
+                entry["party_leaks"] = party
+                entry["accounts_left"] = truth.account_forms_left(text, accounts)
                 if not scanned:
                     from eval import consistency
                     entry["words"] = consistency.word_count(source_text)
@@ -396,6 +583,11 @@ def run_batch(batch_id: str, pdfs: list[str], root: str, out: str, mode: str,
                     entry["lost_dates"] = dict(consistency.lost_dates(source_text, text))
                     entry["destroyed_money"] = dict(truth.destroyed_money(source_text, text))
                     entry["lost_merchants"] = truth.lost_merchants(source_text, text, merchants, secrets)
+                    entry["numbers_replaced"] = truth.numbers_replaced(
+                        source_text, text, protected, account_digits, parties.other_numbers, took)
+                    entry["phones"] = truth.phones_mistyped(source_text, text, party_phones, took)
+                    entry["third_replaced"] = truth.third_replaced(
+                        source_text, text, parties.third_people, parties.third_values)
                 elif scan_money and not docx and pdf in input_of:
                     entry["destroyed_money_ocr"] = dict(
                         _figures_covered(input_of[pdf].read_bytes(), data, text))
@@ -464,6 +656,13 @@ def main(argv=None) -> int:
                         help="one batch per case (a household's every folder together), as a set is")
     parser.add_argument("--photos", action="store_true",
                         help="also run the phone photos and screenshots (made into PDFs)")
+    parser.add_argument("--parties", action="store_true",
+                        help="parties first: fill each set's party sheet from the labels and run "
+                             "the parties-first flow (needs redactor.parties); leaks count only "
+                             "the parties' secrets")
+    parser.add_argument("--sheet-all-tails", action="store_true",
+                        help="put every masked account tail the labels show on the party sheet, "
+                             "not only the accounts and cards a statement names")
     args = parser.parse_args(argv)
 
     root = args.root.resolve()
@@ -489,11 +688,11 @@ def main(argv=None) -> int:
     built = {}
     with ProcessPoolExecutor(args.workers) as pool:
         wanted = {case_of(pdfs[0], root) for pdfs in batches.values()}
-        futures = [pool.submit(build_case, case, pdfs, root)
+        futures = [pool.submit(build_case, case, pdfs, root, args.sheet_all_tails)
                    for case, pdfs in cases.items() if case in wanted]
         for future in as_completed(futures):
-            case, secrets, merchants = future.result()
-            built[case] = (secrets, merchants)
+            case, secrets, merchants, parties = future.result()
+            built[case] = (secrets, merchants, parties)
     secrets_path = args.out / "secrets.pkl"
     secrets_path.write_bytes(pickle.dumps(built))
     (args.out / "secrets.json").write_text(json.dumps(
@@ -501,13 +700,22 @@ def main(argv=None) -> int:
                 "orgs": s.orgs, "addresses": sorted(s.addresses),
                 "handles": sorted(s.handles), "phones": sorted(s.phones),
                 "emails": sorted(s.emails), "merchants": len(m)}
-         for case, (s, m) in built.items()}, indent=1))
+         for case, (s, m, _p) in built.items()}, indent=1))
+    # the sheet the operator would type for each case, as the server takes it
+    # (synthetic labels only - the app itself never writes a sheet to disk)
+    (args.out / "parties.json").write_text(json.dumps(
+        {case: p.sheet() for case, (_s, _m, p) in built.items()}, indent=1))
     print(f"secrets for {len(built)} cases in {time.time() - t0:.0f}s", flush=True)
+    if args.parties:
+        core = parties_core()
+        print("parties-first: " + ("redactor.parties found" if core else
+                                   "redactor.parties NOT importable - running today's flow, "
+                                   "scored against the sheet"), flush=True)
 
     modes = ["auto", "operator"] if args.mode == "both" else [args.mode]
     jobs = [(b, [str(p) for p in pdfs], str(root), str(args.out), mode, str(secrets_path),
              args.docx, args.docx_mode, args.ner, args.keep_outputs, args.pdf_mode,
-             args.scan_money)
+             args.scan_money, args.parties)
             for mode in modes for b, pdfs in batches.items()]
     done = 0
     t0 = time.time()

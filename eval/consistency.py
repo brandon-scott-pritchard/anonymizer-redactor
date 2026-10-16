@@ -222,6 +222,215 @@ _ORG_FILLER = {"llc", "inc", "co", "corp", "company", "the", "and", "ltd", "pllc
 
 
 # --------------------------------------------------------------------------
+# one stand-in per party per kind (see eval.sheet)
+# --------------------------------------------------------------------------
+
+# entities whose last four make them one account: the masked tail and the full
+# number are one account and must read as one
+_ACCOUNTISH = {"bank_account", "masked_account", "credit_card", "investment_account",
+               "loan_number", "iban"}
+_MASK = re.compile(r"[xX*•#]|\.\.|ending|last", re.IGNORECASE)
+
+
+def _head(entity, store):
+    head = store.entities.get(entity.parent) if entity.parent else None
+    return head or entity
+
+
+def _digits(text: str) -> str:
+    return re.sub(r"\D", "", text)
+
+
+def _phone10(text: str) -> str:
+    digits = _digits(text)
+    return digits[1:] if len(digits) == 11 and digits[0] == "1" else digits
+
+
+def _same_address(a: str, b: str, zip4=frozenset()) -> bool:
+    from redactor import grouping
+
+    x, y = grouping.parse_address(a), grouping.parse_address(b)
+    if x is None or y is None or not x.number:
+        return False
+    if not y.number and not y.box:
+        # the city line or the ZIP+4 under the street line is the same house:
+        # "LAYTON UT 84041-4986" given a placeholder of its own is the split
+        # the attorney's run was full of
+        zip_only = b.strip() in zip4
+        return bool(x.zip5) and y.zip5 == x.zip5 and (
+            zip_only or (bool(y.city) and set(y.city) <= set(x.city)))
+    if x.number != y.number:
+        return False
+    if x.street == y.street:
+        return True
+    words = [w for w in x.street if len(w) > 2 and not w.isdigit()]
+    theirs = [w for w in y.street if len(w) > 2 and not w.isdigit()]
+    return any(_close(p, q) for p in words for q in theirs)
+
+
+def party_consistency(store, parties) -> dict:
+    """For each party and kind, how many stand-ins each of its values got.
+
+    ``parties`` is :class:`eval.sheet.PartyTruth`. One respondent address
+    written five ways must come out as one placeholder; "respondent address:
+    3 placeholders" is the failure the attorney's overnight run was full of.
+    Accounts are one value per last four. A form that matches two parties
+    (the family surname alone) is left to the family-surname row.
+    """
+    everyone = [(p, person) for p in parties.parties for person in p.people]
+    people = [person for _p, person in everyone]
+    owner_of = {id(person): p for p, person in everyone}
+    out: dict[str, dict] = {}
+
+    def slot(party, kind, value):
+        values = out.setdefault(party.key, {}).setdefault(kind, {})
+        return values.setdefault(value, {"value": value, "replacements": Counter(), "forms": []})
+
+    def hit(party, kind, value, entity):
+        head = _head(entity, store)
+        entry = slot(party, kind, value)
+        entry["replacements"][" ".join((head.replacement or "").split())] += 1
+        if len(entry["forms"]) < 20:
+            entry["forms"].append(f"{entity.canonical} -> {head.replacement} ({entity.category})")
+
+    # what reached a page: a sheet value's generated printed forms that no
+    # document uses ("1734 West GENTILE Street") cannot read as two people
+    active = [e for e in store.entities.values() if e.enabled and e.occurrences > 0]
+    for entity in active:
+        text = entity.canonical
+        digits = _digits(text)
+        if entity.is_person:
+            owners = {id(owner_of[id(p)]): owner_of[id(p)] for p in _whose(text, people)}
+            surname_only = all(any(_close(t, p.last) for p in people) for t in _tokens(text))
+            if len(owners) == 1 and not surname_only:
+                hit(next(iter(owners.values())), "name", "names", entity)
+            continue
+        for party in parties.parties:
+            sheet = party.sheet
+            if entity.category == "street_address" or re.match(r"\s*\d+\s+\w", text):
+                for address in sheet["addresses"]:
+                    if _same_address(address, text, parties.zip4):
+                        hit(party, "address", address, entity)
+            if digits:
+                for phone in sheet["phones"]:
+                    if _phone10(text) == _digits(phone)[-10:]:
+                        hit(party, "phone", phone, entity)
+                for ssn in sheet["ssn"]:
+                    real = _digits(ssn)
+                    if digits == real or (entity.category == "ssn" and len(digits) == 4
+                                          and real.endswith(digits)) \
+                            or (_MASK.search(text) and len(digits) == 4 and real.endswith(digits)
+                                and entity.category == "ssn"):
+                        hit(party, "ssn", ssn, entity)
+                for _kind, item in parties.party_accounts(party):
+                    real = _digits(item["number"])
+                    if len(real) < 4:
+                        continue
+                    last4 = real[-4:]
+                    full = len(real) >= 6 and digits == real
+                    tail = digits.endswith(last4) and len(digits) <= len(real) and (
+                        entity.category in _ACCOUNTISH or _MASK.search(text))
+                    if full or tail:
+                        label = f"{item.get('institution') or '?'} ****{last4}"
+                        hit(party, "account", label, entity)
+                for vehicle in sheet["vehicles"]:
+                    alnum = re.sub(r"[^0-9A-Za-z]", "", text).upper()
+                    if alnum and alnum in {re.sub(r"[^0-9A-Za-z]", "", vehicle.get(k, "")).upper()
+                                           for k in ("vin", "plate")}:
+                        hit(party, "vehicle", vehicle.get("vin") or vehicle.get("plate"), entity)
+                for parcel in sheet["parcels"]:
+                    if digits == _digits(parcel):
+                        hit(party, "parcel", parcel, entity)
+                if entity.category == "dob":
+                    from .sheet import _iso_date
+                    for dob in sheet["dob"]:
+                        if _iso_date(text) == dob:
+                            hit(party, "dob", dob, entity)
+            low = text.casefold().strip()
+            for email in sheet["emails"]:
+                if low == email.casefold():
+                    hit(party, "email", email, entity)
+            for handle in sheet["handles"]:
+                if low.lstrip("@$") == handle.casefold().lstrip("@$"):
+                    hit(party, "handle", handle, entity)
+            for kind, key in (("employer", "employers"), ("business", "businesses")):
+                for org in sheet[key]:
+                    if _same_business(text, org):
+                        hit(party, kind, org, entity)
+    result = {}
+    for key, kinds in out.items():
+        result[key] = {}
+        for kind, values in kinds.items():
+            result[key][kind] = [{"value": v["value"], "stand_ins": len(v["replacements"]),
+                                  "replacements": dict(v["replacements"]), "forms": v["forms"]}
+                                 for v in values.values()]
+    return result
+
+
+def party_splits(consistency: dict) -> list[str]:
+    """ "respondent address: 3 placeholders" - each value given more than one stand-in."""
+    out = []
+    for party, kinds in (consistency or {}).items():
+        for kind, values in kinds.items():
+            for value in values:
+                if value["stand_ins"] > 1:
+                    what = kind if kind == "name" else f"{kind} {value['value']}"
+                    out.append(f"{party} {what}: {value['stand_ins']} stand-ins")
+    return out
+
+
+def review_rows(store, groups: list[dict] | None = None) -> dict:
+    """How many rows the operator would see on the review screen.
+
+    The parties-first server returns ``groups`` with the review result, one per
+    party per kind; where it is given it is counted as is. Otherwise each head
+    entity is a row (its other written forms fold under it), as the review
+    screen lists them today; ``rows`` counts the heads left ticked.
+    """
+    if groups is not None:
+        kinds = Counter(str(g.get("kind", "")) for g in groups)
+        return {"rows": len(groups), "listed": len(groups),
+                "found": sum(1 for g in groups if g.get("count")),
+                "by_kind": dict(kinds), "source": "groups"}
+    heads = [e for e in store.entities.values()
+             if not e.parent or e.parent not in store.entities]
+    enabled = [e for e in heads if e.enabled]
+    places = Counter()
+    for entity in store.entities.values():
+        head = _head(entity, store)
+        places[head.key] += entity.occurrences
+    return {"rows": len(enabled), "listed": len(heads),
+            "found": sum(1 for e in enabled if places[e.key]),
+            "by_kind": dict(Counter(e.category for e in enabled)), "source": "heads"}
+
+
+def taker(store):
+    """``took(digits)``: the category of the entity a number was taken by.
+
+    The entity whose digits are exactly the number wins, then the shortest
+    whose digits hold it - "1734" was taken by the address it starts.
+    """
+    index = []
+    for entity in store.entities.values():
+        if not entity.enabled:
+            continue
+        digits = _digits(entity.canonical)
+        if len(digits) >= 4:
+            index.append((digits, entity))
+
+    def took(number: str) -> str:
+        best = None
+        for digits, entity in index:
+            if number not in digits:
+                continue
+            rank = (digits != number, len(entity.canonical))
+            if best is None or rank < best[0]:
+                best = (rank, entity.category)
+        return best[1] if best else ""
+    return took
+
+
+# --------------------------------------------------------------------------
 # what an anonymized page should have kept
 # --------------------------------------------------------------------------
 

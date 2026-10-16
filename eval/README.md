@@ -126,6 +126,62 @@ changed. An earlier version OCR'd the output too and compared the readings;
 every misread on either side counted, and it reported thousands of lost
 figures on pages where none were.
 
+## Parties first: the sheet and its scores
+
+The parties-first redesign has the operator type, per set, who the petitioner,
+the respondent and the children are and what identifies them, before anything
+is scanned; only they and the family surname are replaced, and everyone else
+is left as written. `eval/sheet.py` fills that sheet from the labels the way an
+attorney would, and every run is scored against it - parties first or not, so
+two runs of the same files compare line for line.
+
+- **Who is who.** The labels carry no roles. The adults are the people a
+  document belongs to (statement holders, the employee on a stub, a credit
+  report's subjects, a vehicle's owner, a payment app's "me"); the first two
+  seen are petitioner and respondent, any more "other". Children are people of
+  the household never an adult anywhere (an EOB's patient, an order's ship-to
+  name, a 1040's dependent), numbered in the order seen. A relative sharing the
+  family surname (a brother on a promissory note) is neither: his surname must
+  go, his first name stays. Everyone else is a third party.
+- **Whose identifier.** Each goes to whom the label ties it (a Zelle token to
+  the name on its row, a phone line to the first name it is labelled with, a
+  VIN to the vehicle's owner, an SSN to the nearest party name written above it
+  on the page), otherwise to the holder of the document it is in. Loan and
+  mortgage numbers are left off the sheet - the specification leaves them as
+  written - as are policy, order, tracking, check, transaction, confirmation and
+  reference numbers; the labels' values for them are kept to name what a run
+  took. Masked tails found only in transaction text ("Bank \*\*\*3618") are party
+  truth but not typed (one household's payment apps show 176 of them);
+  `--sheet-all-tails` types them too.
+- The sheet for each case is written to `RUN_DIR/parties.json` in the shape
+  `PUT /api/parties` takes (synthetic labels only; the app itself never writes
+  one).
+
+`--parties` runs the parties-first flow where the code under test has it
+(`redactor.parties` importable, with `register`): the sheet is registered into
+the store, `Settings.parties_first` is set, the forms of the parties' names the
+scan found (`party_forms`) are ticked as the window pre-ticks them (all but
+nicknames, unless the form says), no third-party suggestions are taken, and the
+server's review `groups` are counted where it returns them. Without
+`redactor.parties` the run says so and goes today's way, still scored against
+the sheet. With `--parties` a file's `leaks` are the party leaks.
+
+The party scores, per case in `eval.consistency_report` and totalled in
+`eval.report` (`--compare` works on both):
+
+| Score | What it counts |
+| --- | --- |
+| party leaks | the parties' and children's secrets and the family surname still readable (a payee's surviving name or email is not one) |
+| third parties replaced | third parties' names, phones, emails, handles and addresses a typed page had and its copy does not - over-redaction under parties first |
+| party accounts left showing | each party account or card readable in any form: full, spaced, two-thirds, `****1234`, `ending in 1234`, `Card 1234`. Must be 0 |
+| numbers replaced that are not the parties' accounts | digit runs of four or more on a typed page (not money, dates, times or phones) that are none of the parties' and did not survive, by the category of the entity that took them and by what the labels say they were (check, routing, order, a ZIP- or year-shaped number...) |
+| phones replaced as something else | phone-shaped strings (parentheses or separators, valid NANP) taken by anything but a phone; the parties' and others' phones replaced as phones are counted beside it |
+| one party value, several stand-ins | per party per kind - names, each address (its city/ZIP+4 line included), phone, SSN, account by last four, email, handle, employer, business, vehicle, parcel - a value given more than one stand-in ("petitioner address …: 3 stand-ins") |
+| review rows | the rows the operator would see: the server's `groups` where given, else each head entity left ticked (`listed` counts the unticked too; "with places in the documents" leaves out sheet values no page uses) |
+
+The per-party consistency counts only forms that occur on a page: a sheet
+value's generated printed forms that no document uses cannot split anyone.
+
 ## Reading the report
 
 ```
