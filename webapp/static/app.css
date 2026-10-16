@@ -384,3 +384,76 @@ ul.buildlist li.failed { color: var(--danger); }
 .runtable .downloads button { padding: 5px 10px; }
 .runtable .small { font-size: 13px; font-weight: 400; }
 
+/* --------------------------------------------------------- the parties -- */
+/* Each set card's parties sheet: open until filled, then one summary line,
+   so five to eleven sets still fit on one screen. */
+.parties { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+.parties > p { margin: 6px 0; }
+.parties p.small { font-size: 14px; }
+.parties-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.parties-toggle {
+  border: 0; background: none; padding: 2px 0; color: var(--ink);
+  font: 700 15px/1.3 var(--sans);
+}
+.parties-toggle:hover:not(:disabled) { background: none; color: var(--accent); }
+.parties-summary { flex: 1 1 240px; font: 400 13.5px/1.4 var(--sans); color: var(--muted); }
+.party {
+  border: 1px solid var(--line); border-radius: 8px; background: var(--paper);
+  padding: 8px 12px 6px; margin-top: 10px;
+}
+.partyhead {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  font: 700 13.5px/1.3 var(--sans); color: var(--ink); margin-bottom: 4px;
+}
+.partyhead button { padding: 4px 10px; }
+.pfield {
+  display: grid; grid-template-columns: 128px minmax(0, 1fr); gap: 0 10px;
+  padding: 3px 0; align-items: start;
+}
+.pfield > label { font: 600 12.5px/1.3 var(--sans); color: var(--muted); padding-top: 8px; }
+.pfield.refused > label { color: var(--danger); }
+.pvalues { min-width: 0; }
+.pvalue { display: flex; gap: 6px; align-items: center; margin-bottom: 4px; }
+.pvalue input[type="text"] {
+  flex: 1 1 0; min-width: 0; padding: 6px 9px; font-size: 14px; border-radius: 7px;
+}
+.pvalue input.narrow { flex: 0 0 74px; }
+.pfield.refused input[type="text"] { border-color: var(--danger); }
+.pvalues > input[type="text"] { padding: 6px 9px; font-size: 14px; border-radius: 7px; }
+button.dropvalue { flex: none; padding: 3px 8px; font-size: 14px; line-height: 1; }
+button.addvalue {
+  border: 0; background: none; padding: 1px 0; margin-right: 10px;
+  color: var(--accent); font: 700 12.5px/1.4 var(--sans);
+}
+button.addvalue:hover:not(:disabled) { background: none; text-decoration: underline; }
+.phint { display: block; margin-top: 2px; font: 400 12.5px/1.4 var(--sans); color: var(--muted); }
+button.addvalue + .phint { display: inline; }
+.fielderror { margin: 3px 0 2px; color: var(--danger); font: 600 12.5px/1.35 var(--sans); }
+details.moredetails { margin: 4px 0; }
+details.moredetails > summary {
+  cursor: pointer; font: 600 12.5px/1.4 var(--sans); color: var(--muted); padding: 3px 0;
+}
+.pfield.surnames { margin-top: 10px; }
+.bar.tight { margin-top: 10px; }
+
+/* the name screen's forms of the parties' names, filed under each party */
+tr.partyrow td {
+  background: var(--paper); font: 700 12.5px/1.4 var(--sans); color: var(--ink);
+  letter-spacing: .3px; text-transform: uppercase; padding: 7px 11px;
+}
+.status-ok.small { font-size: 12.5px; }
+
+/* the review list by party and kind */
+table.groups tr.group-row td { vertical-align: middle; }
+table.groups tr.group-row strong { font: 700 14px/1.35 var(--sans); color: var(--ink); }
+table.groups tr.form-row td:nth-child(3) { padding-left: 24px; }
+button.formsbtn { padding: 4px 10px; font-weight: 700; }
+details.leftalone { margin: 12px 0 0; }
+details.leftalone summary { cursor: pointer; font-size: 15px; color: var(--muted); }
+details.leftalone ul { margin: 6px 0 0; padding-left: 20px; font-size: 14.5px; color: var(--muted); }
+
+@media (max-width: 640px) {
+  .pfield { grid-template-columns: 1fr; }
+  .pfield > label { padding-top: 4px; }
+}
+
