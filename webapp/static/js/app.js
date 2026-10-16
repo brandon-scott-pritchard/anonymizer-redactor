@@ -238,6 +238,375 @@ function setStatus(info) {
   }
 }
 
+/* ------------------------------------------------------- the parties -- */
+
+// The sheet filled in for each set before anything is scanned: who the
+// parties are, and what identifies them. The overnight run that came back
+// with thousands of review rows was guessing at all of this; the operator
+// knows it from the file in a minute. Every field is optional and may hold
+// several values; what is not one of the parties' is left as written.
+const ACCOUNT_KINDS = ["checking", "savings", "credit card", "loan", "mortgage",
+                       "retirement", "brokerage", "other"];
+
+const PARTY_FIELDS = [
+  { key: "names", label: "Names", many: true, core: true, placeholder: "Full name",
+    hint: "Add every former or maiden name too - each is the same person." },
+  { key: "dob", label: "Date of birth", core: true, placeholder: "e.g. 12/6/1986",
+    hint: "Any date format." },
+  { key: "ssn", label: "SSN", core: true, placeholder: "e.g. 528-41-9963",
+    hint: "Any format - with or without dashes or spaces." },
+  { key: "addresses", label: "Addresses", many: true, core: true,
+    placeholder: "Street, city, state ZIP" },
+  { key: "phones", label: "Phones", many: true, core: true, placeholder: "e.g. (801) 555-0143",
+    hint: "Any format." },
+  { key: "emails", label: "Emails", many: true, core: true, placeholder: "name@example.com" },
+  { key: "tin", label: "TIN / EIN", placeholder: "Taxpayer number" },
+  { key: "dl", label: "Driver's licence",
+    parts: [{ k: "number", label: "Licence number" }, { k: "state", label: "State", narrow: true }] },
+  { key: "passport", label: "Passport", placeholder: "Passport number" },
+  { key: "employers", label: "Employers", many: true, placeholder: "Employer" },
+  { key: "businesses", label: "Businesses", many: true, placeholder: "e.g. Smith Landscaping LLC" },
+  { key: "accounts", label: "Accounts", many: true,
+    hint: "The full number or only the last four.",
+    parts: [{ k: "number", label: "Number or last four" }, { k: "institution", label: "Bank" },
+            { k: "kind", label: "Kind", list: "account-kinds" }] },
+  { key: "cards", label: "Cards", many: true,
+    parts: [{ k: "number", label: "Last four" }, { k: "institution", label: "Issuer" }] },
+  { key: "handles", label: "Handles", many: true, placeholder: "Venmo, Cash App, social",
+    hint: "e.g. @janesmith86" },
+  { key: "vehicles", label: "Vehicles", many: true,
+    parts: [{ k: "vin", label: "VIN" }, { k: "plate", label: "Plate", narrow: true }] },
+  { key: "case_numbers", label: "Case numbers", many: true, placeholder: "Court case number" },
+  { key: "parcels", label: "Parcels", many: true, placeholder: "Property parcel number" },
+  { key: "other", label: "Other", many: true, placeholder: "Anything else that identifies them" },
+];
+const ROLE_ORDER = { petitioner: 0, respondent: 1, child: 2, other: 3 };
+
+const blankValue = (def) => (def.parts ? Object.fromEntries(def.parts.map((p) => [p.k, ""])) : "");
+const isBlank = (value) => (value && typeof value === "object"
+  ? Object.values(value).every((v) => !String(v || "").trim())
+  : !String(value || "").trim());
+const trimmed = (value) => (value && typeof value === "object"
+  ? Object.fromEntries(Object.entries(value).map(([k, v]) => [k, String(v || "").trim()]))
+  : String(value || "").trim());
+
+function blankParty(role) {
+  return { role, ...Object.fromEntries(PARTY_FIELDS.map((def) => [def.key, []])) };
+}
+
+// The server answers with each value in its canonical form: a plain string,
+// or the value with its canonical form beside it. Either way the field shows
+// the canonical one - "8015550143" comes back "(801) 555-0143".
+function plainText(value) {
+  if (value === null || value === undefined) return "";
+  if (typeof value !== "object") return String(value);
+  return String(value.canonical ?? value.value ?? value.text ?? "");
+}
+function toDraftValue(def, value) {
+  if (!def.parts) return plainText(value);
+  if (!value || typeof value !== "object" || !def.parts.some((p) => p.k in value)) {
+    return { ...blankValue(def), [def.parts[0].k]: plainText(value) };
+  }
+  return Object.fromEntries(def.parts.map((p) => [p.k, plainText(value[p.k])]));
+}
+function toDraftParty(party) {
+  const out = blankParty(ROLE_ORDER[party.role] !== undefined ? party.role : "other");
+  for (const def of PARTY_FIELDS) {
+    const values = party[def.key];
+    out[def.key] = (Array.isArray(values) ? values : values ? [values] : [])
+      .map((v) => toDraftValue(def, v));
+  }
+  return out;
+}
+
+// petitioner and respondent always have a card; children and the rest follow
+function ensureCore(parties) {
+  const sorted = [...parties].sort((a, b) => ROLE_ORDER[a.role] - ROLE_ORDER[b.role]);
+  if (!sorted.some((p) => p.role === "respondent")) {
+    sorted.splice(sorted.filter((p) => p.role === "petitioner").length, 0, blankParty("respondent"));
+  }
+  if (!sorted.some((p) => p.role === "petitioner")) sorted.unshift(blankParty("petitioner"));
+  return sorted;
+}
+
+function partyLabel(parties, index) {
+  const party = parties[index];
+  if (party.role === "petitioner") return "Petitioner";
+  if (party.role === "respondent") return "Respondent";
+  const nth = parties.slice(0, index + 1).filter((p) => p.role === party.role).length;
+  return party.role === "child" ? `Child ${nth}` : `Another party ${nth}`;
+}
+
+const firstName = (party) => (party.names || []).find((v) => !isBlank(v)) || "";
+const detailCount = (party) => PARTY_FIELDS.filter((def) => def.key !== "names")
+  .reduce((sum, def) => sum + (party[def.key] || []).filter((v) => !isBlank(v)).length, 0);
+const hasPartyName = (parties) => parties.some((p) =>
+  ["petitioner", "respondent"].includes(p.role) && firstName(p));
+
+const parseSurnames = (text) => String(text || "").split(/[,;\n]/).map((s) => s.trim()).filter(Boolean);
+
+// What goes to the server: the blanks left out, and each party sent with its
+// place on the sheet remembered, so the canonical forms that come back land
+// in the fields they were typed in. The family surnames go only once the
+// operator has changed them; until then the server works them out.
+function sheetBody(state) {
+  const parties = [];
+  const index = [];
+  state.sheet.forEach((party, at) => {
+    const out = { role: party.role };
+    let any = false;
+    for (const def of PARTY_FIELDS) {
+      out[def.key] = (party[def.key] || []).filter((v) => !isBlank(v)).map(trimmed);
+      if (out[def.key].length) any = true;
+    }
+    if (any) { parties.push(out); index.push(at); }
+  });
+  const body = { parties };
+  if (state.surnamesEdited) body.family_surnames = parseSurnames(state.surnamesText);
+  return { body, index };
+}
+const sheetKey = (state) => JSON.stringify(sheetBody(state).body);
+const sheetDirty = (state) => state.sheetState === "ready" && sheetKey(state) !== state.sheetSaved;
+
+// The normalised sheet folded back into what is on screen: each value typed
+// takes its canonical form, and a blank row the operator has just added stays
+// where it is. Where the answer does not line up with what was sent - the
+// server dropped or merged something - the server's sheet is the one shown.
+function mergeSheet(draft, index, answered) {
+  if (!Array.isArray(answered)) return draft;
+  if (answered.length !== index.length) return ensureCore(answered.map(toDraftParty));
+  const out = draft.map((party) => ({ ...party }));
+  answered.forEach((raw, k) => {
+    const back = toDraftParty(raw);
+    const party = out[index[k]];
+    for (const def of PARTY_FIELDS) {
+      const shown = party[def.key] || [];
+      const filled = shown.map((v, i) => (isBlank(v) ? -1 : i)).filter((i) => i >= 0);
+      const values = back[def.key];
+      if (values.length === filled.length) {
+        const next = [...shown];
+        filled.forEach((at, j) => { next[at] = values[j]; });
+        party[def.key] = next;
+      } else {
+        party[def.key] = [...values, ...shown.filter(isBlank)];
+      }
+    }
+  });
+  return out;
+}
+
+function sheetFromServer(payload, was, first) {
+  const sheet = ensureCore((payload.parties || []).map(toDraftParty));
+  const next = { sheet, surnamesText: (payload.family_surnames || []).join(", "),
+                 surnamesEdited: false, sheetState: "ready", sheetError: null, sheetLoadError: "" };
+  next.sheetSaved = sheetKey({ ...was, ...next });
+  if (first) next.sheetOpen = !hasPartyName(sheet);
+  return next;
+}
+
+// The line a set card collapses to: "Petitioner: Jane E. Smith - 7 details;
+// Respondent: John M. Smith - 6 details; 2 children".
+function partiesSummary(parties) {
+  const parts = [];
+  parties.forEach((party, at) => {
+    if (!["petitioner", "respondent"].includes(party.role)) return;
+    const name = firstName(party);
+    const details = detailCount(party);
+    if (name || details) {
+      parts.push(`${partyLabel(parties, at)}: ${name || "no name"} - ${plural(details, "detail")}`);
+    }
+  });
+  const filled = (role) => parties.filter((p) => p.role === role && (firstName(p) || detailCount(p))).length;
+  const kids = filled("child");
+  const others = filled("other");
+  if (kids) parts.push(kids === 1 ? "1 child" : `${n(kids)} children`);
+  if (others) parts.push(others === 1 ? "1 other party" : `${n(others)} other parties`);
+  return parts.join("; ");
+}
+
+// Where a refused save points. The server names the field in its message
+// ("Respondent SSN: not 9 digits"), or says it outright as an object; either
+// way the message is put next to that field, and beside the Save button too.
+const FIELD_WORDS = [
+  ["ssn", /\bssn\b|social security/], ["tin", /\btin\b|\bein\b|taxpayer/],
+  ["dob", /\bdob\b|birth/], ["phones", /phone/], ["emails", /e-?mail/],
+  ["dl", /licen[cs]e|\bdl\b/], ["passport", /passport/], ["addresses", /address/],
+  ["cards", /\bcards?\b/], ["accounts", /account/], ["handles", /handle/],
+  ["vehicles", /vehicle|\bvin\b|plate/], ["case_numbers", /case/], ["parcels", /parcel/],
+  ["employers", /employer/], ["businesses", /business/], ["dob", /\bdate\b/],
+  ["names", /\bnames?\b/], ["other", /\bother\b/],
+];
+function fieldKey(word) {
+  if (!word) return null;
+  const said = String(word).toLowerCase();
+  const plain = said.replace(/[\s-]+/g, "_");
+  if (PARTY_FIELDS.some((d) => d.key === plain)) return plain;
+  const many = PARTY_FIELDS.find((d) => d.key === `${plain}s` || d.key === `${plain}es`);
+  if (many) return many.key;
+  const found = FIELD_WORDS.find(([, pattern]) => pattern.test(said));
+  return found ? found[0] : null;
+}
+function partyAt(parties, said) {
+  if (said === null || said === undefined || said === "") return -1;
+  const text = String(said).toLowerCase();
+  const nth = (role, k) => {
+    let seen = 0;
+    return parties.findIndex((p) => p.role === role && ++seen === k);
+  };
+  let m = text.match(/child[\s_-]*(\d+)/);
+  if (m) return nth("child", Number(m[1]));
+  m = text.match(/(?:another|other)(?: party)?[\s_-]*(\d+)/);
+  if (m) return nth("other", Number(m[1]));
+  if (/petitioner/.test(text)) return parties.findIndex((p) => p.role === "petitioner");
+  if (/respondent/.test(text)) return parties.findIndex((p) => p.role === "respondent");
+  if (/\bchild\b/.test(text)) return nth("child", 1);
+  return -1;
+}
+function locateRefusal(error, parties, index) {
+  const detail = error.detail;
+  const message = error.message;
+  if (detail && typeof detail === "object" && !Array.isArray(detail)) {
+    let at = -1;
+    if (typeof detail.party === "number") at = index[detail.party] ?? -1;
+    else at = partyAt(parties, detail.party ?? detail.role);
+    if (at < 0 && typeof detail.index === "number") at = index[detail.index] ?? -1;
+    return { message, party: at, field: fieldKey(detail.field) || fieldKey(message) };
+  }
+  return { message, party: partyAt(parties, message), field: fieldKey(message) };
+}
+
+function ValueInputs({ def, value, label, disabled, onChange }) {
+  if (!def.parts) {
+    return html`<input type="text" value=${value} disabled=${disabled}
+      placeholder=${def.placeholder || ""} aria-label=${label}
+      onInput=${(e) => onChange(e.target.value)} />`;
+  }
+  return def.parts.map((part) => html`<input key=${part.k} type="text" disabled=${disabled}
+      class=${part.narrow ? "narrow" : ""} value=${value[part.k] || ""}
+      placeholder=${part.label} aria-label=${`${label} - ${part.label}`}
+      list=${part.list || null}
+      onInput=${(e) => onChange({ ...value, [part.k]: e.target.value })} />`);
+}
+
+function PartyField({ def, values, label, error, locked, edit }) {
+  const shown = values.length ? values : [blankValue(def)];
+  return html`<div class=${"pfield" + (error ? " refused" : "")}>
+    <label>${def.label}</label>
+    <div class="pvalues">
+      ${shown.map((value, i) => html`<div class="pvalue" key=${i}>
+        <${ValueInputs} def=${def} value=${value} label=${`${label} - ${def.label}`}
+            disabled=${locked} onChange=${(v) => edit.set(def.key, i, v)} />
+        ${shown.length > 1 && !locked ? html`<button class="dropvalue" title="Take this one out"
+            aria-label=${`Take this ${def.label.toLowerCase()} out`}
+            onClick=${() => edit.drop(def.key, i)}>×</button>` : null}
+      </div>`)}
+      ${(def.many || shown.length > 1) && !locked ? html`<button class="addvalue"
+          onClick=${() => edit.add(def.key)}>+ add</button>` : null}
+      ${def.hint ? html`<span class="phint">${def.hint}</span>` : null}
+      ${error ? html`<p class="fielderror" role="alert">${error}</p>` : null}
+    </div>
+  </div>`;
+}
+
+function PartyCard({ parties, index, refusal, locked, edit, onRemove }) {
+  const party = parties[index];
+  const label = partyLabel(parties, index);
+  const mine = refusal && refusal.party === index ? refusal : null;
+  const errorFor = (key) => (mine && mine.field === key ? mine.message : "");
+  const extra = PARTY_FIELDS.filter((def) => !def.core);
+  const extraFilled = extra.filter((def) => (party[def.key] || []).some((v) => !isBlank(v)));
+  const fieldEdit = {
+    set: (key, i, value) => edit.set(index, key, i, value),
+    add: (key) => edit.add(index, key),
+    drop: (key, i) => edit.drop(index, key, i),
+  };
+  const field = (def) => html`<${PartyField} key=${def.key} def=${def} values=${party[def.key] || []}
+      label=${label} error=${errorFor(def.key)} locked=${locked} edit=${fieldEdit} />`;
+  return html`<div class="party">
+    <div class="partyhead">
+      <strong>${label}</strong>
+      ${onRemove && !locked ? html`<button onClick=${onRemove}>Remove</button>` : null}
+    </div>
+    ${mine && !mine.field ? html`<p class="fielderror" role="alert">${mine.message}</p>` : null}
+    ${PARTY_FIELDS.filter((def) => def.core).map(field)}
+    <details class="moredetails"
+             open=${extraFilled.length > 0 || !!(mine && extra.some((d) => d.key === mine.field))}>
+      <summary>${extraFilled.length
+        ? `More details - ${extraFilled.map((d) => d.label.toLowerCase()).join(", ")}`
+        : "More details - licence, passport, TIN, employers, businesses, accounts, cards, handles, vehicles, case numbers, parcels"}</summary>
+      ${extra.map(field)}
+    </details>
+  </div>`;
+}
+
+// The parties section of a set card: open until the parties are filled in,
+// then one summary line, so eleven sets still fit on the screen.
+function PartySheet({ state, actions, locked }) {
+  if (state.sheetState === "unavailable") {
+    return html`<div class="parties"><p class="hint"><strong>The parties</strong> -
+      not available in this build. The names are worked from the name screen alone.</p></div>`;
+  }
+  if (state.sheetState === "failed") {
+    return html`<div class="parties"><p class="warn"><strong>The parties</strong> could not
+      be loaded: ${state.sheetLoadError}</p>
+      <button onClick=${actions.loadSheet}>Try again</button></div>`;
+  }
+  if (state.sheetState !== "ready") {
+    return html`<div class="parties"><p class="hint"><strong>The parties</strong> - loading…</p></div>`;
+  }
+  const parties = state.sheet;
+  const open = state.sheetOpen !== false;
+  const summary = partiesSummary(parties);
+  const dirty = sheetDirty(state);
+  const refusal = state.sheetError;
+  let status;
+  if (state.sheetSaving) status = html`<span class="hint">Saving…</span>`;
+  else if (refusal) status = html`<span class="status-bad">Not saved - ${refusal.message}</span>`;
+  else if (dirty) status = html`<span class="warn">Not saved yet</span>`;
+  else if (summary) status = html`<span class="status-ok">Saved</span>`;
+  else status = html`<span class="hint">Nothing entered yet</span>`;
+  const edit = { set: actions.sheetSet, add: actions.sheetAdd, drop: actions.sheetDrop };
+  // saved when the focus leaves the sheet, not on every field: each save
+  // makes the set's name lists and review list stale on the server
+  return html`<section class=${"parties" + (open ? " open" : "")}
+      onBlur=${(e) => { if (!locked && !e.currentTarget.contains(e.relatedTarget)) actions.saveSheet(); }}>
+    <div class="parties-head">
+      <button class="parties-toggle" aria-expanded=${open}
+              onClick=${() => actions.openSheet(!open)}>${open ? "▾" : "▸"} The parties</button>
+      ${!open ? html`<span class="parties-summary">${summary
+        || "Not filled in yet - open to enter the parties"}</span>` : null}
+      ${!open && (dirty || refusal || state.sheetSaving) ? status : null}
+    </div>
+    ${open ? html`
+      <p class="hint small">Who the case is about, and what identifies them. Everything
+        written here is replaced in every written form found; everyone else - payees,
+        landlords, the other attorneys - is left as written. Empty fields are fine.</p>
+      ${parties.map((party, index) => html`<${PartyCard} key=${index} parties=${parties} index=${index}
+          refusal=${refusal} locked=${locked} edit=${edit}
+          onRemove=${["child", "other"].includes(party.role) ? () => actions.removeParty(index) : null} />`)}
+      ${!locked ? html`<div class="bar tight">
+        <button onClick=${() => actions.addParty("child")}>+ Add a child</button>
+        <button onClick=${() => actions.addParty("other")}>+ Add another party</button>
+      </div>` : null}
+      <div class="pfield surnames">
+        <label>Family surname(s)</label>
+        <div class="pvalues">
+          <input type="text" value=${state.surnamesText} disabled=${locked}
+                 aria-label="Family surnames" placeholder="Worked out from the parties' names when saved"
+                 onInput=${(e) => actions.surnames(e.target.value)} />
+          <span class="phint">Replaced wherever it appears in this set - a relative, a
+            business carrying it. Worked out from the parties' names when saved; change it
+            if it is wrong. Separate several with commas.</span>
+        </div>
+      </div>
+      ${!locked ? html`<div class="bar tight">
+        <button class="primary" disabled=${state.sheetSaving}
+                onClick=${() => actions.saveSheet({ collapse: true })}>Save parties</button>
+        ${status}
+      </div>` : null}` : null}
+  </section>`;
+}
+
 /* ------------------------------------------------------- 1. documents -- */
 
 // One set of documents on the Documents screen: its name, its own drop
@@ -299,6 +668,8 @@ function SetCard({ info, number, work, actions, canRemove }) {
         ${locked ? null : html`<button onClick=${() => actions.removeFile(i)}>Remove</button>`}
       </li>`)}
     </ul>` : null}
+    <${PartySheet} state=${work} actions=${actions}
+        locked=${["queued", "running", "done"].includes(info.state)} />
   </div>`;
 }
 
@@ -410,7 +781,109 @@ function GuardPanel({ state }) {
     </div>`;
 }
 
-function NamesStep({ state, actions, meta, busy }) {
+// Forms of the parties' names the scan found that the sheet does not hold -
+// a misreading, a glued "JaneSmith", a nickname, a former name. Each is
+// filed under its party; a form of the family surname under the surname.
+const formId = (form) => `pf|${form.party || ""}|${form.kind || ""}|${form.text}`;
+const isSurnameForm = (form) => form.kind === "family_surname" || /family surname/i.test(form.why || "");
+
+// ticked to begin with when the match is exact or a known misreading: the
+// server may say so outright; otherwise its reason says it
+function pretick(form) {
+  for (const flag of ["ticked", "preticked", "checked"]) {
+    if (typeof form[flag] === "boolean") return form[flag];
+  }
+  if (form.exact === true) return true;
+  return /misread|exact|former|family surname/i.test(form.why || "");
+}
+
+function formOwner(form, sheet) {
+  if (isSurnameForm(form)) return { order: 98, label: "Family surname" };
+  const at = partyAt(sheet, form.party);
+  if (at >= 0) {
+    const name = firstName(sheet[at]);
+    return { order: at, label: `${partyLabel(sheet, at)}${name ? ` - ${name}` : ""}` };
+  }
+  if (/^parties$/i.test(form.party || "")) return { order: 97, label: "The parties" };
+  return { order: 99, label: form.party ? String(form.party) : "Not filed under a party" };
+}
+
+function PartyForms({ state, actions, busy }) {
+  const forms = (state.partyForms || []).map((form) => ({ ...form, id: formId(form) }));
+  const groups = [];
+  for (const form of forms) {
+    const owner = formOwner(form, state.sheet || []);
+    let group = groups.find((g) => g.label === owner.label);
+    if (!group) groups.push(group = { ...owner, forms: [] });
+    group.forms.push(form);
+  }
+  groups.sort((a, b) => a.order - b.order);
+  const waiting = forms.filter((f) => state.suggChecked.has(f.id) && !state.formsAdded.has(f.id));
+  const summary = partiesSummary(state.sheet || []);
+  const surnames = parseSurnames(state.surnamesText);
+  return html`<div class="card">
+    <h2>Forms of the parties' names found in the documents</h2>
+    <p class="hint">${summary ? `The parties: ${summary}.` : "No parties entered for this set."}
+      ${" "}Family surname${surnames.length === 1 ? "" : "s"}: <strong>${surnames.join(", ") || "none"}</strong>${
+      " - replaced wherever it appears in this set."} Both are changed on the Documents step.</p>
+    ${forms.length ? html`<div class="tablewrap"><table>
+      <thead><tr><th></th><th>Found as</th><th>Why</th><th>Times</th><th>Where</th></tr></thead>
+      ${groups.map((group) => html`<tbody key=${group.label}>
+        <tr class="partyrow"><td colspan="5">${group.label}</td></tr>
+        ${group.forms.map((form) => html`<tr key=${form.id}>
+          <td>${state.formsAdded.has(form.id)
+            ? html`<span class="status-ok small" title="On the parties sheet">Added</span>`
+            : html`<input type="checkbox" checked=${state.suggChecked.has(form.id)}
+                     aria-label=${`Add ${form.text}`}
+                     onChange=${() => actions.toggleSuggestion(form.id)} />`}</td>
+          <td>${form.text}</td>
+          <td class="hint">${form.why || ""}</td>
+          <td class="num">${n(form.count)}</td>
+          <td class="hint">${(form.documents || []).join("; ")}</td>
+        </tr>`)}
+      </tbody>`)}
+    </table></div>` : html`<p class="hint">No other forms of the parties' names were found -
+      every one found is already on the sheet.</p>`}
+    ${waiting.length ? html`<p class="warn">${plural(waiting.length, "ticked form")} not on the
+      sheet yet. They are added when you move on to the next set.</p>` : null}
+    <div class="bar">
+      <button disabled=${busy.active || !waiting.length}
+              onClick=${() => actions.addForms(forms)}>Add ticked to the parties →</button>
+      <button onClick=${() => actions.tickAllSuggestions(forms, true)}>Tick all</button>
+      <button onClick=${() => actions.tickAllSuggestions(forms, false)}>Untick all</button>
+      <span class="spacer"></span>
+      <button disabled=${busy.active} title="Scan again with the parties as they are now"
+              onClick=${actions.scanSuggestions}>Rescan documents</button>
+    </div>
+  </div>`;
+}
+
+// The parties-first build lists forms of the parties' names, and nobody
+// else: a third party is left as written, so proposing one is noise. A build
+// without the parties sheet keeps the suggestion table it always had.
+function NamesStep(props) {
+  return Array.isArray(props.state.partyForms)
+    ? html`<${PartyNames} ...${props} />` : html`<${SuggestionNames} ...${props} />`;
+}
+
+function PartyNames({ state, actions, busy }) {
+  return html`
+    <div class="columns">
+      <${PartyForms} state=${state} actions=${actions} busy=${busy} />
+      <div class="card">
+        <h2>Anyone else to replace - one full name per line</h2>
+        <textarea rows="10" spellcheck="false" value=${state.namesText}
+                  onInput=${(e) => actions.namesText(e.target.value)}></textarea>
+        <p class="hint">Everyone who is not one of the parties is left as written. A
+          name typed here is replaced as well, in all its written forms. Mark special
+          types after a pipe: <code>Tommy Smith | minor</code>,
+          <code>Zions Bank | organization</code>.</p>
+      </div>
+    </div>
+    <${GuardPanel} state=${state} />`;
+}
+
+function SuggestionNames({ state, actions, meta, busy }) {
   const rows = useMemo(() => [
     ...state.captions.map((c, i) => ({
       id: `cap-${i}`, name: c.name, category: state.suggCats[`cap-${i}`] || c.category,
@@ -522,6 +995,89 @@ function RowEditor({ row, meta, onClose, onSave }) {
   </div>`;
 }
 
+// A group's tick: every form ticked, none, or some - shown half-ticked.
+function groupTicks(group) {
+  const forms = group.forms || [];
+  if (!forms.length) return { all: group.enabled !== false, some: group.enabled !== false };
+  const on = forms.filter((f) => f.enabled).length;
+  return { all: on === forms.length, some: on > 0 };
+}
+
+// The review rows of a set: one per group where the server groups them,
+// otherwise one per entity, as a build without the parties sheet lists them.
+const reviewRows = (state) => (Array.isArray(state.groups)
+  ? state.groups.filter((g) => groupTicks(g).some).length : state.active);
+
+// One row per party per kind - "Respondent - SSN: 6 forms, 41 places" - in
+// the order the server gives (petitioner, respondent, children, the parties,
+// anything else), its forms folded under it. The overnight run listed every
+// form as a row of its own: thousands, for five sets.
+function GroupTable({ groups, byKey, open, toggleOpen, actions, edit }) {
+  if (!groups.length) {
+    return html`<p class="hint">Nothing of the parties' was found to replace.</p>`;
+  }
+  return html`<div class="tablewrap"><table class="groups">
+    <thead><tr><th title="Ticked = will be changed">Change?</th><th>What</th><th>Found as</th>
+      <th>Replaced with</th><th>Places</th><th>Forms</th><th></th></tr></thead>
+    <tbody>
+      ${groups.map((group) => {
+        const forms = group.forms || [];
+        const head = forms.find((f) => f.key === group.key) || forms[0];
+        const ticks = groupTicks(group);
+        const shown = open.has(group.key);
+        const entity = byKey[group.key];
+        return html`
+          <tr key=${group.key} class="group-row">
+            <td class="tick"><input type="checkbox" checked=${ticks.all}
+                ref=${(el) => { if (el) el.indeterminate = ticks.some && !ticks.all; }}
+                aria-label=${`Change every form of ${group.label}`}
+                title=${ticks.all ? "Will be changed" : ticks.some ? "Some forms are left as written"
+                  : "Left as written"}
+                onChange=${(e) => actions.setGroup(group, e.target.checked)} /></td>
+            <td><strong>${group.label}</strong></td>
+            <td>${head ? head.text : ""}</td>
+            <td>${group.replacement}</td>
+            <td class="num">${n(group.count)}</td>
+            <td>${forms.length > 1 ? html`<button class="formsbtn" aria-expanded=${shown}
+                  title=${shown ? "Hide the forms" : "Show every form found"}
+                  onClick=${() => toggleOpen(group.key)}>${shown ? "▾" : "▸"} ${plural(forms.length, "form")}</button>`
+              : html`<span class="hint">1 form</span>`}</td>
+            <td>${entity ? html`<button title="Edit type or replacement"
+                onClick=${() => edit(entity)}>✎ Edit</button>` : null}</td>
+          </tr>
+          ${shown ? forms.map((form) => html`
+            <tr key=${`${group.key}/${form.key}`} class="form-row">
+              <td class="tick"><input type="checkbox" checked=${form.enabled}
+                  aria-label=${`Change ${form.text}`}
+                  title=${form.enabled ? "Will be changed" : "Left as written"}
+                  onChange=${(e) => actions.setEnabled(form, e.target.checked)} /></td>
+              <td></td>
+              <td>${form.text}</td>
+              <td class="hint">${(byKey[form.key] || {}).replacement || ""}</td>
+              <td class="num">${n(form.count)}</td>
+              <td></td>
+              <td>${form.key !== group.key ? html`<button
+                  title="Not the same thing - give it its own row and replacement"
+                  onClick=${() => actions.split(form)}>Split out</button>` : null}</td>
+            </tr>`) : null}`;
+      })}
+    </tbody>
+  </table></div>`;
+}
+
+// What was found but is not the parties' - a payee's account, a policy
+// number - and so goes through untouched. Counted, not listed: listing it
+// is how the review list ran to thousands.
+function LeftAsWritten({ counts }) {
+  const kinds = Object.entries(counts || {}).filter(([, count]) => count > 0);
+  if (!kinds.length) return null;
+  const total = kinds.reduce((sum, [, count]) => sum + count, 0);
+  return html`<details class="leftalone">
+    <summary>Found but left as written: ${n(total)} - not the parties', so not replaced</summary>
+    <ul>${kinds.map(([kind, count]) => html`<li key=${kind}>${kind.replace(/_/g, " ")}: ${n(count)}</li>`)}</ul>
+  </details>`;
+}
+
 function ReviewStep({ state, actions, meta, busy }) {
   const [sort, setSort] = useState({ key: null, desc: false });
   const [editing, setEditing] = useState(null);
@@ -547,6 +1103,17 @@ function ReviewStep({ state, actions, meta, busy }) {
     if (next.has(key)) next.delete(key); else next.add(key);
     return next;
   });
+  // every entity by key, its forms too: a group's row edits its head
+  const byKey = useMemo(() => {
+    const out = {};
+    for (const row of state.entities || []) {
+      out[row.key] = row;
+      for (const form of row.forms || []) out[form.key] = form;
+    }
+    return out;
+  }, [state.entities]);
+  const grouped = Array.isArray(state.groups);
+
   const cells = (row, form) => html`
     <td>${row.label}</td>
     <td>${row.canonical}${!form && row.forms && row.forms.length ? html`
@@ -564,6 +1131,9 @@ function ReviewStep({ state, actions, meta, busy }) {
         check these did not over-match: ${state.risky.join(", ")}</p>` : null}
       ${state.unused ? html`<p class="warn">${`${state.unused} ${state.unused === 1 ? "entry" : "entries"} did not appear in any document.`}</p>` : null}
       ${state.llm && state.llm.note ? html`<p class="hint">${state.llm.note}</p>` : null}
+      ${grouped ? html`<${GroupTable} groups=${state.groups} byKey=${byKey} open=${open}
+          toggleOpen=${toggleOpen} actions=${actions} edit=${setEditing} />
+        <${LeftAsWritten} counts=${state.leftAsWritten} />` : html`
       <div class="tablewrap"><table>
         <thead><tr><th title="Ticked = will be changed">Change?</th>${header("label", "Type")}
           ${header("canonical", "Found")}
@@ -598,7 +1168,7 @@ function ReviewStep({ state, actions, meta, busy }) {
                             onClick=${() => setEditing(form)}>✎</button></td>
               </tr>`) : null}`)}
         </tbody>
-      </table></div>
+      </table></div>`}
       <div class="bar">
         <button onClick=${() => actions.setAll(true)}>Tick all</button>
         <button onClick=${() => actions.setAll(false)}>Untick all</button>
@@ -683,7 +1253,7 @@ function RunStage({ filled, todo, work, options, sets, meta, busy, actions, noti
             return html`<tr key=${info.id}>
               <td><strong>${info.name}</strong></td>
               <td class="num">${n(info.files)}</td>
-              <td class="num">${w.reviewState === "built" ? n(w.active) : "-"}</td>
+              <td class="num">${w.reviewState === "built" ? n(reviewRows(w)) : "-"}</td>
               <td>${fixed && !w.queued ? html`<span class="hint">Queued before this window
                 was opened again - it is the password copied then.</span>` : html`<div class="pwrow">
                 <input type=${w.showPassword ? "text" : "password"} value=${w.password}
@@ -727,6 +1297,11 @@ function blankWork() {
     // "" not built | waiting | building | built | failed
     reviewState: "", entities: [], active: 0, instructions: "", risky: [], unused: 0,
     llm: null,                        // what the local model merged, said at review
+    groups: null, leftAsWritten: null,  // the review list by party and kind, where the server groups
+    // the parties sheet: "" not asked | loading | ready | unavailable | failed
+    sheetState: "", sheet: ensureCore([]), surnamesText: "", surnamesEdited: false,
+    sheetSaved: "", sheetSaving: false, sheetError: null, sheetLoadError: "", sheetOpen: true,
+    partyForms: null, formsAdded: new Set(),   // forms of the parties' names the scan found
   };
 }
 const NO_WORK = { ...blankWork(), password: "" };
@@ -749,6 +1324,11 @@ function App() {
   const [notice, setNotice] = useState("");
   const apis = useRef({});
   const optionsLoaded = useRef(false);
+  // the latest of every set's work, for a save that finishes after more typing
+  const workRef = useRef(work);
+  workRef.current = work;
+  const sheetFlight = useRef({});           // a parties save under way, per set
+  const sheetAsked = useRef(new Set());     // sets whose sheet has been asked for
 
   const apiFor = (id) => apis.current[id] || (apis.current[id] = window.makeApi(id));
   const refresh = () => api.get("/api/sets").then(setSets).catch(() => {});
@@ -786,6 +1366,12 @@ function App() {
       }
       return changed ? next : all;
     });
+    // and its parties sheet, held by the server with the set
+    for (const info of sets.sets) {
+      if (sheetAsked.current.has(info.id)) continue;
+      sheetAsked.current.add(info.id);
+      loadSheet(info.id);
+    }
   }, [ids]);
 
   // the options live on the server too: the name lists are worked out ahead
@@ -804,6 +1390,87 @@ function App() {
     return { ...all, [id]: { ...was, ...(typeof change === "function" ? change(was) : change) } };
   });
   const nameOf = (id) => (sets.sets.find((s) => s.id === id) || { name: "This set" }).name;
+
+  // ------------------------------------------------- the parties sheet --
+  // A build without the parties sheet answers 404: the card says so and the
+  // window works as it did, names from the name screen alone.
+  async function loadSheet(id) {
+    patch(id, { sheetState: "loading", sheetLoadError: "" });
+    try {
+      const payload = await apiFor(id).get("/api/parties");
+      patch(id, (was) => sheetFromServer(payload, was, true));
+    } catch (error) {
+      if (error.status === 404 && !/removed/i.test(error.message)) patch(id, { sheetState: "unavailable" });
+      else patch(id, { sheetState: "failed", sheetLoadError: error.message });
+    }
+  }
+
+  // One save of a set's sheet. A second asked for while one is under way
+  // waits for it and then saves whatever the sheet holds by then. The
+  // answer is folded in only when nothing was typed meanwhile; otherwise
+  // what was typed is saved next. `rescan` makes the set's name screen and
+  // review list again - the server has marked both stale.
+  async function saveSheet(id, { collapse = false, rescan = true, current = null } = {}) {
+    const flight = sheetFlight.current;
+    if (flight[id]) {
+      flight[id].again = true;
+      flight[id].collapse = flight[id].collapse || collapse;
+      return flight[id].done;
+    }
+    const state = current || workRef.current[id];
+    if (!state || state.sheetState !== "ready") return undefined;
+    const { body, index } = sheetBody(state);
+    const sent = JSON.stringify(body);
+    if (sent === state.sheetSaved && !state.sheetError) {
+      if (collapse && hasPartyName(state.sheet)) patch(id, { sheetOpen: false });
+      return true;
+    }
+    const mine = { again: false, collapse };
+    flight[id] = mine;
+    mine.done = (async () => {
+      let ok = false;
+      patch(id, { sheetSaving: true });
+      try {
+        const answer = await apiFor(id).put("/api/parties", body);
+        patch(id, (was) => {
+          const stale = rescan ? { scanned: false, namesTried: false } : {};
+          const common = { sheetSaving: false, sheetError: null,
+                           reviewState: restale(was.reviewState), ...stale };
+          if (sheetKey(was) !== sent) return { ...common, sheetSaved: sent };
+          const sheet = mergeSheet(was.sheet, index, answer.parties);
+          const surnamesText = Array.isArray(answer.family_surnames)
+            ? answer.family_surnames.join(", ") : was.surnamesText;
+          const next = { ...was, ...common, sheet, surnamesText };
+          next.sheetSaved = sheetKey(next);
+          if (mine.collapse && hasPartyName(sheet)) next.sheetOpen = false;
+          return next;
+        });
+        ok = true;
+      } catch (error) {
+        patch(id, (was) => ({
+          sheetSaving: false,
+          sheetError: error.status === 422 ? locateRefusal(error, was.sheet, index)
+            : { message: error.message, party: -1, field: null },
+          sheetOpen: true,
+        }));
+      } finally {
+        delete flight[id];
+      }
+      if (mine.again) {
+        // the state settles on the next render before it is read again
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        const later = await saveSheet(id, { collapse: mine.collapse, rescan });
+        if (later !== undefined) ok = later;
+      }
+      return ok;
+    })();
+    return mine.done;
+  }
+
+  // A set's sheet changed on screen: saved when the focus leaves the sheet.
+  const editSheet = (id, change) => patch(id, (was) => ({
+    sheet: change(was.sheet.map((party) => ({ ...party }))),
+  }));
 
   const track = (prefix) => (message, fraction, pages) =>
     setBusy({ active: true, message: prefix ? `${prefix} - ${message}` : message, fraction, pages });
@@ -836,6 +1503,24 @@ function App() {
     if (!filled.length) return "Add documents to at least one set first.";
     const adding = sets.sets.find((s) => w(s.id).adding);
     if (adding) return `Still adding documents to ${adding.name}.`;
+    // the parties first: every other detail is matched to them, and the
+    // name screen looks for the forms of their names. Said before the
+    // reading, which needs no one - the sheet can be filled while it reads.
+    for (const info of workable) {
+      const state = w(info.id);
+      if (state.sheetState === "unavailable") continue;
+      if (["", "loading"].includes(state.sheetState)) return `Loading the parties for ${info.name}.`;
+      if (state.sheetState === "failed") {
+        return `The parties for ${info.name} could not be loaded - press Try again on its card.`;
+      }
+      if (!hasPartyName(state.sheet)) {
+        return `Enter the petitioner's or respondent's name for ${info.name} under The parties - ` +
+          "everything else is matched to the parties, and the name screen looks for the forms of their names.";
+      }
+      if (state.sheetSaving) return `Saving the parties for ${info.name}.`;
+      if (state.sheetError) return `The parties for ${info.name} were not saved - ${state.sheetError.message}`;
+      if (sheetDirty(state)) return `The parties for ${info.name} have changes not saved yet - press Save parties.`;
+    }
     const reading = filled.find((s) => s.state === "reading");
     if (reading) {
       const read = reading.reading || {};
@@ -870,6 +1555,9 @@ function App() {
       entities: payload.entities, risky: payload.risky, unused: payload.unused,
       active: payload.active, instructions: payload.instructions,
       ...(payload.llm ? { llm: payload.llm } : {}),
+      // a build without the parties sheet sends no groups: the table it had
+      groups: Array.isArray(payload.groups) ? payload.groups : null,
+      leftAsWritten: payload.left_as_written || null,
     });
     const named = (task) => async () => {
       try { return await task(); } catch (error) { throw new Error(`${nameOf(id)}: ${error.message}`); }
@@ -890,8 +1578,64 @@ function App() {
     const scanSuggestions = async () => {
       const body = { options, names: parseNameLines(state.namesText) };
       const result = await runJob(id, "/api/suggestions", body, `Names for ${nameOf(id)}`);
-      patch(id, { scanned: true, suggestions: result.suggestions, sortedBy: result.sorted_by || "",
-                  ...absorbGuard(result) });
+      const forms = Array.isArray(result.party_forms) ? result.party_forms : null;
+      patch(id, (was) => {
+        // a form is pre-ticked the first time it is shown, never again: an
+        // untick survives a rescan
+        const checked = new Set(was.suggChecked);
+        for (const form of forms || []) {
+          const key = formId(form);
+          if (!checked.has(`${key}-seen`) && pretick(form)) checked.add(key);
+          checked.add(`${key}-seen`);
+        }
+        return { scanned: true, suggestions: result.suggestions || [], sortedBy: result.sorted_by || "",
+                 partyForms: forms, suggChecked: checked, ...absorbGuard(result) };
+      });
+    };
+
+    // Ticked forms of the parties' names onto the sheet, each under its
+    // party - a misreading of the petitioner's name is the petitioner, not a
+    // person of its own with an invented name of its own - and a form of the
+    // family surname onto the surnames. Saved at once.
+    const addForms = async () => {
+      const now = workRef.current[id] || state;
+      const forms = (now.partyForms || []).filter((form) =>
+        now.suggChecked.has(formId(form)) && !now.formsAdded.has(formId(form)));
+      if (!forms.length) return;
+      if (now.sheetState !== "ready") {
+        throw new Error("The parties sheet is not loaded, so the forms cannot be added to it.");
+      }
+      const sheet = now.sheet.map((party) => ({ ...party }));
+      const surnames = parseSurnames(now.surnamesText);
+      const extra = [];
+      const same = (list, text) => list.some((v) => String(v).trim().toLowerCase() === text.trim().toLowerCase());
+      let surnamesEdited = now.surnamesEdited;
+      for (const form of forms) {
+        if (isSurnameForm(form)) {
+          if (!same(surnames, form.text)) { surnames.push(form.text.trim()); surnamesEdited = true; }
+          continue;
+        }
+        const at = partyAt(sheet, form.party);
+        if (at < 0) { extra.push(form.text.trim()); continue; }
+        const names = (sheet[at].names || []).filter((v) => !isBlank(v));
+        if (!same(names, form.text)) sheet[at] = { ...sheet[at], names: [...names, form.text.trim()] };
+      }
+      const known = new Set(now.namesText.split("\n").map((l) => l.trim().toLowerCase()));
+      const lines = extra.filter((t) => !known.has(t.toLowerCase()));
+      const next = {
+        ...now, sheet, surnamesEdited,
+        surnamesText: surnames.join(", "),
+        formsAdded: new Set([...now.formsAdded, ...forms.map(formId)]),
+        namesText: lines.length
+          ? (now.namesText.trim() ? now.namesText.replace(/\s+$/, "") + "\n" : "") + lines.join("\n")
+          : now.namesText,
+      };
+      patch(id, { sheet: next.sheet, surnamesText: next.surnamesText, surnamesEdited,
+                  formsAdded: next.formsAdded, namesText: next.namesText,
+                  reviewState: restale(now.reviewState) });
+      if ((await saveSheet(id, { rescan: false, current: next })) === false) {
+        throw new Error("The forms are on the parties sheet but it was not saved - its card on the Documents step says why.");
+      }
     };
 
     const actions = {
@@ -962,6 +1706,40 @@ function App() {
         refresh();
       })),
 
+      // the parties sheet
+      loadSheet: () => loadSheet(id),
+      openSheet: (open) => patch(id, { sheetOpen: open }),
+      saveSheet: (how) => saveSheet(id, how || {}),
+      sheetSet: (at, key, i, value) => editSheet(id, (sheet) => {
+        const values = [...(sheet[at][key] || [])];
+        while (values.length < i) values.push(blankValue(PARTY_FIELDS.find((d) => d.key === key)));
+        values[i] = value;
+        sheet[at] = { ...sheet[at], [key]: values };
+        return sheet;
+      }),
+      sheetAdd: (at, key) => editSheet(id, (sheet) => {
+        const def = PARTY_FIELDS.find((d) => d.key === key);
+        const values = sheet[at][key] && sheet[at][key].length ? [...sheet[at][key]] : [blankValue(def)];
+        sheet[at] = { ...sheet[at], [key]: [...values, blankValue(def)] };
+        return sheet;
+      }),
+      sheetDrop: (at, key, i) => editSheet(id, (sheet) => {
+        sheet[at] = { ...sheet[at], [key]: (sheet[at][key] || []).filter((_, k) => k !== i) };
+        return sheet;
+      }),
+      addParty: (role) => editSheet(id, (sheet) => ensureCore([...sheet, blankParty(role)])),
+      removeParty: (at) => {
+        const party = state.sheet[at];
+        if (party && (firstName(party) || detailCount(party))
+            && !window.confirm(`Take ${partyLabel(state.sheet, at)} off the parties?`)) return;
+        editSheet(id, (sheet) => sheet.filter((_, k) => k !== at));
+        // nothing is focused once the card has gone: save now
+        setTimeout(() => saveSheet(id), 0);
+      },
+      surnames: (text) => patch(id, { surnamesText: text, surnamesEdited: true }),
+      addForms: () => guarded(named(addForms)),
+      addPendingForms: named(addForms),
+
       rename: (name) => guarded(named(async () => {
         if (name.trim()) setSets(await api.patch(`/api/sets/${id}`, { name }));
       })),
@@ -1031,6 +1809,18 @@ function App() {
 
       setEnabled: (row, enabled) => guarded(named(async () => {
         patch(id, reviewPayload(await one.patch("/api/entities", { key: row.key, enabled })));
+      })),
+
+      // A group's tick, for every form in it. The head carries the forms
+      // filed under it; a form the server grouped from elsewhere is ticked
+      // on its own, so the row means what its tick shows.
+      setGroup: (group, enabled) => guarded(named(async () => {
+        let payload = await one.patch("/api/entities", { key: group.key, enabled });
+        const again = (payload.groups || []).find((g) => g.key === group.key);
+        const stray = (again ? again.forms : group.forms.filter((f) => f.key !== group.key))
+          .filter((f) => f.enabled !== enabled);
+        for (const form of stray) payload = await one.patch("/api/entities", { key: form.key, enabled });
+        patch(id, reviewPayload(payload));
       })),
 
       setAll: (enabled) => guarded(named(async () => {
@@ -1212,6 +2002,14 @@ function App() {
     return [list[at - 1] || null, list[at + 1] || null];
   };
 
+  // Leaving a set's name screen puts its ticked forms on its sheet first: a
+  // ticked form left behind would be ticked on screen and missing from the
+  // run. If the sheet will not save, the screen stays put and says why.
+  const leaveNames = (then) => guarded(async () => {
+    if (stage === 1 && namesSet) await forSet(namesSet.id).addPendingForms();
+    then();
+  });
+
   let body = null;
   if (stage === 0) {
     const line = readingLine(filled);
@@ -1219,8 +2017,11 @@ function App() {
       <div class="card">
         <p class="hint intro">One set per case. Each set's documents are read in the
           background as soon as they are added, set after set in the order the sets
-          were made, and its name lists are worked out once it is read. The names
-          come when every set is read; everything stays on this computer.</p>
+          were made, and its name lists are worked out once it is read.${
+          sets.sets.some((s) => w(s.id).sheetState === "ready") ? ` Fill in each set's
+          parties while it reads: their names and what identifies them are what is
+          replaced, and everyone else is left as written.` : ""} The names come when
+          every set is read; everything stays on this computer.</p>
         <${ResultsLine} sets=${sets} chooseResults=${stageActions.chooseResults} />
       </div>
       <div class="columns">
@@ -1261,14 +2062,15 @@ function App() {
         </div>` : null}
         <${NamesStep} key=${namesSet.id} state=${state} actions=${forSet(namesSet.id)} meta=${meta} busy=${busy} />
         <div class="bar">
-          ${before ? html`<button disabled=${busy.active} onClick=${() => { setNamesAt(before.id); window.scrollTo(0, 0); }}>
+          ${before ? html`<button disabled=${busy.active}
+                onClick=${() => leaveNames(() => { setNamesAt(before.id); window.scrollTo(0, 0); })}>
               ← Previous set</button>`
-            : html`<button onClick=${() => go(0)}>← Back to documents</button>`}
+            : html`<button onClick=${() => leaveNames(() => go(0))}>← Back to documents</button>`}
           <span class="spacer"></span>
           ${after ? html`<button class="primary" disabled=${busy.active}
-                onClick=${() => { setNamesAt(after.id); window.scrollTo(0, 0); }}>Next set →</button>`
+                onClick=${() => leaveNames(() => { setNamesAt(after.id); window.scrollTo(0, 0); })}>Next set →</button>`
             : html`<button class="primary" disabled=${busy.active}
-                onClick=${() => { setReviewAt(workable[0] && workable[0].id); go(2); }}>
+                onClick=${() => leaveNames(() => { setReviewAt(workable[0] && workable[0].id); go(2); })}>
                 Continue to review →</button>`}
         </div>`;
     }
@@ -1286,7 +2088,7 @@ function App() {
           <ul class="buildlist">
             ${workable.map((info) => html`<li key=${info.id} class=${w(info.id).reviewState || "none"}>
               ${info.name}: ${{ waiting: "waiting its turn", building: "building the review list",
-                               built: `${plural(w(info.id).active, "item")} to replace`,
+                               built: `${plural(reviewRows(w(info.id)), "item")} to replace`,
                                failed: "the review list could not be built" }[w(info.id).reviewState]
                               || "no review list yet"}</li>`)}
           </ul>
@@ -1329,7 +2131,8 @@ function App() {
       <span class="version">${meta.version} · everything stays on this computer</span>
     </div></header>
     <div class="shell">
-      <${Stepper} stage=${stage} reachable=${reachable} go=${go} />
+      <${Stepper} stage=${stage} reachable=${reachable} go=${(target) => leaveNames(() => go(target))} />
+      <datalist id="account-kinds">${ACCOUNT_KINDS.map((kind) => html`<option key=${kind} value=${kind} />`)}</datalist>
       ${fault ? html`<div class="card"><p class="error">${fault}</p></div>` : null}
       ${body}
       <${Progress} busy=${busy} />

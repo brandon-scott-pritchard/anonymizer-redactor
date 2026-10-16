@@ -63,18 +63,48 @@ documents, names, review decisions, invented names and mapping-key password
    everything its name screen shows—the captions, the children, the bench,
    the suggestions—is worked out ahead in a process of its own ("working out
    the name lists"), and the card says **Ready**. A set given more files is
-   worked out again. **Continue to names** stays shut, saying why, until
-   every set with documents is ready; a set left empty is left out, and the
-   screen says so.
+   worked out again.
+
+   Each card also holds **The parties**: a sheet for the petitioner, the
+   respondent, each child (**Add a child**) and any other party (**Add
+   another party**)—their names, former and maiden names included, date of
+   birth, SSN, TIN, driver's licence, passport, addresses, phones, emails,
+   employers, businesses, accounts, cards, handles, vehicles, case numbers,
+   parcels and anything else. Every field is optional and the repeatable
+   ones take **+ add**; an SSN, a phone or a date of birth goes in in any
+   format. The sheet is saved when you leave it or press **Save parties**,
+   and comes back with each value in its canonical form; a value the server
+   refuses is named next to its field. The **family surname(s)** it works
+   out from the parties' names are shown and can be changed. Once saved the
+   sheet folds to one line ("Petitioner: Jane E. Smith - 7 details;
+   Respondent: John M. Smith - 6 details; 2 children"), so eleven sets still
+   fit on one screen. The sheet is held in memory with its set and never
+   written to disk. **Continue to names** stays shut, saying why, until
+   every set with documents is ready and has at least a petitioner's or
+   respondent's name saved; a set left empty is left out, and the screen
+   says so. (A build without the parties sheet says so on each card, and
+   the window works from the name screen alone.)
 2. **Names**, one set at a time: "Names - Set 2 of 5: Harrington", with
-   **Previous set** and **Next set**. Each opens at once, worked out ahead;
-   what is typed and ticked stays with its set while you move between them.
+   **Previous set** and **Next set**. Each opens at once, worked out ahead,
+   with the forms of the parties' names found in the documents that the
+   sheet does not hold yet—an OCR misreading, a glued "JANESMITH", a
+   nickname, a former name, a form of the family surname—filed under their
+   party, each with why, how often and where. Exact matches and known
+   misreadings come ticked; **Add ticked to the parties** puts them on the
+   sheet, and anything still ticked is added when you move on. Third
+   parties are not proposed: they are left as written, unless typed into
+   the short list beside it. What is typed and ticked stays with its set.
 3. **Review.** Every set's review list is built on the way in, one set after
    another ("Building the review list for set 3 of 5"), and you step through
    them the same way—a set already built can be looked over while the next
-   builds. A set whose names, files or options changed since is built again
-   when the step is next opened; its ticks and edits are kept.
-4. **Run.** A table of every set: its documents, the items it will replace,
+   builds. The list is one row per party per kind—"Respondent - SSN",
+   "Petitioner - address 1", "Parties - account ****1234"—with its
+   replacement, the number of places, one tick for the whole row and its
+   forms folded under it, each with its own tick and **Split out**. What was
+   found but is not the parties' is counted under "Found but left as
+   written". A set whose parties, names, files or options changed since is
+   built again when the step is next opened; its ticks and edits are kept.
+4. **Run.** A table of every set: its documents, the rows it will replace,
    its own mapping-key password (made for it automatically; show, copy, or
    make a new one—or **Copy all passwords**), and how its run is going.
    **Run all** queues every set, in order, with its password and the shared
