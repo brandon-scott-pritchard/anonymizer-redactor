@@ -839,11 +839,12 @@ def test_an_order_export_keeps_its_dates_and_products(tmp_path):
     ]
     path = _placed(tmp_path, "export.pdf", cells, size=5.8)
     after, store = _run_pdf(path, tmp_path, [("Derek L Nakamura", "person")])
-    for gone in ("114-4604251-1244467", "111-3316909-9817429", "TBA987858653459",
-                 "1Z59T2L3YUS96VY4RX", "4053", "NAKAMURA", "GENTILE"):
+    for gone in ("4053", "NAKAMURA", "GENTILE"):
         assert gone not in after, f"{gone} survived"
+    # order and tracking numbers are left as written by default
     for kept in ("2023-10-25", "2023-05-24", "SanDisk 128GB Extreme microSDXC", "17.99",
-                 "50.00", "Amazon Gift Card"):
+                 "50.00", "Amazon Gift Card", "114-4604251-1244467", "111-3316909-9817429",
+                 "1Z59T2L3YUS96VY4RX"):
         assert kept in after, f"{kept} was lost"
     wrong = [(e.category, e.canonical) for e in store.entities.values()
              if e.category in ("credit_card", "dob") and e.canonical in ("2023", "1734", "2023-05-24")]

@@ -32,7 +32,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import (__version__, caption, categories, feedback, grouping, llm_grouping, llm_names,
+from . import (__version__, caption, categories, feedback, grouping, merges, name_screen,
                names as _names, ner, ocr_pool, officials, parties, pdf_processor, pipeline,
                review, sets)
 from .engine import Settings
@@ -357,9 +357,9 @@ def _entity_row(entity, store=None) -> dict:
         row["forms"] = [_entity_row(e) for e in grouping.members(store, entity)
                         if e.occurrences or e.source != parties.FORM_SOURCE]
         row["occurrences"] = grouping.group_total(store, entity)
-        if not row["note"] and any(f["note"].startswith(llm_grouping.NOTE)
+        if not row["note"] and any(f["note"].startswith(merges.NOTE)
                                    for f in row["forms"]):
-            row["note"] = llm_grouping.NOTE
+            row["note"] = merges.NOTE
     return row
 
 
@@ -378,7 +378,7 @@ def _entities_payload() -> dict:
             "risky": risky[:12], "unused": unused,
             "active": sum(1 for e in store.entities.values() if e.enabled),
             "instructions": review.REVIEW_INSTRUCTIONS,
-            "llm": {"note": store.merge_note, "merged": llm_grouping.merged_rows(store)}}
+            "llm": {"note": store.merge_note, "merged": merges.merged_rows(store)}}
 
 
 # --------------------------------------------------------------------------
@@ -725,13 +725,12 @@ async def suggestions(request: Request):
         known = frozenset(
             w for name in [*(e[0] for e in _entries), *(c.name for c in captions_now)]
             for w in (ner._plain(t) for t in name.split()) if len(w) > 2)
-        parties = [*(e[0] for e in _entries), *(c.name for c in captions_now)]
-        labels, sorted_by = _sort_with_llm([s.text for s in found], parties, progress)
+        labels, sorted_by = _sort_with_kev([s.text for s in found], progress)
 
         def likely(s) -> bool:
             if s.nickname_for or any(ner._plain(t) in known for t in s.text.split()):
                 return True
-            kept = llm_names.keeps(s.text, s.category, labels.get(s.text))
+            kept = name_screen.keeps(s.text, s.category, labels.get(s.text))
             if kept is not None:
                 return kept
             return ner.likely_name(s.text, s.category, known)
@@ -812,9 +811,6 @@ async def build_review(request: Request):
             settings.protected_names = _reprotect(entries)
         pipeline.prescan(files, store, settings, progress)
         review.carry_decisions(store, carryover)
-        if not settings.parties_first:
-            # with a party sheet the forms come from the sheet, not the model
-            _merge_with_llm(store, progress)
         SESSION.store = store
         doc_set.review_stale = False
         return {**_entities_payload(), **_guard_payload()}
@@ -822,62 +818,26 @@ async def build_review(request: Request):
     return {"job": _start_job(work, lambda: pipeline.count_pages(files))}
 
 
-def _sort_with_llm(texts: list[str], parties: list[str], progress) -> tuple[dict, str]:
-    """The local model's sort of the suggestions into names and not names -
-    see :mod:`llm_names`. Empty, and the word lists' sort stands, where the
-    model is missing or does not answer."""
-    from . import llm, llm_names, models
+def _sort_with_kev(texts: list[str], progress) -> tuple[dict, str]:
+    """Kev's and probablepeople's sort of the suggestions into names and not
+    names - see :mod:`name_screen`. Empty, and the word lists' sort stands,
+    where Kev is missing or does not answer."""
+    from . import models
 
-    if not texts or os.environ.get("REDACTOR_LLM", "1") == "0" or not llm.llm_python().is_file():
+    if not texts or os.environ.get("REDACTOR_KEV", "1") == "0":
         return {}, ""
 
     def waiting() -> None:
-        progress("Waiting for the local model (another step is using it)", 0.95)
+        progress("Waiting for Kev (another step is using it)", 0.95)
 
-    with models.SLOT.use("llm", on_wait=waiting) as url:
+    with models.SLOT.use("kev", on_wait=waiting) as url:
         if url is None:
             return {}, ""
         try:
-            labels = llm_names.classify(texts, parties, url, progress)
+            labels = name_screen.classify(texts, url, progress)
         except Exception:                          # the word lists' sort stands
             return {}, ""
-    return labels, llm_names.describe(labels)
-
-
-def _merge_with_llm(store: MappingStore, progress) -> None:
-    """The local model's say on which names are one person, folded in.
-
-    Loaded through the model slot - Kev is stopped first, and a set's final
-    check using the slot is waited for. Where the model is missing, or does
-    not come up in time, the list is the rules' alone and the page says so.
-    """
-    from . import llm, models
-
-    if len(llm_grouping.candidates(store)) < 2:
-        return
-    if os.environ.get("REDACTOR_LLM", "1") == "0" or not llm.llm_python().is_file():
-        llm.LLM.start()                            # only to say why not
-        store.merge_note = f"The local model was not used ({llm.LLM.note})."
-        return
-
-    def waiting() -> None:
-        progress("Waiting for the local model (another set's final check is using it)", 0.95)
-
-    with models.SLOT.use("llm", on_wait=waiting) as url:
-        if url is None:
-            store.merge_note = (f"The local model was not used ({models.SLOT.note('llm')}) - "
-                                "names were grouped by the rules alone.")
-            return
-        try:
-            merges = llm_grouping.propose_merges(store, url, progress)
-            done = llm_grouping.apply_merges(store, merges)
-        except Exception as exc:                   # the rules' list stands
-            store.merge_note = (f"The local model could not be asked ({exc}) - names were "
-                                "grouped by the rules alone.")
-            return
-    store.merge_note = (f"The local model merged {len(done)} name(s) into the person or "
-                        "business they are - each is marked; Split out undoes one."
-                        if done else "The local model found no other names to merge.")
+    return labels, name_screen.describe(labels)
 
 
 @app.patch("/api/entities")
@@ -899,7 +859,7 @@ async def edit_entity(request: Request):
         if not replacement.strip():
             raise HTTPException(422, "The replacement cannot be empty.")
         review.set_replacement(entity, replacement, SESSION.store)
-    llm_grouping.settle(SESSION.store)             # a regrouping keeps the model's merges
+    merges.settle(SESSION.store)             # a regrouping keeps the model's merges
     return _entities_payload()
 
 
@@ -912,7 +872,22 @@ async def split_entity(request: Request):
     if entity is None:
         raise HTTPException(404, "no such entity")
     grouping.split(SESSION.store, entity)
-    llm_grouping.settle(SESSION.store)
+    merges.settle(SESSION.store)
+    return _entities_payload()
+
+
+@app.post("/api/entities/merge")
+async def merge_entity(request: Request):
+    """Put one row under another: the same thing, written another way."""
+    _not_while_run()
+    body = await request.json()
+    entity = SESSION.store.entities.get(body.get("key", ""))
+    target = SESSION.store.entities.get(body.get("into", ""))
+    if entity is None or target is None:
+        raise HTTPException(404, "no such entity")
+    refused = merges.merge_by_hand(SESSION.store, entity, target)
+    if refused:
+        raise HTTPException(422, refused)
     return _entities_payload()
 
 
@@ -1169,7 +1144,7 @@ def main() -> int:
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
 
-    # Kev and the local model are started when a step needs one, one at a
+    # Kev is started when a step needs it, one step at a
     # time (see models.py), and stopped on exit
     url = f"http://127.0.0.1:{port}/?token={TOKEN}"
     # flush: the frozen app is windowed, so stdout is block-buffered when

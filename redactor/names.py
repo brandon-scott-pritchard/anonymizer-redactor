@@ -93,7 +93,8 @@ def ordinary_word(word: str) -> bool:
         except OSError:
             _ORDINARY = frozenset()
     word = word.casefold()
-    return word in _ORDINARY or (word.endswith("s") and word[:-1] in _ORDINARY)
+    return (word in _ORDINARY or (word.endswith("s") and word[:-1] in _ORDINARY)
+            or (word.endswith("ies") and word[:-3] + "y" in _ORDINARY))
 
 
 @dataclass(frozen=True)

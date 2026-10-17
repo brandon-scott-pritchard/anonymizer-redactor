@@ -521,12 +521,30 @@ def test_a_street_address_may_wrap_but_may_not_start_on_a_dollar_figure():
     assert scanned("Balance 2,184.66\nSummit Ridge Bank") == []
 
 
-def test_the_coupon_scanline_is_caught():
-    """Twenty unbroken digits is a machine code, and this one holds the account."""
-    line = "00023337000623950000250044654004496347265"
-    assert (line, "bank_account") in scanned(line)
-    # a shorter run still needs its label
+def test_a_long_digit_run_alone_is_not_an_account():
+    """Twenty digits and more are found only when they hold a known account -
+    on their own, on a real set, they were digits run together off a scan."""
+    assert scanned("00023337000623950000250044654004496347265") == []
     assert scanned("0002333700") == []
+
+
+def test_the_coupon_scanline_goes_when_it_holds_the_titled_account():
+    """The bill prints "Account Number: 4465400449"; the scanline at the foot
+    of its coupon holds those digits, and goes whole, as that account."""
+    from redactor import engine
+    from redactor.engine import Settings
+    from redactor.mapping import MappingStore
+
+    store = MappingStore()
+    settings = Settings(pdf_mode="anonymize")
+    engine.scan_text("Account Number: 4465400449", store, settings)
+    line = "00023337000623950000250044654004496347265"
+    hits = engine.scan_text(f"Pay by {line}", store, settings)
+    assert [(h.text, h.category) for h in hits] == [(line, "bank_account")]
+    account = next(e for e in store.entities.values() if e.category == "bank_account")
+    assert hits[0].entity_key == account.key
+    # a run holding no known account stays as written
+    assert engine.scan_text("Pay by 99990000111122223333444455556666", store, settings) == []
 
 
 # ---------------------------------------------------------------------------
@@ -618,3 +636,45 @@ def test_turning_addresses_off_turns_the_block_off_too(tmp_path):
     pdf_processor.process(src, out, store, settings)
     after = "\n".join(pdf_processor.extract_text(out).values())
     assert "442 N 1600 E" in after, "the category switch must still govern this"
+
+
+# ---------------------------------------------------------------------------
+# web addresses: left as written unless they hold a ticked name
+# ---------------------------------------------------------------------------
+
+
+def test_a_web_address_goes_whole_only_when_it_holds_a_ticked_name():
+    from redactor import engine, review
+    from redactor.engine import Settings
+
+    store, _ = review.build_store([("Abigail N Okafor", "person")])
+    settings = Settings(pdf_mode="anonymize")
+    hits = engine.scan_text("Photos at https://www.facebook.com/abigail.okafor today", store, settings)
+    assert [(h.category, h.text) for h in hits] == [("url", "https://www.facebook.com/abigail.okafor")]
+    # the surname inside a domain word is the person's too
+    hits = engine.scan_text("www.okaforlaw.com/team", store, settings)
+    assert [h.text for h in hits] == ["www.okaforlaw.com/team"]
+    # a bank's site is nobody's
+    assert engine.scan_text("Sign in at https://www.chase.com/personal", store, settings) == []
+
+
+def test_an_unticked_name_leaves_its_web_address_as_written():
+    from redactor import engine, review
+    from redactor.engine import Settings
+
+    store, _ = review.build_store([("Abigail N Okafor", "person")])
+    for entity in store.persons():
+        entity.enabled = False
+    assert engine.scan_text("https://www.facebook.com/abigail.okafor",
+                            store, Settings(pdf_mode="anonymize")) == []
+
+
+def test_a_handle_holding_a_ticked_name_goes_whole():
+    """'Facebook: abby.okafor22' lost only 'okafor22' to the name pass and
+    shipped 'abby', the nickname; the handle goes as one."""
+    from redactor import engine, review
+    from redactor.engine import Settings
+
+    store, _ = review.build_store([("Abigail N Okafor", "person")])
+    hits = engine.scan_text("Facebook: abby.okafor22", store, Settings(pdf_mode="anonymize"))
+    assert [(h.category, h.text) for h in hits] == [("social_handle", "abby.okafor22")]

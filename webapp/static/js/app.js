@@ -278,7 +278,10 @@ const PARTY_FIELDS = [
     parts: [{ k: "vin", label: "VIN" }, { k: "plate", label: "Plate", narrow: true }] },
   { key: "case_numbers", label: "Case numbers", many: true, placeholder: "Court case number" },
   { key: "parcels", label: "Parcels", many: true, placeholder: "Property parcel number" },
-  { key: "other", label: "Other", many: true, placeholder: "Anything else that identifies them" },
+  { key: "other", label: "Other identifiers", many: true,
+    placeholder: "Anything else that identifies them",
+    hint: "e.g. medical record, student, military, alien or voter number, bar or professional "
+      + "licence, IP address, a website, place of birth - each replaced wherever it is written." },
 ];
 const ROLE_ORDER = { petitioner: 0, respondent: 1, child: 2, other: 3 };
 
@@ -340,8 +343,9 @@ function partyLabel(parties, index) {
 const firstName = (party) => (party.names || []).find((v) => !isBlank(v)) || "";
 const detailCount = (party) => PARTY_FIELDS.filter((def) => def.key !== "names")
   .reduce((sum, def) => sum + (party[def.key] || []).filter((v) => !isBlank(v)).length, 0);
-const hasPartyName = (parties) => parties.some((p) =>
-  ["petitioner", "respondent"].includes(p.role) && firstName(p));
+// both parties named: the petitioner and the respondent each need one name
+const hasPartyName = (parties) => ["petitioner", "respondent"].every((role) =>
+  parties.some((p) => p.role === role && firstName(p)));
 
 const parseSurnames = (text) => String(text || "").split(/[,;\n]/).map((s) => s.trim()).filter(Boolean);
 
@@ -514,13 +518,15 @@ function PartyCard({ parties, index, refusal, locked, edit, onRemove }) {
   const mine = refusal && refusal.party === index ? refusal : null;
   const errorFor = (key) => (mine && mine.field === key ? mine.message : "");
   const extra = PARTY_FIELDS.filter((def) => !def.core);
-  const extraFilled = extra.filter((def) => (party[def.key] || []).some((v) => !isBlank(v)));
   const fieldEdit = {
     set: (key, i, value) => edit.set(index, key, i, value),
     add: (key) => edit.add(index, key),
     drop: (key, i) => edit.drop(index, key, i),
   };
-  const field = (def) => html`<${PartyField} key=${def.key} def=${def} values=${party[def.key] || []}
+  const required = ["petitioner", "respondent"].includes(party.role);
+  const field = (def) => html`<${PartyField} key=${def.key}
+      def=${def.key === "names" && required ? { ...def, label: "Names (required)" } : def}
+      values=${party[def.key] || []}
       label=${label} error=${errorFor(def.key)} locked=${locked} edit=${fieldEdit} />`;
   return html`<div class="party">
     <div class="partyhead">
@@ -529,13 +535,9 @@ function PartyCard({ parties, index, refusal, locked, edit, onRemove }) {
     </div>
     ${mine && !mine.field ? html`<p class="fielderror" role="alert">${mine.message}</p>` : null}
     ${PARTY_FIELDS.filter((def) => def.core).map(field)}
-    <details class="moredetails"
-             open=${extraFilled.length > 0 || !!(mine && extra.some((d) => d.key === mine.field))}>
-      <summary>${extraFilled.length
-        ? `More details - ${extraFilled.map((d) => d.label.toLowerCase()).join(", ")}`
-        : "More details - licence, passport, TIN, employers, businesses, accounts, cards, handles, vehicles, case numbers, parcels"}</summary>
-      ${extra.map(field)}
-    </details>
+    <p class="hint small moredetails-head">Optional - fill in anything you know; leave the rest
+      empty. Each is replaced wherever it is written.</p>
+    ${extra.map(field)}
   </div>`;
 }
 
@@ -995,6 +997,55 @@ function RowEditor({ row, meta, onClose, onSave }) {
   </div>`;
 }
 
+// Kinds that can be one thing - a person and a child, the account kinds -
+// as merges._FAMILIES has them; any other kind only with itself.
+const KIND_FAMILIES = [["person", "minor"],
+  ["bank_account", "masked_account", "credit_card", "investment_account", "loan_number"],
+  ["organization", "employer"], ["phone", "fax"], ["street_address"],
+  // the party sheet's kinds (parties.kind_of)
+  ["account", "card"]];
+const sameKind = (a, b) => a === b || KIND_FAMILIES.some((f) => f.includes(a) && f.includes(b));
+
+// "Merge into...": the rows this one could be another form of, most found
+// first, narrowed by typing.
+function MergePicker({ row, rows, onClose, onPick }) {
+  const [query, setQuery] = useState("");
+  const shown = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return rows
+      .filter((r) => r.key !== row.key && sameKind(r.category, row.category))
+      .filter((r) => !q || r.canonical.toLowerCase().includes(q)
+        || String(r.replacement || "").toLowerCase().includes(q))
+      .sort((a, b) => b.occurrences - a.occurrences)
+      .slice(0, 60);
+  }, [rows, row, query]);
+  return html`<div class="overlay" onClick=${(e) => e.target === e.currentTarget && onClose()}>
+    <div class="modal">
+      <h3>Merge into another row</h3>
+      <div class="row"><span>This row</span><div class="found">${row.canonical}</div></div>
+      <p class="hint">Choose the row it is another form of. It will take that row's replacement
+        and be listed under it; "Split out" takes it back out.</p>
+      <div class="row"><span>Find</span>
+        <input type="text" autofocus value=${query} placeholder="Type part of the row"
+               onInput=${(e) => setQuery(e.target.value)} /></div>
+      <div class="tablewrap mergelist"><table>
+        <thead><tr><th>Type</th><th>Found</th><th>Replaced with</th><th>Times</th><th></th></tr></thead>
+        <tbody>${shown.map((r) => html`<tr key=${r.key}>
+          <td>${r.label}</td><td>${r.canonical}</td><td>${r.replacement}</td>
+          <td class="num">${r.occurrences}</td>
+          <td><button class="primary" onClick=${() => onPick(r)}>Merge here</button></td>
+        </tr>`)}</tbody>
+      </table></div>
+      ${shown.length ? null : html`<p class="hint">No row of the same kind matches.</p>`}
+      <div class="bar"><span class="spacer"></span><button onClick=${onClose}>Cancel</button></div>
+    </div>
+  </div>`;
+}
+
+// A grouped row in the shape the merge picker lists
+const groupAsRow = (g) => ({ key: g.key, category: g.kind, label: g.label,
+  canonical: g.text, replacement: g.replacement, occurrences: g.count });
+
 // A group's tick: every form ticked, none, or some - shown half-ticked.
 function groupTicks(group) {
   const forms = group.forms || [];
@@ -1012,7 +1063,7 @@ const reviewRows = (state) => (Array.isArray(state.groups)
 // the order the server gives (petitioner, respondent, children, the parties,
 // anything else), its forms folded under it. The overnight run listed every
 // form as a row of its own: thousands, for five sets.
-function GroupTable({ groups, byKey, open, toggleOpen, actions, edit }) {
+function GroupTable({ groups, byKey, open, toggleOpen, actions, edit, merge }) {
   if (!groups.length) {
     return html`<p class="hint">Nothing of the parties' was found to replace.</p>`;
   }
@@ -1043,7 +1094,9 @@ function GroupTable({ groups, byKey, open, toggleOpen, actions, edit }) {
                   onClick=${() => toggleOpen(group.key)}>${shown ? "▾" : "▸"} ${plural(forms.length, "form")}</button>`
               : html`<span class="hint">1 form</span>`}</td>
             <td>${entity ? html`<button title="Edit type or replacement"
-                onClick=${() => edit(entity)}>✎ Edit</button>` : null}</td>
+                onClick=${() => edit(entity)}>✎ Edit</button>` : null}
+                <button title="The same thing as another row - list it under that row"
+                  onClick=${() => merge(groupAsRow(group))}>Merge into…</button></td>
           </tr>
           ${shown ? forms.map((form) => html`
             <tr key=${`${group.key}/${form.key}`} class="form-row">
@@ -1081,6 +1134,7 @@ function LeftAsWritten({ counts }) {
 function ReviewStep({ state, actions, meta, busy }) {
   const [sort, setSort] = useState({ key: null, desc: false });
   const [editing, setEditing] = useState(null);
+  const [merging, setMerging] = useState(null);
   const rows = useMemo(() => {
     const out = [...state.entities];
     if (sort.key) {
@@ -1132,7 +1186,7 @@ function ReviewStep({ state, actions, meta, busy }) {
       ${state.unused ? html`<p class="warn">${`${state.unused} ${state.unused === 1 ? "entry" : "entries"} did not appear in any document.`}</p>` : null}
       ${state.llm && state.llm.note ? html`<p class="hint">${state.llm.note}</p>` : null}
       ${grouped ? html`<${GroupTable} groups=${state.groups} byKey=${byKey} open=${open}
-          toggleOpen=${toggleOpen} actions=${actions} edit=${setEditing} />
+          toggleOpen=${toggleOpen} actions=${actions} edit=${setEditing} merge=${setMerging} />
         <${LeftAsWritten} counts=${state.leftAsWritten} />` : html`
       <div class="tablewrap"><table>
         <thead><tr><th title="Ticked = will be changed">Change?</th>${header("label", "Type")}
@@ -1153,7 +1207,9 @@ function ReviewStep({ state, actions, meta, busy }) {
                        onChange=${(e) => actions.setEnabled(row, e.target.checked)} /></td>
               ${cells(row, false)}
               <td><button title="Edit type or replacement"
-                          onClick=${() => setEditing(row)}>✎ Edit</button></td>
+                          onClick=${() => setEditing(row)}>✎ Edit</button>
+                  <button title="The same thing as another row - list it under that row"
+                          onClick=${() => setMerging(row)}>Merge into…</button></td>
             </tr>
             ${open.has(row.key) ? (row.forms || []).map((form) => html`
               <tr key=${form.key} class="form-row">
@@ -1177,7 +1233,11 @@ function ReviewStep({ state, actions, meta, busy }) {
     </div>
     ${editing ? html`<${RowEditor} row=${editing} meta=${meta}
         onClose=${() => setEditing(null)}
-        onSave=${async (changes) => { if (await actions.saveEditor(editing, changes)) setEditing(null); }} />` : null}`;
+        onSave=${async (changes) => { if (await actions.saveEditor(editing, changes)) setEditing(null); }} />` : null}
+    ${merging ? html`<${MergePicker} row=${merging}
+        rows=${grouped ? state.groups.map(groupAsRow) : state.entities || []}
+        onClose=${() => setMerging(null)}
+        onPick=${async (into) => { await actions.merge(merging, into); setMerging(null); }} />` : null}`;
 }
 
 /* ------------------------------------------------------------- 4. run -- */
@@ -1187,7 +1247,7 @@ function ReviewStep({ state, actions, meta, busy }) {
 function RunStatus({ info, download, unqueue }) {
   const run = info.run || {};
   const audit = run.audit || {};
-  // pages still to look at once the local model has fixed what it could
+  // pages still to look at
   const toLook = audit.still !== undefined ? audit.still : audit.flagged || 0;
   switch (info.state) {
     case "queued":
@@ -1296,7 +1356,7 @@ function blankWork() {
     suggestions: [], scanned: false, namesTried: false, suggChecked: new Set(), suggCats: {},
     // "" not built | waiting | building | built | failed
     reviewState: "", entities: [], active: 0, instructions: "", risky: [], unused: 0,
-    llm: null,                        // what the local model merged, said at review
+    llm: null,                        // a note on merges at review
     groups: null, leftAsWritten: null,  // the review list by party and kind, where the server groups
     // the parties sheet: "" not asked | loading | ready | unavailable | failed
     sheetState: "", sheet: ensureCore([]), surnamesText: "", surnamesEdited: false,
@@ -1514,8 +1574,9 @@ function App() {
         return `The parties for ${info.name} could not be loaded - press Try again on its card.`;
       }
       if (!hasPartyName(state.sheet)) {
-        return `Enter the petitioner's or respondent's name for ${info.name} under The parties - ` +
-          "everything else is matched to the parties, and the name screen looks for the forms of their names.";
+        return `Enter both the petitioner's and the respondent's names for ${info.name} under The ` +
+          "parties - everything else is matched to the parties, and the name screen looks for " +
+          "the forms of their names. Every other box is optional.";
       }
       if (state.sheetSaving) return `Saving the parties for ${info.name}.`;
       if (state.sheetError) return `The parties for ${info.name} were not saved - ${state.sheetError.message}`;
@@ -1829,6 +1890,11 @@ function App() {
 
       split: (row) => guarded(named(async () => {
         patch(id, reviewPayload(await one.post("/api/entities/split", { key: row.key })));
+      })),
+
+      // one row put under another: the same thing written another way
+      merge: (row, into) => guarded(named(async () => {
+        patch(id, reviewPayload(await one.post("/api/entities/merge", { key: row.key, into: into.key })));
       })),
 
       // true once saved, so the editor closes

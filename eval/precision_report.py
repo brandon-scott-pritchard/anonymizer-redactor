@@ -1,9 +1,9 @@
 """How sure is each kind of replacement? Per kind: confirmed, wrong kind, third
-party, unlabelled - and, with ``--judge``, the local model's estimate, from the
-words around each unlabelled item, of how likely it is what the run says.
+party, unlabelled. (A local-model judge of the unlabelled items was taken out
+with that model on 2026-10-16; its calibration had failed anyway.)
 
     ~/.venvs/anonymizer-redactor/bin/python -m eval.precision_report RUN_DIR
-        [--judge http://127.0.0.1:PORT] [--sample 40] [--show 8] [--match REGEX]
+        [--show 8] [--match REGEX]
 
 Counted once per distinct (kind, text) in a case; ``places`` counts every hit.
 """
@@ -31,23 +31,6 @@ KIND_WORDS = {
     "case_number": "a court case number", "drivers_license": "a driver's licence number",
 }
 
-JUDGE_SYSTEM = (
-    "You check an anonymizer's work on bank, card and payment-app statements, pay stubs, tax "
-    "forms and court papers. For each numbered item you get the text it replaced, what it "
-    "claimed the text is, and the words just before and after it on the page. Judge from that "
-    "context and the text's own shape, knowing how these documents print things:\n"
-    "- statements print an account or card number masked, with its last digits after marks: "
-    "'..8762', '****1234', 'xxxx1234', 'XXXX-XXXX-XXXX-1234', '•• 4417'; a masked tail after "
-    "'Transfer to/from Savings/Checking/Bank', 'Card ending', 'Acct' is an account number;\n"
-    "- a dollar amount has a decimal point and two decimals ('$600.00', '1,265.66') or a $;\n"
-    "- a long digit run in a card or payment row's reference column is a transaction "
-    "reference, not a card or account;\n"
-    "- (801) 555-0143, 801-555-0143 and 801.555.0143 are phone numbers.\n"
-    "For each item give the probability (0 to 1) that the claim is right, and, if not, what the "
-    "text most likely is (a transaction reference, a date, a dollar amount, a phone number, a "
-    "store number, a ZIP code, a heading, a merchant, ...).")
-JUDGE_SCHEMA = '{"items": {"<number>": {"p": <0..1>, "is": "<what it most likely is>"}}}'
-
 
 def _load(run: Path, mode: str, match: str | None):
     for path in sorted((run / mode).glob("*.json")):
@@ -57,35 +40,10 @@ def _load(run: Path, mode: str, match: str | None):
         yield record
 
 
-def judge(url: str, items: list[dict]) -> list[dict]:
-    from redactor import llm
-
-    out = []
-    for start in range(0, len(items), 25):
-        part = items[start:start + 25]
-        user = "\n".join(
-            f"{i}. claimed: {KIND_WORDS.get(it['category'], it['category'])} | text: "
-            f"{it['text']!r} | words before: {it['before'][-60:]!r} | words after: "
-            f"{it['after'][:60]!r}"
-            for i, it in enumerate(part, 1))
-        answer = llm.chat(url, JUDGE_SYSTEM, user, JUDGE_SCHEMA, max_tokens=60 * len(part) + 64)
-        got = answer.get("items", {}) if isinstance(answer, dict) else {}
-        for i, it in enumerate(part, 1):
-            verdict = got.get(str(i)) or {}
-            try:
-                p = float(verdict.get("p"))
-            except (TypeError, ValueError):
-                p = None
-            out.append(dict(it, p=p, judged_is=str(verdict.get("is") or "")))
-    return out
-
-
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("run", type=Path)
     parser.add_argument("--mode", default="operator")
-    parser.add_argument("--judge", default=None, help="local model URL, to judge unlabelled items")
-    parser.add_argument("--sample", type=int, default=40, help="unlabelled items judged per kind")
     parser.add_argument("--show", type=int, default=8)
     parser.add_argument("--match", default=None, help="regex on the case name")
     args = parser.parse_args(argv)
@@ -107,8 +65,6 @@ def main(argv=None) -> int:
         tally = Counter(h["verdict"] for h in hits)
         unl = [h for h in hits if h["verdict"] == "unlabelled"]
         judged = []
-        if args.judge and unl:
-            judged = judge(args.judge, random.sample(unl, min(args.sample, len(unl))))
         ps = [j["p"] for j in judged if j["p"] is not None]
         mean_p = sum(ps) / len(ps) if ps else None
         n = len(hits)

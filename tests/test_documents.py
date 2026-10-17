@@ -8,7 +8,7 @@ import pytest
 from redactor import docx_processor, pdf_processor, pipeline
 from redactor.engine import Settings
 from redactor.mapping import MappingStore, read_encrypted_key
-from tests.conftest import PRESERVED, SECRETS
+from tests.conftest import LEFT_AS_WRITTEN, PRESERVED, SECRETS
 
 
 def loaded_store():
@@ -41,6 +41,7 @@ def test_docx_leaks_nothing_in_either_mode(sample_docx, tmp_path, mode):
     docx_processor.process(sample_docx, out, loaded_store(), Settings(docx_mode=mode))
     xml = docx_raw_xml(out)
     leaked = [secret for secret in SECRETS if secret in xml]
+    assert all(value in xml for value in LEFT_AS_WRITTEN), "a number left as written was changed"
     assert leaked == [], f"{mode} mode leaked: {leaked}"
 
 
@@ -107,6 +108,7 @@ def test_pdf_text_is_truly_removed(sample_pdf, tmp_path):
     assert not result.refused
     text = pdf_all_text(out)
     leaked = [secret for secret in SECRETS if secret in text]
+    assert all(value in text for value in LEFT_AS_WRITTEN), "a number left as written was changed"
     assert leaked == [], f"leaked: {leaked}"
 
 

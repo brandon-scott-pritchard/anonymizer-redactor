@@ -58,7 +58,122 @@ def _shape_key(category: str, text: str) -> str | None:
     return None
 
 
-def run(folder: Path, quick: bool = False, progress=print) -> dict:
+def _names_stats(store, kev_url: str | None) -> tuple[dict, dict]:
+    """How the name rows fall into main names - counts only; and, kept out of
+    the report, Kev's score per row and each run's main names for the
+    library trial."""
+    from . import grouping, name_clusters as NC
+
+    rows = [e for e in store.entities.values() if e.enabled and e.category in ("person", "minor")
+            and e.documents]
+    out = {}
+    private = {"kev_scores": {}, "mains": {}}
+    for label, url in (("rules", None), ("kev", kev_url)):
+        if label == "kev" and not url:
+            continue
+        forms = [NC.Form(e.canonical, set(e.documents), e.category == "minor") for e in rows]
+        if url:
+            is_name = NC.kev_is_name(url)
+            for e, f in zip(rows, forms):
+                f.kev_name = is_name(f.text)
+                private["kev_scores"][e.key] = f.kev_name
+        mains, family, unattached = NC.cluster(forms, NC.kev_same(url) if url else None)
+        if url:
+            not_people = [m for m in mains if getattr(m.form, "kev_name", 1.0) < NC.KEV_NAME]
+            mains = [m for m in mains if m not in not_people]
+        else:
+            not_people = []
+        private["mains"][label] = [(m.first, m.last) for m in mains]
+        how = Counter(h for m in mains for _f, h in m.forms)
+        shapes = Counter(NC.shape_of(u) for u in unattached)
+        out[label] = {
+            "name_rows": len(forms), "main_names": len(mains),
+            "main_names_in_10_plus": sum(len(m.documents) >= 10 for m in mains),
+            "attached_rule": how.get("rule", 0), "attached_glued": how.get("glued", 0),
+            "attached_kev": how.get("kev", 0),
+            "family_surnames": len(family), "family_forms": sum(len(v) for v in family.values()),
+            "main_names_not_people": len(not_people),
+            "unattached": len(unattached),
+            "unattached_seen_once": sum(len(u.documents) == 1 for u in unattached),
+            "unattached_one_word": shapes.get("one word", 0),
+            "unattached_two_words": shapes.get("two words", 0),
+            "unattached_three_plus": shapes.get("three words or more", 0),
+            "unattached_not_a_name": shapes.get("not a name", 0),
+            "unattached_sharing_a_main_surname": sum(
+                1 for u in unattached if any(
+                    NC._fits(w, m.last) for m in mains for w in NC._alpha(u.words))),
+        }
+    return out, private
+
+
+ACCOUNT_RULES = ("a title then the number", "after to or from bank")
+
+
+def _account_sources(store, texts: dict[str, str]) -> dict:
+    """Which account rule finds each bank account row - and what the loose
+    separator used before would have found, for the comparison."""
+    from . import patterns
+
+    dets = [d for d in patterns.DETECTORS if d.category == "bank_account"]
+    found = []
+    for d in dets:
+        values = set()
+        for text in texts.values():
+            for m in d.regex.finditer(text):
+                v = re.sub(r"\D", "", m.group(d.group) or "")
+                if v:
+                    values.add(v)
+        found.append(values)
+    loose = re.compile(dets[0].regex.pattern.replace(patterns._ACCOUNT_SEP, patterns._SEP, 1),
+                       dets[0].regex.flags)
+    before = set()
+    for text in texts.values():
+        for m in loose.finditer(text):
+            v = re.sub(r"\D", "", m.group(1) or "")
+            if v:
+                before.add(v)
+    out = Counter()
+    for e in store.entities.values():
+        if not (e.enabled and e.documents and e.category == "bank_account"):
+            continue
+        out["rows"] += 1
+        digits = re.sub(r"\D", "", e.canonical)
+        source = next((label for label, values in zip(ACCOUNT_RULES, found) if digits in values),
+                      "no account rule")
+        out[source] += 1
+    from . import engine
+    runs = set()
+    for text in texts.values():
+        runs.update(m.group(0) for m in engine._SCANLINE.finditer(text))
+    known = [d for d, e in engine._known_accounts(store) if e.enabled]
+    holding = {r for r in runs if any(d in r for d in known)}
+    out["long digit runs in the documents"] = len(runs)
+    out["of those holding a known account, replaced as it"] = len(holding)
+    out["left as written"] = len(runs) - len(holding)
+    out["distinct numbers the title rule finds"] = len(found[0])
+    out["distinct numbers the loose rule found before"] = len(before)
+    out["found before and not now"] = len(before - found[0])
+    return dict(out)
+
+
+def _steps(progress, total: int):
+    """A pipeline progress callback that says how far a step is, by document
+    count only - the pipeline's own messages carry file names, and nothing
+    here prints one."""
+    def step(label: str):
+        shown = [-1]
+
+        def tell(_message: str, fraction: float) -> None:
+            done = min(total, max(0, round((fraction or 0.0) * total)))
+            if done != shown[0]:
+                shown[0] = done
+                progress(f"{label}: document {done} of {total}")
+        return tell
+    return step
+
+
+def run(folder: Path, quick: bool = False, progress=print, kev_url: str | None = None,
+        libraries: bool = False, combined: bool = False) -> dict:
     from . import grouping, ner, officials, patterns, pipeline, review
     from .engine import Settings
 
@@ -95,15 +210,17 @@ def run(folder: Path, quick: bool = False, progress=print) -> dict:
     progress(f"{len(files)} documents to read")
     pages = pipeline.count_pages(files)
 
+    step = _steps(progress, len(files))
     progress("reading captions and the bench")
-    caps = pipeline.collect_caption_names(files)
-    bench = pipeline.collect_officials(files)
+    caps = pipeline.collect_caption_names(files, step("captions"))
+    bench = pipeline.collect_officials(files, step("the bench"))
     entries = [(c.name, c.category) for c in caps if c.confidence == "high"]
     protection = officials.protected_terms(bench, avoid=[n for n, _c in entries])
     settings = Settings(pdf_mode="anonymize", use_ner=True, protected_names=list(protection.terms))
     store, _ = review.build_store(entries)
     progress("collecting suggestions")
-    suggestions, _notes = pipeline.collect_suggestions(files, store, settings, caption_names=caps)
+    suggestions, _notes = pipeline.collect_suggestions(files, store, settings, step("suggestions"),
+                                                       caption_names=caps)
     known = frozenset(w for name, _c in entries for w in (ner._plain(t) for t in name.split())
                       if len(w) > 2)
     likely = [s for s in suggestions if s.nickname_for or ner.likely_name(s.text, s.category, known)]
@@ -114,10 +231,12 @@ def run(folder: Path, quick: bool = False, progress=print) -> dict:
             have.add(s.text.casefold())
     store, _ = review.build_store(entries)
     progress("the review scan")
-    pipeline.prescan(files, store, settings)
+    pipeline.prescan(files, store, settings, step("the review scan"))
 
     toll_free = 0
-    for text in pipeline.document_texts(files).values():
+    progress("reading the texts once more for the counts")
+    texts = pipeline.document_texts(files, step("texts"))
+    for text in texts.values():
         toll_free += len(patterns.toll_free_spans(text))
 
     # groups: a head with every form folded under it
@@ -127,7 +246,8 @@ def run(folder: Path, quick: bool = False, progress=print) -> dict:
     for e in rows:
         head = grouping.head_of(store, e)
         g = groups.setdefault(head.key, {"category": head.category, "forms": 0, "documents": set(),
-                                         "texts": []})
+                                         "texts": [], "keys": []})
+        g["keys"].append(e.key)
         g["forms"] += 1
         g["documents"].update(e.documents)
         g["texts"].append(e.canonical)
@@ -159,6 +279,20 @@ def run(folder: Path, quick: bool = False, progress=print) -> dict:
                                   "buckets": dict(k["buckets"]), "single_word": k["single_word"],
                                   "leave": kind in LEAVE}
         stats["fold_by_shape"][kind] = sum(n - 1 for n in shapes[kind].values() if n > 1)
+    stats["account_sources"] = _account_sources(store, texts)
+    progress("attaching the forms of each name to a main name")
+    stats["names"], private = _names_stats(store, kev_url)
+    if libraries:
+        from . import library_trial
+        stats["libraries"] = library_trial.trial(store, texts, progress,
+                                                 kev_scores=private["kev_scores"],
+                                                 mains=private["mains"])
+    if combined:
+        from . import combined_trial
+        stats["combined"] = combined_trial.trial(
+            store, texts, [{"category": g["category"], "documents": g["documents"],
+                            "keys": g["keys"]} for g in seen_rows],
+            kev_url, private["kev_scores"], progress, leave=frozenset(LEAVE))
     import shutil
     shutil.rmtree(work, ignore_errors=True)
     return stats
@@ -216,6 +350,44 @@ def render(stats: dict) -> str:
               f"  groups pre ticked at 2 or more documents: {total['2'] + total['3'] + total['4-9'] + total['10+']}",
               f"  groups pre ticked at 3 or more documents: {total['3'] + total['4-9'] + total['10+']}",
               ""]
+    a = stats.get("account_sources")
+    if a is not None:
+        lines += ["BANK ACCOUNT ROWS BY THE RULE THAT FOUND THEM",
+                  f"  rows: {a.get('rows', 0)}"]
+        for label in ACCOUNT_RULES + ("no account rule",):
+            lines.append(f"  {label}: {a.get(label, 0)}")
+        for label in ("long digit runs in the documents",
+                      "of those holding a known account, replaced as it", "left as written",
+                      "distinct numbers the title rule finds",
+                      "distinct numbers the loose rule found before", "found before and not now"):
+            lines.append(f"  {label}: {a.get(label, 0)}")
+        lines.append("")
+    for label, n in stats.get("names", {}).items():
+        title = "NAMES, ATTACHED BY RULES" if label == "rules" else "NAMES, ATTACHED BY RULES AND KEV"
+        lines += [title,
+                  f"  name rows before attaching: {n['name_rows']}",
+                  f"  main names: {n['main_names']}",
+                  f"  main names found in 10 or more documents: {n['main_names_in_10_plus']}",
+                  f"  forms attached by rule: {n['attached_rule']}",
+                  f"  forms attached as run together: {n['attached_glued']}",
+                  f"  forms attached by Kev: {n['attached_kev']}",
+                  f"  family surnames: {n['family_surnames']} holding {n['family_forms']} forms",
+                  f"  main names Kev says are not people: {n['main_names_not_people']}",
+                  f"  unattached forms: {n['unattached']}",
+                  f"  unattached seen in one document: {n['unattached_seen_once']}",
+                  f"  unattached one word: {n['unattached_one_word']}",
+                  f"  unattached two words: {n['unattached_two_words']}",
+                  f"  unattached three words or more: {n['unattached_three_plus']}",
+                  f"  unattached not a name: {n['unattached_not_a_name']}",
+                  f"  unattached sharing a surname with a main name: "
+                  f"{n['unattached_sharing_a_main_surname']}",
+                  ""]
+    if stats.get("libraries"):
+        from . import library_trial
+        lines += library_trial.render(stats["libraries"])
+    if stats.get("combined"):
+        from . import combined_trial
+        lines += combined_trial.render(stats["combined"])
     return "\n".join(lines) + "\n"
 
 
@@ -233,6 +405,18 @@ def _vocabulary() -> set[str]:
     for c in categories.CATEGORIES:
         words.update(re.findall(r"[A-Za-z]+", categories.label_for(c.key)))
     words.update({"yes", "no", "doc", "docs"})
+    words.update(re.findall(r"[A-Za-z]+", "BANK ACCOUNT ROWS BY THE RULE THAT FOUND THEM rows "
+                 + " ".join(ACCOUNT_RULES) + " no account rule distinct numbers the title rule "
+                 "finds loose found before and not now long digit runs in the documents of those "
+                 "holding a known account replaced as it left as written"))
+    from . import library_trial
+    words.update(re.findall(r"[A-Za-z]+", "\n".join(library_trial.render(library_trial.empty()))))
+    from . import combined_trial
+    words.update(re.findall(r"[A-Za-z]+", "\n".join(combined_trial.render(combined_trial.empty()))))
+    words.update(re.findall(r"[A-Za-z]+", "NAMES, ATTACHED BY RULES AND KEV name rows before "
+                 "attaching main names found in or more documents forms attached by rule as run "
+                 "together Kev family surnames holding says are not people unattached seen in one "
+                 "document word two words three not a sharing surname with"))
     return {w.casefold() for w in words}
 
 
@@ -249,13 +433,36 @@ def main(argv=None) -> int:
                         help="where to write the report (not inside the client folder)")
     parser.add_argument("--quick", action="store_true",
                         help="typed documents only - skips reading scans and photos")
+    parser.add_argument("--kev", action="store_true",
+                        help="also attach names with Kev (starts Kev from ~/Coding/kev, stops it after)")
+    parser.add_argument("--libraries", action="store_true",
+                        help="also count what probablepeople, RapidFuzz, SymSpell, usaddress and "
+                             "regex make of the rows")
+    parser.add_argument("--combined", action="store_true",
+                        help="also count the review list with Kev, the libraries and our rules "
+                             "applied together (use with --kev)")
     args = parser.parse_args(argv)
     folder = args.folder.expanduser().resolve()
     out = args.out.expanduser().resolve()
     if folder in out.parents:
         print("Write the report outside the client folder.", file=sys.stderr)
         return 2
-    stats = run(folder, quick=args.quick, progress=lambda m: print(m, flush=True))
+    kev_url = None
+    if args.kev:
+        from . import audit
+        audit.KEV.start()
+        print("starting Kev", flush=True)
+        if not audit.KEV.ready.wait(300):
+            print(f"Kev did not start ({audit.KEV.note}); names attached by rules only.", flush=True)
+        kev_url = audit.KEV.url
+    try:
+        stats = run(folder, quick=args.quick, progress=lambda m: print(m, flush=True),
+                    kev_url=kev_url, libraries=args.libraries,
+                    combined=args.combined)
+    finally:
+        if args.kev:
+            from . import audit
+            audit.KEV.stop()
     report = render(stats)
     unexpected = safe(report)
     if unexpected:

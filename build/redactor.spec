@@ -68,6 +68,18 @@ if _vendor.is_dir():
     else:
         print(f"spec: no vendored Tesseract for {_folder}; RapidOCR will cover OCR")
 
+# The name screen's sort (probablepeople, with its trained CRF model and the
+# crfsuite engine that reads it) and the IBAN check (python-stdnum, with its
+# country tables): both ship data files static analysis does not see.
+for package in ("probablepeople", "probableparsing", "pycrfsuite", "stdnum"):
+    try:
+        pkg_datas, pkg_binaries, pkg_hidden = collect_all(package)
+    except Exception:
+        continue
+    datas += pkg_datas
+    binaries += pkg_binaries
+    hiddenimports += pkg_hidden
+
 hiddenimports += [
     "pymupdf", "fitz", "lxml.etree", "lxml._elementpath",
     "cryptography.hazmat.primitives.kdf.pbkdf2", "pytesseract", "PIL.Image",

@@ -21,6 +21,10 @@ class Category:
     tag: str          # placeholder tag stem, e.g. "SSN" -> [SSN-1]
     group: str        # UI grouping
     style: str = "placeholder"
+    # off by default: the numbers nobody outside the bank, the store or the
+    # employer can use to find a party - check, wire, order, tracking,
+    # routing, loan, policy, claim, member, employee and student numbers. They
+    # are left as written and are not on the review list.
     enabled: bool = True
 
 
@@ -52,6 +56,7 @@ CATEGORIES: tuple[Category, ...] = (
     _c("email", "Email address", "EMAIL", "Contact"),
     _c("phone", "Phone number", "PHONE", "Contact"),
     _c("fax", "Fax number", "FAX", "Contact"),
+    # on, but found only when it holds a ticked name - see engine.url_hits
     _c("url", "Web address", "URL", "Contact"),
     _c("social_handle", "Social media handle", "HANDLE", "Contact"),
     _c("username", "Username / login", "USERNAME", "Contact"),
@@ -67,10 +72,10 @@ CATEGORIES: tuple[Category, ...] = (
     _c("alien_number", "USCIS A-number / visa", "ANUM", "Government ID"),
     _c("military_id", "Military service number", "MILID", "Government ID"),
     _c("inmate_number", "Inmate / booking number", "INMATE", "Government ID"),
-    _c("student_id", "Student ID", "STUDENTID", "Government ID"),
+    _c("student_id", "Student ID", "STUDENTID", "Government ID", enabled=False),
     # On a pay stub this sits beside the SSN and identifies the employee just as
     # well within the employer's records.
-    _c("employee_id", "Employee / payroll number", "EMPLOYEEID", "Government ID"),
+    _c("employee_id", "Employee / payroll number", "EMPLOYEEID", "Government ID", enabled=False),
     _c("voter_id", "Voter registration number", "VOTERID", "Government ID"),
     _c("bar_number", "Bar number", "BARNO", "Government ID"),
     _c("notary_id", "Notary commission number", "NOTARY", "Government ID"),
@@ -79,7 +84,7 @@ CATEGORIES: tuple[Category, ...] = (
 
     # ---------------------------------------------------------------- health
     _c("mrn", "Medical record number", "MRN", "Health"),
-    _c("health_plan", "Health plan / member number", "HEALTHPLAN", "Health"),
+    _c("health_plan", "Health plan / member number", "HEALTHPLAN", "Health", enabled=False),
     _c("diagnosis_code", "Diagnosis / procedure code", "DXCODE", "Health"),
     _c("prescription", "Prescription number", "RX", "Health"),
 
@@ -89,19 +94,19 @@ CATEGORIES: tuple[Category, ...] = (
     # masked tail and the full number it belongs to draw from one series and
     # read as the same kind of thing on the delivered page.
     _c("masked_account", "Masked account / card tail", "ACCOUNT", "Financial"),
-    _c("routing_number", "Routing number", "ROUTING", "Financial"),
+    _c("routing_number", "Routing number", "ROUTING", "Financial", enabled=False),
     _c("iban", "IBAN", "IBAN", "Financial"),
     _c("swift", "SWIFT / BIC", "SWIFT", "Financial"),
     _c("credit_card", "Credit / debit card", "CARD", "Financial"),
     _c("payment_handle", "Payment app handle (Venmo, PayPal…)", "PAYHANDLE", "Financial"),
     _c("crypto_wallet", "Crypto wallet address", "WALLET", "Financial"),
     _c("investment_account", "Retirement / brokerage account", "INVACCOUNT", "Financial"),
-    _c("loan_number", "Loan / mortgage / escrow number", "LOAN", "Financial"),
-    _c("policy_number", "Insurance policy number", "POLICY", "Financial"),
-    _c("claim_number", "Insurance claim number", "CLAIM", "Financial"),
-    _c("check_number", "Check / invoice / wire number", "CHECK", "Financial"),
-    _c("order_number", "Online order number", "ORDER", "Financial"),
-    _c("tracking_number", "Shipment tracking number", "TRACKING", "Financial"),
+    _c("loan_number", "Loan / mortgage / escrow number", "LOAN", "Financial", enabled=False),
+    _c("policy_number", "Insurance policy number", "POLICY", "Financial", enabled=False),
+    _c("claim_number", "Insurance claim number", "CLAIM", "Financial", enabled=False),
+    _c("check_number", "Check / invoice / wire number", "CHECK", "Financial", enabled=False),
+    _c("order_number", "Online order number", "ORDER", "Financial", enabled=False),
+    _c("tracking_number", "Shipment tracking number", "TRACKING", "Financial", enabled=False),
 
     # ---------------------------------------------------------- property
     _c("street_address", "Street address", "ADDRESS", "Property"),

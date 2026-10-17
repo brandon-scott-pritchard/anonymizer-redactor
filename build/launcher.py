@@ -37,6 +37,12 @@ def selftest() -> int:
     workers_ok, workers_note = _ocr_workers() if ok else (False, "no OCR engine")
     lines.append(f"OCR read-ahead:       {'OK  ' if workers_ok else 'FAIL'} {workers_note}")
 
+    sort_ok, sort_note = _name_sort()
+    lines.append(f"name sort library:    {'OK  ' if sort_ok else 'FAIL'} {sort_note}")
+
+    iban_ok, iban_note = _iban_check()
+    lines.append(f"IBAN check digits:    {'OK  ' if iban_ok else 'FAIL'} {iban_note}")
+
     report = "\n".join(lines)
     print(report)
     # the Windows build is windowed (console=False), so stdout goes nowhere;
@@ -50,7 +56,31 @@ def selftest() -> int:
         print(f"written to {target}")
         break
 
-    return 0 if ok and model_ok and photos_ok and workers_ok else 1
+    return 0 if ok and model_ok and photos_ok and workers_ok and sort_ok and iban_ok else 1
+
+
+def _name_sort() -> tuple[bool, str]:
+    """probablepeople reads with a trained model shipped as package data;
+    packaging can leave the file behind, and then every suggestion fails."""
+    try:
+        import probablepeople
+        person = probablepeople.tag("Megan Layton")[1]
+        business = probablepeople.tag("Okonkwo Landscaping LLC")[1]
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    ok = person == "Person" and business == "Corporation"
+    return ok, f"a person reads {person}, a business {business}"
+
+
+def _iban_check() -> tuple[bool, str]:
+    """python-stdnum checks an IBAN against its own country tables."""
+    try:
+        from stdnum import iban
+        good = iban.is_valid("GB82 WEST 1234 5698 7654 32")
+        bad = iban.is_valid("UT12 3456 7890 1234 5678")
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    return good and not bad, f"a real one {'passes' if good else 'FAILS'}, a made-up one {'fails' if not bad else 'PASSES'}"
 
 
 def _photo_formats() -> tuple[bool, str]:

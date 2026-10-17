@@ -19,3 +19,7 @@ pywebview>=6.2,<7         # the standalone app window (WKWebView / WebView2).
                           # that boundary and a rebuild silently broke every
                           # download button in the app window.
 pyobjc-framework-WebKit>=10,<12; sys_platform == "darwin"   # its macOS back end
+rapidfuzz>=3.14,<4
+jellyfish>=1.0,<2
+python-stdnum>=2.2,<3            # IBAN check digits (patterns.valid_iban)
+probablepeople>=0.5.6,<1           # the name screen's sort, beside Kev (name_screen.py)

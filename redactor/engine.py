@@ -54,7 +54,8 @@ class Settings:
     # PDFs redact by default. "anonymize" writes the replacement text where the
     # original was, on text-layer pages; scans and images are still redacted.
     pdf_mode: str = "redact"                     # "anonymize" | "redact"
-    enabled_categories: set[str] = field(default_factory=lambda: {c.key for c in categories.CATEGORIES})
+    enabled_categories: set[str] = field(
+        default_factory=lambda: {c.key for c in categories.CATEGORIES if c.enabled})
     include_single_token_names: bool = True
     use_ner: bool = True
     extra_allowlist: list[str] = field(default_factory=list)
@@ -502,6 +503,17 @@ def _overlaps(start: int, end: int, spans) -> bool:
 # --------------------------------------------------------------------------
 
 
+def _scanned_kinds(settings: Settings) -> list[str]:
+    """The kinds the detectors look for: every one that is on, and the ones
+    left as written as well - those are found only to keep their place, so a
+    check or an order number is not taken by a looser rule as a tax ID or a
+    case number. Not names (the name matcher's) and not web addresses
+    (url_hits)."""
+    off_by_default = {c.key for c in categories.CATEGORIES if not c.enabled}
+    return [k for k in set(settings.enabled_categories) | off_by_default
+            if categories.style_for(k) != "person" and k != "url"]
+
+
 def register_text(text: str, store: MappingStore, settings: Settings) -> int:
     """Register every value the detectors find in ``text``. Change nothing.
 
@@ -515,11 +527,12 @@ def register_text(text: str, store: MappingStore, settings: Settings) -> int:
     if not text or not text.strip():
         return 0
     protected = patterns.allowlist_spans(text, settings.do_not_change)
-    enabled = [k for k in settings.enabled_categories
-               if categories.style_for(k) != "person"]
+    enabled = _scanned_kinds(settings)
     added = 0
     context = None
     for match in patterns.scan(text, enabled=enabled, protected=protected):
+        if not settings.category_enabled(match.category):
+            continue
         if store.get(match.category, match.text) is None:
             if _parties_first(store, settings):
                 from . import parties
@@ -553,11 +566,12 @@ def scan_text(
 
     hits: list[Hit] = list(matcher.find(text, protected, redact))
 
-    enabled = [k for k in settings.enabled_categories
-               if categories.style_for(k) != "person"]
+    enabled = _scanned_kinds(settings)
     parties_first = _parties_first(store, settings)
     context = None
     for match in patterns.scan(text, enabled=enabled, protected=protected):
+        if not settings.category_enabled(match.category):
+            continue                    # a number left as written keeps its place
         entity = store.get(match.category, match.text)
         if entity is None:
             if not register:
@@ -583,6 +597,10 @@ def scan_text(
     # bare recurrence of one must be matched in this same piece of text.
     hits.extend(matcher.find_values(text, protected, redact))
     hits.extend(run_together_hits(text, store, redact, protected))
+    hits.extend(scanline_hits(text, store, redact, protected))
+    if settings.category_enabled("url"):
+        hits.extend(url_hits(text, store, redact, protected, register))
+    hits = _whole_handles(hits, store)
     if getattr(store, "parties", None) is not None:
         from . import parties
         hits.extend(parties.extra_hits(text, store, redact, protected, hits))
@@ -599,6 +617,154 @@ def scan_text(
 
 
 _PEOPLE = {"person", "minor"}
+
+
+# --------------------------------------------------------------------------
+# a web address holding a ticked name
+# --------------------------------------------------------------------------
+
+# A web address names nobody - a bank's site, a store's - and is left as
+# written, unless it holds one of the names ticked for replacement:
+# "facebook.com/abigail.okafor", "www.okaforlaw.com/team". Then the whole
+# address goes, as one: swapping only the name inside it left "okaforlaw"
+# whole, the surname in the domain. A name part is looked for anywhere in the
+# address when it is four letters or more, as a whole word when shorter.
+URL_PRIORITY = 96                    # above every name hit inside it
+_URL_DETECTORS = tuple(d for d in patterns.DETECTORS if d.category == "url")
+
+
+def _ticked_name_parts(store: MappingStore) -> list[tuple[str, Entity]]:
+    """Each person's name parts, and the usual short forms of a first name -
+    "abby" for Abigail - with the entity, whose tick is asked at the match."""
+    out = []
+    for entity in store.persons():
+        if entity.person is None:
+            continue
+        for key, value in entity.person.ordered:
+            word = re.sub(r"[^a-z]", "", value.casefold())
+            if len(word) < 3:
+                continue
+            out.append((word, entity))
+            if key == "first":
+                out += [(n, entity) for n in _names.NICKNAMES.get(word, ()) if len(n) >= 4]
+    return out
+
+
+def _holds_ticked_name(value: str, parts: list[tuple[str, Entity]]) -> bool:
+    """A name part of four letters or more anywhere in the value, a shorter
+    one as a whole word: "okaforlaw", "abby.okafor22", "kim-dental"."""
+    low = value.casefold()
+    words = set(re.findall(r"[a-z]+", low))
+    return any(e.enabled and (word in low if len(word) >= 4 else word in words)
+               for word, e in parts)
+
+
+# A social or payment handle that holds a ticked name goes whole, as the
+# handle - "Facebook: abby.okafor22" lost only "okafor22" to the name pass and
+# shipped "abby", the nickname. Lifted to the web address's rank, above the
+# names run together inside it.
+_HANDLES = frozenset({"social_handle", "payment_handle", "username"})
+
+
+def _whole_handles(hits: list[Hit], store: MappingStore) -> list[Hit]:
+    if not any(h.category in _HANDLES for h in hits):
+        return hits
+    parts = _ticked_name_parts(store)
+    return [Hit(h.start, h.end, h.text, h.category, h.replacement, h.entity_key, URL_PRIORITY)
+            if h.category in _HANDLES and h.priority < URL_PRIORITY
+            and _holds_ticked_name(h.text, parts) else h for h in hits]
+
+
+def url_hits(text: str, store: MappingStore, redact: bool, protected=(),
+             register: bool = True) -> list[Hit]:
+    lower = text.lower()
+    if not any(k in lower for d in _URL_DETECTORS for k in d.keywords):
+        return []
+    parts = None
+    hits = []
+    for det in _URL_DETECTORS:
+        for m in det.regex.finditer(text):
+            value = m.group(det.group)
+            start, end = m.span(det.group)
+            if not value or _overlaps(start, end, list(protected)):
+                continue
+            if parts is None:
+                parts = _ticked_name_parts(store)
+            if not _holds_ticked_name(value, parts):
+                continue
+            entity = store.get("url", value)
+            if entity is None:
+                if not register:
+                    continue
+                entity = store.add_value("url", value)
+            if not entity.enabled:
+                continue
+            hits.append(Hit(start, end, value, "url",
+                            REDACTION_TEXT if redact else entity.replacement,
+                            entity.key, URL_PRIORITY))
+    return hits
+
+
+# --------------------------------------------------------------------------
+# a coupon's scanline holding a known account
+# --------------------------------------------------------------------------
+
+# The line of digits across the foot of a remittance coupon encodes the
+# account number and the amount due. Twenty digits and more in a row are
+# taken only when they hold an account number the set has found with its
+# title - "Account Number: 4465400449" on the same bill - and then the whole
+# line goes, as that account: the literal pass cannot see the account inside
+# it, for a value is never matched out of the middle of a longer number. Any
+# other run that long is left as written.
+_SCANLINE = re.compile(r"(?<![\d\-])\d{20,60}(?![\d\-])")
+SCANLINE_PRIORITY = 74
+_SCANLINE_OWNERS = frozenset({"bank_account", "investment_account", "credit_card"})
+_SCANLINE_MIN_DIGITS = 6
+
+
+def _known_accounts(store: MappingStore) -> list[tuple[str, Entity]]:
+    """(digits, entity) for every full account number, longest first - worked
+    out again only when the store has grown; whether one is ticked is asked
+    at the match, so unticking a row needs no rebuild."""
+    size = len(store.entities)
+    cached = getattr(store, "_scanline_accounts", None)
+    if cached is not None and cached[0] == size:
+        return cached[1]
+    out = []
+    for e in store.entities.values():
+        if e.category not in _SCANLINE_OWNERS:
+            continue
+        if re.search(r"[Xx*•#]", e.canonical):
+            continue                                   # a masked tail is no account number
+        digits = re.sub(r"\D", "", e.canonical)
+        if len(digits) >= _SCANLINE_MIN_DIGITS:
+            out.append((digits, e))
+    out.sort(key=lambda t: -len(t[0]))
+    store._scanline_accounts = (size, out)
+    return out
+
+
+def scanline_hits(text: str, store: MappingStore, redact: bool, protected=()) -> list[Hit]:
+    if not any(ch.isdigit() for ch in text):
+        return []
+    known = None
+    hits = []
+    for match in _SCANLINE.finditer(text):
+        if any(match.start() < b and a < match.end() for a, b in protected):
+            continue
+        if known is None:
+            known = _known_accounts(store)
+            if not known:
+                return []
+        run = match.group(0)
+        owner = next((e for digits, e in known if e.enabled and digits in run), None)
+        if owner is None:
+            continue
+        head = grouping.head_of(store, owner)
+        replacement = REDACTION_TEXT if redact else head.replacement
+        hits.append(Hit(match.start(), match.end(), run, owner.category, replacement,
+                        head.key, SCANLINE_PRIORITY))
+    return hits
 
 
 # --------------------------------------------------------------------------

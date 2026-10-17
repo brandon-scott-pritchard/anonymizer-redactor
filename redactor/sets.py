@@ -200,22 +200,21 @@ def _run_set(events, files, store, settings, output_dir, password, relative, ski
              spill_dir, kev_url=None, models=None) -> None:
     """Child side: one set's run, then its final check, reporting as it goes.
 
-    The models live in the parent, one at a time (see models.py): the child
-    asks for Kev once the run is done - ``("need", "kev")`` on ``events`` -
-    and for the local model only if a page was flagged, and is answered on
+    Kev lives in the parent (see models.py): the child asks for it once the
+    run is done - ``("need", "kev")`` on ``events`` - and is answered on
     ``models`` with (address or None, note). ``("done_models",)`` lets go.
-    Without ``models`` it uses ``kev_url`` as given and no local model."""
+    Without ``models`` it uses ``kev_url`` as given."""
     # everything was read before the set was queued; whatever was not is read
     # in-line here rather than by a second pool of readers
     readers = os.environ.get("REDACTOR_OCR_WORKERS")
     os.environ["REDACTOR_OCR_WORKERS"] = "0"
     try:
         _own_group()
-        from . import audit, llm_grouping, pdf_processor, pipeline
+        from . import audit, merges, pdf_processor, pipeline
 
         pdf_processor.keep_ocr_on_disk(spill_dir)
         if store.merged or store.named_after:
-            llm_grouping.settle(store)             # the model's merges, in their shape
+            merges.settle(store)             # merges made on the review list, in their shape
 
         def progress(message: str, fraction: float) -> None:
             events.put(("progress", message, fraction))
@@ -239,9 +238,6 @@ def _run_set(events, files, store, settings, output_dir, password, relative, ski
             if kev_note and not kev_url and check.path is not None:
                 check.kev_note += f" ({kev_note})"
                 audit._write(check)
-            if check.flags or check.doubtful:
-                _read_flagged(events, models, check, result, store, settings, output_dir,
-                              password, progress)
             events.put(("audit", check.summary()))
         except Exception as exc:                   # the run is delivered either way
             events.put(("audit", {"error": f"{type(exc).__name__}: {exc}"}))
@@ -259,8 +255,8 @@ def _run_set(events, files, store, settings, output_dir, password, relative, ski
         ocr_pool.shutdown(wait=True)
 
 
-# How long a run waits for the parent to load a model: another step may be
-# using the slot first (a review asking the local model), then the loading.
+# How long a run waits for the parent to load Kev: another step may be using
+# the slot first (the name screen's sort), then the loading.
 NEED_SECONDS = 3600
 
 
@@ -268,35 +264,13 @@ def _need(events, models, name: str, progress) -> tuple[str | None, str]:
     """Child side: the parent's address for model ``name``, or None and why."""
     import queue as queue_module
 
-    progress("Starting Kev for the final check" if name == "kev"
-             else "Starting the local model to read the flagged pages", 0.0)
+    progress("Starting Kev for the final check", 0.0)
     events.put(("need", name))
     try:
         url, note = models.get(timeout=NEED_SECONDS)
     except queue_module.Empty:
         return None, "it was not started in time"
     return url, note
-
-
-def _read_flagged(events, models, check, result, store, settings, output_dir, password,
-                  progress) -> None:
-    """Child side: the local model reads the flagged pages, if there is one.
-    Kev is stopped for it: the fixed pages are read back by the matcher and
-    the local model."""
-    from . import audit, mapping
-
-    if models is None:
-        return
-    llm_url, note = _need(events, models, "llm", progress)
-    if not llm_url:
-        check.llm_note = note or "not running"
-        audit._write(check)
-        return
-    fixed_store = audit.read_flagged(check, result, store, settings, output_dir, None,
-                                     llm_url, progress)
-    # the forms it found are in the mapping key too: they were replaced
-    if fixed_store is not None and password and result.key_path:
-        mapping.write_encrypted_key(fixed_store, result.key_path, password)
 
 
 def _own_group() -> None:
@@ -623,8 +597,7 @@ class RunQueue:
 
 class _Turn:
     """Parent side: a run's turn at the model slot, taken when its child
-    first needs a model and kept until it is done with them - Kev for the
-    final check, then the local model for the flagged pages in its place."""
+    first needs Kev for the final check and kept until it is done with it."""
 
     def __init__(self) -> None:
         self.lease = None
@@ -634,11 +607,9 @@ class _Turn:
 
         if self.lease is None:
             def waiting() -> None:
-                doc_set.run_message = ("Waiting for the models - another set's review is "
-                                       "using the local model")
+                doc_set.run_message = "Waiting for Kev - another step is using it"
             self.lease = models.SLOT.acquire(on_wait=waiting)
-        doc_set.run_message = ("Starting Kev for the final check" if name == "kev"
-                               else "Starting the local model to read the flagged pages")
+        doc_set.run_message = "Starting Kev for the final check"
         # the readers ahead of the run are twelve gigabytes beside the model;
         # they start again when next wanted. Not while they read another set:
         # its reading would stop where it stood.

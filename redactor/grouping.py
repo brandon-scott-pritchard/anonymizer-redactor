@@ -251,6 +251,13 @@ def split(store: MappingStore, entity: Entity) -> None:
         return
     store.split_out.add(entity.key)
     entity.parent = None
+    before = getattr(store, "merged_by_hand", {}).pop(entity.key, None)
+    if before is not None:
+        # merged by hand and split back out: as it was before the merge -
+        # its party, its kind, its own replacement
+        (entity.fixed, entity.party, entity.kind, entity.replacement,
+         entity.surrogate) = before
+        return
     # out of a party's group it is nobody's: it reads as itself again
     entity.fixed, entity.party, entity.kind = False, "", ""
     if entity.is_person:

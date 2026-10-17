@@ -290,19 +290,18 @@ def run_flow(files: list[Path], out_dir: Path, mode: str, operator_names: list[s
     from redactor import ner
     known = frozenset(w for name, _c in entries for w in (ner._plain(t) for t in name.split())
                       if len(w) > 2)
-    # the local model's sort, as the name screen asks it, from one server the
-    # whole run shares (EVAL_LLM_URL) - each worker loading its own would not fit
+    # Kev's and probablepeople's sort, as the name screen asks it, from one Kev
+    # server the whole run shares (EVAL_KEV_URL) - each worker loading its own
+    # would not fit
+    from redactor import name_screen
     labels = {}
-    if os.environ.get("EVAL_LLM_URL") and suggestions:
-        from redactor import llm_names
+    if os.environ.get("EVAL_KEV_URL") and suggestions:
         try:
-            labels = llm_names.classify([s.text for s in suggestions],
-                                        [name for name, _c in entries], os.environ["EVAL_LLM_URL"])
+            labels = name_screen.classify([s.text for s in suggestions], os.environ["EVAL_KEV_URL"])
         except Exception:
             labels = {}
     for s in suggestions:
-        from redactor import llm_names
-        kept = llm_names.keeps(s.text, s.category, labels.get(s.text))
+        kept = name_screen.keeps(s.text, s.category, labels.get(s.text))
         if s.nickname_for or any(ner._plain(t) in known for t in s.text.split()):
             pass
         elif kept is not None:

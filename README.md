@@ -160,58 +160,32 @@ The last line downloads the weights once (about 9 GB); stop it when it says
 it is serving. Without Kev the check runs with the matcher alone and the
 report says so. It adds about half a second a page on an M3 Max.
 
-### The local model
+### Sorting the names, and merging rows by hand
 
-An optional local language model (`redactor/llm.py`, Qwen3.6-35B-A3B on
-MLX) is asked three things the rules cannot settle alone:
+**On the name screen**, which of the scan's suggestions are names at all
+(`redactor/name_screen.py`). The scan proposes a store ("Dollar Tree
+Layton"), a heading ("Promo Expiration Date") or a town as a person as
+readily as a person. Two readers sort them: Kev's person-name check, and
+probablepeople, which reads how the words are put together. A suggestion both
+call no person is listed apart, unticked, and "Tick all" leaves it; one
+either calls a person stays ticked. Nothing is dropped. Without Kev, word
+lists do the sorting.
 
-- **On the name screen**, which of the scan's suggestions are names at all
-  (`redactor/llm_names.py`). The scan proposes a store ("Dollar Tree
-  Layton"), a heading ("Promo Expiration Date") or a town as a person as
-  readily as a person; the model tells "Megan Layton" from "Dawgs Layton",
-  which no word list can. Those it calls no name are listed apart, unticked,
-  and "Tick all" leaves them; nothing is dropped. Without the model, word
-  lists do the sorting.
-- **At review**, after the scan, which of the people and businesses found are
-  the same real person or business—OCR misreadings ("HARRlNGTON",
-  "Harringten"), nicknames, initials, hyphenated or maiden forms
-  (`redactor/llm_grouping.py`). It sees each name with up to two snippets of
-  where the scan found it ("...paid to [Harrington Enterprises] on
-  03/02..."); the snippets are never written into the mapping key or report. Each form it merges takes the person's
-  invented name in its own shape, is marked "merged by the local model" in
-  the review list, and comes out again with **Split out** like any other
-  form. What it says is checked first: two parties who share a surname, a
-  child and an adult, two people with different first names, or two rows
-  registered apart on purpose are never merged. A business that carries a
-  person's name keeps its business words and takes their invented surname
-  ("Harrington Enterprises" becomes "<invented surname> Enterprises").
-- **After the final check**, what on each flagged page - and each page Kev
-  scored 0.3 or more without flagging it (`KEV_ASK_LLM`) - still names a ticked
-  person, quoted word for word with the few words either side of it. A quote
-  found on the page with those words around it becomes
-  one more written form of that person, the file is made again from its
-  original, and the page is read back by the matcher and the model—at most
-  twice. `final-check.txt` then lists what was fixed and rechecked, and what
-  is still to look at, with any quote it could not fix. A quote not on the
-  page is never applied. Until the model has been tested against a labelled
-  corpus it never clears a flag (`LLM_MAY_CLEAR` in `redactor/audit.py` is
-  off): a page it cannot confirm stays on the list.
+**At review**, **Merge into…** on any row puts it under another row of the
+same kind - one thing written another way. It takes that row's replacement
+(a person's invented name in its own shape), keeps it through a rescan, and
+**Split out** takes it back out as it was (`redactor/merges.py`).
 
-It serves an OpenAI-style chat API (`mlx_lm.server`) on 127.0.0.1, offline,
-in its own process group with the same watcher as Kev, and nothing is ever
-sent anywhere else. Point it at a model with `REDACTOR_LLM_PYTHON` (a Python
-with `mlx-lm` installed; default `~/Coding/llm/.venv/bin/python`) and
-`REDACTOR_LLM_MODEL` (a model folder or repo id already on disk; default
-`LLM_MODEL` in `redactor/llm.py`); `REDACTOR_LLM=0` turns it off. Without it
-every step runs as it did and the review page or `final-check.txt` says so.
+**Kev, one step at a time.** Kev (about ten gigabytes) is not started with
+the app: each step that needs it takes its turn at a single slot
+(`redactor/models.py`), in the order asked. A model left loaded is stopped
+after two minutes nobody has asked for it.
 
-**One model at a time.** Kev (about ten gigabytes) and the local model
-(about twenty) are never loaded together (`redactor/models.py`). Neither is
-started with the app: each step that needs one takes its turn at a single
-slot, in the order asked; the slot stops the other model, waits for it to be
-gone, then starts the one wanted. A queued run asks for Kev for its final
-check, then—only if a page was flagged or doubtful—for the local model in its place. A
-model left loaded is stopped after two minutes nobody has asked for it.
+(A local language model, Qwen3.6-35B-A3B, once sorted the names, proposed
+merges at review and read the flagged pages for fixes. It was taken out on
+2026-10-16: none of it had been measured to help, and Kev and probablepeople
+sort the names as well. Every flagged page is now listed in
+`final-check.txt` for you to look at.)
 
 ### OCR
 

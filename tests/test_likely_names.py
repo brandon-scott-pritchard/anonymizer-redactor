@@ -33,46 +33,51 @@ def test_a_business_carrying_a_listed_name_is_likely():
     assert not ner.likely_name("Cascade Home Loan Servicing", "organization", known)
 
 
-def test_the_local_model_sorts_the_suggestions_and_only_sorts(monkeypatch):
-    """A store with a town in it is no name; a person whose surname is a town
-    is one - which no word list can tell apart."""
-    from redactor import llm, llm_names
+def test_kev_and_probablepeople_sort_the_suggestions_and_only_sort(monkeypatch):
+    """A suggestion is set apart only when both readers call it no person: a
+    store Kev doubts but the library reads as a person stays a person."""
+    from redactor import name_clusters, name_screen
 
-    asked = []
-
-    def chat(url, system, user, schema, max_tokens=0):
-        asked.append(user)
-        return {"labels": {"1": "other", "2": "person", "3": "family_business", "9": "person",
-                           "x": "person", "4": "nonsense"}}
-
-    monkeypatch.setattr(llm, "chat", chat)
-    labels = llm_names.classify(["Dollar Tree Layton", "Megan Layton", "Okonkwo Landscaping",
-                                 "Interest Rate"], ["Brittany Okonkwo"], "http://127.0.0.1:1")
-    assert labels == {"Dollar Tree Layton": "other", "Megan Layton": "person",
-                      "Okonkwo Landscaping": "family_business"}
-    assert "Brittany Okonkwo" in asked[0]
+    kev = {"Dollar Tree Layton": 0.05, "Megan Layton": 0.97, "Okonkwo Landscaping": 0.10,
+           "Interest Rate": 0.02}
+    monkeypatch.setattr(name_clusters, "kev_is_name", lambda url: lambda text: kev[text])
+    labels = name_screen.classify(list(kev), "http://127.0.0.1:1")
+    assert labels["Megan Layton"] == "person"
+    assert labels["Okonkwo Landscaping"] == "other"      # Kev no, probablepeople a business
+    assert set(labels) == set(kev)
 
 
-def test_the_model_may_not_drop_an_employer_or_a_first_and_last_name():
-    """Given the parties, the model once called every other real person
+def test_a_suggestion_kev_does_not_answer_is_not_set_apart(monkeypatch):
+    from redactor import name_clusters, name_screen
+
+    def silent(url):
+        def ask(text):
+            raise OSError("no answer")
+        return ask
+    monkeypatch.setattr(name_clusters, "kev_is_name", silent)
+    assert name_screen.classify(["Okonkwo Landscaping LLC"], "http://127.0.0.1:1") == {
+        "Okonkwo Landscaping LLC": "person"}
+
+
+def test_the_sort_may_not_drop_an_employer_or_a_first_and_last_name():
+    """Given the parties, a sorter once called every other real person
     "other" - 412 of 421 suggestions - and 217 names shipped."""
-    from redactor import llm_names
+    from redactor import name_screen
 
-    assert llm_names.keeps("Brightline Tutoring LLC", "employer", "other")
-    assert llm_names.keeps("WILLIAM SMITH", "person", "other")
-    assert not llm_names.keeps("Dollar Tree Layton", "person", "other")
-    assert llm_names.keeps("Megan Layton", "person", "person")
-    assert llm_names.keeps("Mark Store", "person", None) is None
-    assert "not only" in llm_names.SYSTEM and "never mark" in llm_names.SYSTEM
+    assert name_screen.keeps("Brightline Tutoring LLC", "employer", "other")
+    assert name_screen.keeps("WILLIAM SMITH", "person", "other")
+    assert not name_screen.keeps("Dollar Tree Layton", "person", "other")
+    assert name_screen.keeps("Megan Layton", "person", "person")
+    assert name_screen.keeps("Mark Store", "person", None) is None
 
 
 @pytest.mark.parametrize("text", ["Tran Date", "Date Ps", "Posting Amount"])
 def test_a_name_ending_in_a_column_heading_is_a_table_read_across(text):
     """Ticked, "Tran Date" took every "Date" heading of a household: 532."""
-    from redactor import llm_names
+    from redactor import name_screen
 
     assert not ner.likely_name(text, "person")
-    assert llm_names.keeps(text, "person", "person") is False
+    assert name_screen.keeps(text, "person", "person") is False
 
 
 def test_an_everyday_word_is_never_a_payment_handle():

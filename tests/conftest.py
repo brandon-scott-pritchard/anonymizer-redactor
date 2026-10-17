@@ -55,11 +55,15 @@ District Court Judge
 
 SECRETS = [
     "528-41-9963", "jane.smith1985@gmail.com", "(801) 555-0184", "801-555-0199",
-    "1482 South Elmwood", "000148829371", "124000054", "RT-99183772",
+    "1482 South Elmwood", "000148829371", "RT-99183772",
     "4111 1111 1111 1111", "22-14-377-009", "5TDJZRFH8KS998172", "D42XKQ",
-    "87-1993822", "jsmith-slc", "561998223", "MRN-88213", "POL-773322",
+    "87-1993822", "jsmith-slc", "561998223", "MRN-88213",
     "224900871", "04/17/1985", "Smith",
 ]
+
+# Numbers nobody outside the bank or the insurer can use to find a party -
+# left as written by default (see categories.Category.enabled).
+LEFT_AS_WRITTEN = ["124000054", "POL-773322"]
 
 PRESERVED = ["Judge Amber M. Cordova", "Commissioner Delia Farnsworth", "Rule 26",
              "Utah Code Ann. Section 30-3-5",

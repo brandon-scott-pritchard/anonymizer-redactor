@@ -156,6 +156,29 @@ _SEP = (
     r"|/|\([^)\n]{1,30}\)|\))\s*){0,6}(?:[:\-–—=#]\s*)?"
 )
 
+# Between a bank account's title and its number: white space only - any
+# amount, line breaks too, so a column heading over its value still counts.
+# The title is the account word and what a form prints as part of it: its
+# number word and mark ("Account Number:", "Acct #", "Account No. -",
+# "Checking account ending in"), a slash heading ("Account / identifying
+# number" - the Utah financial declaration's asset schedule) and a bracketed
+# note ("Account number (see instructions)" on a 1099, "Share Certificate (CD)
+# number"). No other word between title and number - "Account transfer
+# payment ref 4482...", "Account | 8812..." - and the number is not taken as
+# an account. The loose separator above let up to six words stand between,
+# and a statement's transaction and reference numbers came through as
+# accounts by the thousand.
+_TITLE_PART = (r"num(?:ber)?|no\.?|#|id(?:entif(?:ication|ying))?|ending(?:\s+in)?"
+               r"|last\s*(?:4|four)?\s*digits?|last\s*(?:4|four)|/|\([^)\n]{1,30}\)")
+_ACCOUNT_SEP = rf"(?:\s*(?:{_TITLE_PART})){{0,4}}\s*(?:[:\-–—=#]{{1,2}}\s*)?"
+
+
+def account_labeled(labels: Sequence[str], value: str = V_ACCOUNT_ID) -> str:
+    """``labeled`` with the strict separator: the title, white space, the number."""
+    alt = "|".join(labels)
+    return rf"(?:(?<![A-Za-z0-9])|(?-i:(?<=[a-z])(?=[A-Z])))(?:{alt}){_ACCOUNT_SEP}({value})"
+
+
 _MONTHS = (
     r"Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|"
     r"Aug(?:ust)?|Sep(?:t)?(?:ember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?"
@@ -244,6 +267,11 @@ def valid_routing(value: str) -> bool:
 # and were boxed as wallets with the figures beside them.
 _VOWELS = frozenset("aeiouAEIOU")
 WALLET_VOWEL_SHARE = 0.3
+
+
+def valid_iban(value: str) -> bool:
+    from stdnum import iban
+    return iban.is_valid(value)
 
 
 def _not_words(value: str) -> bool:
@@ -469,7 +497,10 @@ DETECTORS: tuple[Detector, ...] = (
        digit=True),
     _d("social_handle",
        rf"\b(?:facebook|fb|instagram|insta|ig|twitter|x\.com|tiktok|snapchat|snap|linkedin|"
-       rf"reddit|discord|telegram|whatsapp|youtube|onlyfans|tinder|bumble|hinge)\b\s*"
+       rf"reddit|discord|telegram|whatsapp|youtube|onlyfans|tinder|bumble|hinge)\b"
+       # never the site's own name in a link: "facebook.com/..." is not the
+       # label "facebook" and the handle ".com"
+       rf"(?!\.[A-Za-z])\s*"
        rf"(?:(?:profile|account|handle|user\s?name|username|id)\s*)?(?:(?:is|:|=|@|-)\s*)?"
        rf"(@?[A-Za-z0-9._\-]{{3,30}})",
        group=1, priority=84,
@@ -640,8 +671,12 @@ DETECTORS: tuple[Detector, ...] = (
     # priority where a labelled hit always outranks it.
     _d("routing_number", r"(?<![\d\-])\d{9}(?![\d\-])", validator=valid_routing,
        priority=60, digit=True),
+    # An IBAN carries its own check digits (ISO 13616, mod 97): checked with
+    # python-stdnum, so a code that only looks like one - two capitals, two
+    # digits and a run - is left alone. Fifty-one of a real set's fifty-five
+    # "IBANs" were found in one document each; a US client rarely has one.
     _d("iban", r"\b[A-Z]{2}\d{2}[ ]?(?:[A-Z0-9]{4}[ ]?){2,7}[A-Z0-9]{1,4}\b", priority=90, flags=0,
-       digit=True),
+       validator=valid_iban, digit=True),
     _d("swift", labeled(("swift", "bic", "swift\\s*/\\s*bic"), r"[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?"), group=1, priority=90,
        kw=("swift", "bic")),
     _d("crypto_wallet", r"\b(?:bc1[a-z0-9]{25,62}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})\b", priority=90, flags=0,
@@ -655,12 +690,23 @@ DETECTORS: tuple[Detector, ...] = (
        labeled(("venmo", "pay ?pal", "zelle", "cash ?app", "square ?cash"), r"\d{8,20}"),
        group=1, priority=90, digit=True,
        kw=("venmo", "paypal", "pay pal", "zelle", "cash", "square")),
+    # After the app's name, a handle is taken only when it looks like one: an
+    # "@" or "$" in front ("@Abigail-Okafor-1", "$TysonOka273"), or a digit,
+    # an underscore or a hyphen inside it. A plain word after "ZELLE" or
+    # "VENMO" is the line's - "PAYMENT", "TRANSFER", the payee's first name -
+    # and on a real set 113 of 126 "handles" were found in one document each.
     _d("payment_handle",
        labeled(("pay ?pal", "venmo", "cash ?app", "zelle", "square ?cash", "apple ?pay",
                 "google ?pay", "wise", "revolut", "chime", "stripe", "coinbase", "robinhood"),
-               r"[$@]?[A-Za-z0-9._\-]{3,40}"), group=1, priority=89,
+               r"(?:[$@][A-Za-z0-9._\-]{2,40}"
+               r"|(?=[A-Za-z0-9.]*[0-9_\-])[A-Za-z][A-Za-z0-9._\-]{2,39})"), group=1, priority=89,
        kw=("paypal", "pay pal", "venmo", "cash", "zelle", "square", "apple",
            "google", "wise", "revolut", "chime", "stripe", "coinbase", "robinhood")),
+    # A plain handle with its own label: "Venmo username: jsmith".
+    _d("payment_handle",
+       rf"(?i:\b(?:pay ?pal|venmo|cash ?app|zelle)[^\S\n]*(?:handle|user\s?name|user\s?id|"
+       rf"cash\s?tag|tag)\b[^\S\n]*[:#=\-]?[^\S\n]*)([$@]?[A-Za-z][A-Za-z0-9._\-]{{2,39}})",
+       group=1, priority=89, flags=0, kw=("paypal", "pay pal", "venmo", "cash", "zelle")),
     # 457 and 529 are bare digit runs, and labeled() adds no word boundary of
     # its own: unguarded they matched *inside* an amount, so "Total 4571.30"
     # became "Total 457[INVACCOUNT-1]" - not a redaction but a silent rewrite,
@@ -689,9 +735,11 @@ DETECTORS: tuple[Detector, ...] = (
        digit=True, kw=("401", "403", "457", "ira", "roth", "pension", "annuity",
                        "brokerage", "tsp", "hsa", "529", "retirement", "investment",
                        "securities", "mutual", "plan", "participant", "contract")),
-    _d("bank_account", labeled(("bank\\s+account", "checking\\s*(?:account)?", "savings\\s*(?:account)?",
+    _d("bank_account", account_labeled(("bank\\s+account", "checking\\s*(?:account)?", "savings\\s*(?:account)?",
                                 "deposit\\s+account", "acct", "account", "a/c", "money\\s+market",
                                 "certificate\\s+of\\s+deposit", "\\bcd\\b",
+                                # a credit union's CD: "Share Certificate (CD) number"
+                                "share\\s+certificate",
                                 # a utility meter and a service account are both
                                 # tied to the service address, so both identify
                                 # where somebody lives
@@ -791,11 +839,12 @@ DETECTORS: tuple[Detector, ...] = (
        r"\b(?:to|from)[^\S\n]+(?:(?:my|your|the|linked|external|[A-Z][\w&'\-]*)[^\S\n]+)?bank"
        r"[^\S\n]*[:#]?[^\S\n]*(?!(?:19[5-9]\d|20[0-4]\d)(?!\d))(\d{4})(?!\d)(?![\-/.,]\d)",
        group=1, priority=70, digit=True, kw=("bank",)),
-    # The OCR scanline across the foot of a remittance coupon. It encodes the
-    # account number and the amount due, and nothing else in a document is
-    # twenty unbroken digits, so it needs no label.
-    _d("bank_account", r"(?<![\d\-])\d{20,60}(?![\d\-])", priority=74, digit=True,
-       bare=True),
+    # The OCR scanline across the foot of a remittance coupon - twenty
+    # unbroken digits and more - is not found here: on a real set this rule
+    # made 3,464 of 3,536 account rows, nearly all of them digits run
+    # together off a scan and other long codes. A scanline that holds an
+    # account number found with its title is replaced as that account - see
+    # engine.scanline_hits.
 
     # ----------------------------------------------------------- property ----
     # A street address wraps - "771 N" and "1200 E" land on separate lines in a

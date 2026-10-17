@@ -1,17 +1,15 @@
-"""One model loaded at a time: Kev or the local language model, never both.
+"""Kev, loaded when a step needs it and by one step at a time.
 
-Kev holds some ten gigabytes and the local model some twenty, on a Mac with
-forty-eight beside the OCR readers. So neither is started with the app: each
-step that needs one asks this slot for it. The slot lets one step in at a
-time, in the order they asked; stops whichever model is loaded if it is the
-other one, and waits for its process to be gone; starts the one wanted and
-waits for it to answer. On release the model stays loaded - the next step
-very likely wants the same one - until another is wanted, or until nobody
-has asked for IDLE_SECONDS.
+Kev holds some ten gigabytes on a Mac with forty-eight beside the OCR
+readers, so it is not started with the app: each step that needs it asks
+this slot. The slot lets one step in at a time, in the order they asked;
+starts Kev and waits for it to answer. On release it stays loaded - the next
+step very likely wants it - until nobody has asked for IDLE_SECONDS.
 
-The slot only sequences the two services (audit.KevService, llm.LlmService);
-each still starts offline, in its own process group, watched so it dies
-with the app.
+(It once also sequenced a local language model beside Kev, never both
+loaded; that model was taken out on 2026-10-16.) The slot only sequences the
+service (audit.KevService), which starts offline, in its own process group,
+watched so it dies with the app.
 """
 
 from __future__ import annotations
@@ -26,15 +24,15 @@ IDLE_SECONDS = 120
 
 def _services() -> dict:
     """Looked up on every use, so a test's stand-in is the one sequenced."""
-    from . import audit, llm
+    from . import audit
 
-    return {"kev": audit.KEV, "llm": llm.LLM}
+    return {"kev": audit.KEV}
 
 
 def _start_seconds(name: str) -> float:
-    from . import audit, llm
+    from . import audit
 
-    return audit.KEV_START_SECONDS if name == "kev" else llm.LLM_START_SECONDS
+    return audit.KEV_START_SECONDS
 
 
 def _alive(pid: int) -> bool:
@@ -111,7 +109,7 @@ class ModelSlot:
 
     @contextmanager
     def use(self, name: str, on_wait=None):
-        """``with SLOT.use("llm") as url:`` - the model loaded for the block."""
+        """``with SLOT.use("kev") as url:`` - the model loaded for the block."""
         lease = self.acquire(on_wait)
         try:
             yield lease.load(name)

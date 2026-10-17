@@ -773,7 +773,7 @@ class App(Tk):
 
     # ---------------------------------------------------------- settings --
     def settings(self) -> Settings:
-        enabled = {c.key for c in categories.CATEGORIES} - self.disabled_categories
+        enabled = {c.key for c in categories.CATEGORIES if c.enabled} - self.disabled_categories
         extra = [line.strip() for line in
                  self.allowlist_text.get("1.0", "end").splitlines() if line.strip()]
         return Settings(

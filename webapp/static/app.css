@@ -250,6 +250,9 @@ td button { padding: 5px 11px; white-space: nowrap; }
   box-shadow: 0 14px 44px rgba(33, 10, 12, .35);
 }
 .modal h3 { margin: 0 0 14px; font: 700 17px/1.25 var(--sans); color: var(--ink); }
+/* "Merge into...": a wider dialog, its list scrolling inside it */
+.modal:has(.mergelist) { width: min(820px, calc(100vw - 32px)); }
+.mergelist { max-height: 46vh; overflow-y: auto; }
 .modal .row { margin-bottom: 13px; }
 .modal .row > span {
   display: block; margin-bottom: 5px;
