@@ -678,6 +678,9 @@ class RunResult:
     finished: datetime | None = None
     notes: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)   # left out: not PDF or Word
+    # the store as the run left it - forms and values it met on the way - so
+    # a fix made afterwards keeps every placeholder the delivered files carry
+    store: object = None
 
     @property
     def processed(self) -> list[FileOutcome]:

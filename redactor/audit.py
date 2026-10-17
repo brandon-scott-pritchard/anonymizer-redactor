@@ -30,6 +30,7 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -273,7 +274,10 @@ class Check:
                 "file": str(self.path) if self.path else "",
                 "fixed": len(self.fixed), "cleared": len(self.cleared),
                 "still": len(self.flags) if self.still is None else len(self.still),
-                "llm": self.llm_note}
+                "llm": self.llm_note,
+                # each flagged page, for the app to show it: never its text
+                "flags": [{"file": f.file, "page": f.page, "kev": f.kev,
+                           "matched": list(f.matched)} for f in self.flags]}
 
 
 def _ticked_people(store) -> list[str]:
@@ -462,6 +466,91 @@ def render(check: Check) -> str:
         for flag in check.cleared:
             lines.append(f"  {flag.file}, page {flag.page}: {'; '.join(_why(flag))}")
     return "\n".join(lines).rstrip("\n") + "\n"
+
+
+# --------------------------------------------------------------------------
+# a flagged page fixed by hand: its file made again, its pages read again
+# --------------------------------------------------------------------------
+
+def remake(members: list[str], result, store, settings, archive: Path) -> dict[str, str]:
+    """The delivered files ``members`` made again from their originals with
+    ``store``, put back into the archive. {member: why} for any that could
+    not be."""
+    from . import docx_processor, engine, pdf_processor
+
+    by_member = {o.delivered_name: o for o in getattr(result, "outcomes", [])}
+    failed: dict[str, str] = {}
+    made: dict[str, Path] = {}
+    matcher = engine.PersonMatcher(store, settings)
+    work = Path(tempfile.mkdtemp(prefix="final-fix-"))
+    try:
+        for member in members:
+            outcome = by_member.get(member)
+            if outcome is None or not Path(outcome.source).exists():
+                failed[member] = "its original was not to hand to make it again"
+                continue
+            target = work / f"{len(made)}{Path(member).suffix}"
+            try:
+                process = docx_processor.process if outcome.kind == "docx" \
+                    else pdf_processor.process
+                detail = process(Path(outcome.source), target, store, settings, matcher)
+            except Exception as exc:
+                failed[member] = f"making it again failed ({type(exc).__name__})"
+                continue
+            if getattr(detail, "refused", False) or not target.exists():
+                failed[member] = "making it again was refused"
+                continue
+            made[member] = target
+        if made:
+            _replace_members(archive, made)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    return failed
+
+
+def _replace_members(archive: Path, made: dict[str, Path]) -> None:
+    partial = archive.with_name(archive.name + ".part")
+    with zipfile.ZipFile(archive) as source, \
+            zipfile.ZipFile(partial, "w", zipfile.ZIP_DEFLATED) as target:
+        for info in source.infolist():
+            if info.filename in made:
+                target.write(made[info.filename], arcname=info.filename)
+            else:
+                target.writestr(info, source.read(info.filename))
+    os.replace(partial, archive)
+
+
+def recheck(archive: Path, store, members: list[str], kev_url: str | None,
+            progress=lambda message, fraction: None) -> list[Flag]:
+    """The pages of ``members`` read back again: the flags they still raise."""
+    check = Check(kev_note="")
+    reader = _Reader(store, check, kev_url)
+    flags = []
+    for member, number, text in _read_members(Path(archive), members, progress,
+                                               "Reading the fixed pages back"):
+        flag = reader.flag(member, number, text)
+        if flag is not None and not flag.doubtful:
+            flags.append(flag)
+    return flags
+
+
+def write_pending(path: Path, pages: int, kev_note: str, flags: list[dict],
+                  done: list[dict] = ()) -> None:
+    """final-check.txt again, after the review screen: the pages still to
+    look at, and each page looked at there - fixed, or nothing to fix."""
+    check = Check(kev_note=kev_note, pages=pages, path=Path(path))
+    check.flags = [Flag(f["file"], f["page"], f.get("kev"), list(f.get("matched") or []))
+                   for f in flags]
+    text = render(check)
+    if done:
+        text = text.replace("Nothing was changed.", "Pages fixed on the review screen were "
+                            "made again and read back.").replace("No page was flagged.",
+                                                                 "Nothing is left to look at.")
+        lines = ["", f"Looked at on the review screen - {len(done)} page(s):"]
+        for d in done:
+            lines.append(f"  {d['file']}, page {d['page']}: {d['how']}")
+        text = text.rstrip("\n") + "\n" + "\n".join(lines) + "\n"
+    Path(path).write_text(text, encoding="utf-8")
 
 
 def _clean(flag: Flag) -> bool:

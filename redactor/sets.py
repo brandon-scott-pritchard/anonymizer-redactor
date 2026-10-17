@@ -78,6 +78,12 @@ class DocSet:
     run_pages_total: int = 0
     run_error: str = ""
     audit: dict | None = None                  # the final check's summary
+    # the flagged pages still to look at on the review screen, and what a fix
+    # there needs: the run's settings and its mapping-key password, held in
+    # memory only, until the operator is done with them (finish_final)
+    final_flags: list = field(default_factory=list)
+    run_settings: object = None
+    run_password: str = field(default="", repr=False)
     results: Path | None = None
     queued_at: float = 0.0
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -187,7 +193,8 @@ class DocSet:
                     "results": str(self.results) if self.results else "",
                     "failed": len(self.run_result.failed) if self.run_result else 0,
                     "files": len(self.run_result.outcomes) if self.run_result else 0,
-                    "audit": self.audit or {}},
+                    "audit": self.audit or {},
+                    "to_look_at": len(self.final_flags)},
         }
 
 
@@ -244,6 +251,7 @@ def _run_set(events, files, store, settings, output_dir, password, relative, ski
         finally:
             if models is not None:
                 events.put(("done_models",))
+        result.store = store                       # for fixes made after the run
         events.put(("done", result))
     except BaseException as exc:                   # the parent marks the set failed
         events.put(("error", f"{type(exc).__name__}: {exc}"))
@@ -505,6 +513,8 @@ class RunQueue:
         results = _unique_folder(root, folder_name(doc_set.name))
         results.mkdir(parents=True)
         doc_set.results = results
+        doc_set.run_settings, doc_set.run_password = settings, password
+        doc_set.final_flags = []
         doc_set.run_state, doc_set.run_message = "running", "Starting"
         doc_set.run_pages = set()
         doc_set.run_pages_total = 0
@@ -586,13 +596,17 @@ class RunQueue:
             doc_set.run_message = "Failed"
             return
         doc_set.run_result = result
+        if getattr(result, "store", None) is not None:
+            doc_set.store = result.store           # as the run left it
         doc_set.run_state = "done"
         doc_set.run_message = (f"Finished - {len(result.failed)} file(s) refused"
                                if result.failed else "Finished")
-        # the set's copies of the client's documents, and what was read off
-        # them, are not kept a moment longer than its results need them
-        pdf_processor.forget_ocr(doc_set.files)
-        shutil.rmtree(doc_set.uploads, ignore_errors=True)
+        doc_set.final_flags = list((doc_set.audit or {}).get("flags") or [])
+        if doc_set.final_flags:
+            # the flagged pages are fixed from the originals: the set's copies
+            # stay, in its own temporary folder, until finish_final
+            return
+        finish_final(doc_set)
 
 
 class _Turn:
@@ -622,6 +636,18 @@ class _Turn:
         lease, self.lease = self.lease, None
         if lease is not None:
             lease.release()
+
+
+def finish_final(doc_set: DocSet) -> None:
+    """The flagged pages are done with: the password goes from memory, and
+    the set's copies of the client's documents, and what was read off them,
+    are not kept a moment longer."""
+    from . import pdf_processor
+
+    doc_set.final_flags = []
+    doc_set.run_password = ""
+    pdf_processor.forget_ocr(doc_set.files)
+    shutil.rmtree(doc_set.uploads, ignore_errors=True)
 
 
 def _mark_interrupted(results: Path, marker: str) -> None:

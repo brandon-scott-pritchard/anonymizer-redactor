@@ -293,3 +293,43 @@ def merge_by_hand(store: MappingStore, entity: Entity, target: Entity) -> str:
     settle(store)
     return ""
 
+
+
+# --------------------------------------------------------------------------
+# a written form chosen at the final check
+# --------------------------------------------------------------------------
+
+FINAL_CHECK = "added at the final check"
+
+
+def stand_in(store: MappingStore, head: Entity, text: str) -> str:
+    """What ``text``, a written form of ``head``, is to read as."""
+    parsed = _names.parse(text)
+    if not parsed.canonical or head.person is None or head.surrogate is None:
+        return head.replacement
+    shaped = grouping._shaped_surrogate(parsed, head.surrogate,
+                                        loose_mapping(parsed, head.person), head.person)
+    return _names.match_case(text, shaped.canonical)
+
+
+def add_form(store: MappingStore, head: Entity, text: str, written: str = "") -> Entity | None:
+    """``text`` registered as one more written form of ``head``, taking its
+    invented name in its own shape. ``written``, when given, is what the form
+    is to read as instead - a glued word with only the name in it swapped.
+    None when it is already a form, or was unticked by hand."""
+    parsed = _names.parse(text)
+    if not parsed.canonical:
+        return None
+    key = f"{head.category}:{parsed.canonical.casefold()}"
+    if key in store.entities:
+        return None
+    entity = Entity(key=key, category=head.category, canonical=parsed.canonical,
+                    replacement="", source=FINAL_CHECK, person=parsed,
+                    variants=_names.variants(parsed, include_single_tokens=True),
+                    parent=head.key, group_note=FINAL_CHECK)
+    store.entities[key] = entity
+    shape(store, entity)
+    if written:
+        entity.surrogate = _names.PersonName(raw=written, last=written)
+        entity.replacement = written
+    return entity

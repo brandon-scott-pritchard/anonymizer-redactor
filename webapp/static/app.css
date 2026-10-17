@@ -460,3 +460,23 @@ details.leftalone ul { margin: 6px 0 0; padding-left: 20px; font-size: 14.5px; c
   .pfield > label { padding-top: 4px; }
 }
 
+
+/* the final check's flagged pages (FinalReview) */
+.modal.wide { width: min(1180px, calc(100vw - 32px)); max-height: 94vh; }
+.finalgrid { display: grid; grid-template-columns: 260px 1fr; gap: 16px; align-items: start; }
+.flaglist { list-style: none; margin: 0; padding: 0; max-height: 70vh; overflow-y: auto; }
+.flaglist button { width: 100%; text-align: left; margin-bottom: 4px; font-size: 13px; }
+.flaglist button.current { outline: 2px solid var(--ink); }
+.pagewrap { position: relative; border: 1px solid var(--line); max-height: 46vh; overflow: auto;
+            user-select: none; cursor: crosshair; }
+.pagewrap img { display: block; width: 100%; height: auto; }
+.fword { position: absolute; cursor: pointer; border-radius: 2px; }
+.fword:hover { outline: 1px solid rgba(60, 120, 255, .8); }
+.fword.suspect, .wword.suspect { background: rgba(255, 196, 0, .38); }
+.fword.chosen, .wword.chosen { background: rgba(60, 120, 255, .38); outline: 1px solid rgb(60, 120, 255); }
+.dragbox { position: absolute; border: 1px dashed rgb(60, 120, 255); background: rgba(60, 120, 255, .12);
+           pointer-events: none; }
+.wordflow { max-height: 50vh; overflow-y: auto; line-height: 1.9; border: 1px solid var(--line);
+            padding: 8px; }
+.wword { cursor: pointer; padding: 1px 2px; border-radius: 2px; }
+@media (max-width: 760px) { .finalgrid { grid-template-columns: 1fr; } }

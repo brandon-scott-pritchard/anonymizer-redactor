@@ -1242,13 +1242,176 @@ function ReviewStep({ state, actions, meta, busy }) {
 
 /* ------------------------------------------------------------- 4. run -- */
 
+// The final check's flagged pages, looked at and fixed here (final_review.py).
+// Kev says a ticked person may still be named on a page, not where: the page
+// is shown as delivered, its likeliest words marked; any words can be chosen,
+// typed, and made a form of a row - then every file of the set holding them
+// is made again and the page read back.
+function FinalReview({ info, meta, onClose }) {
+  const api = useMemo(() => window.makeApi(info.id), [info.id]);
+  const [data, setData] = useState(null);
+  const [at, setAt] = useState(0);
+  const [page, setPage] = useState(null);
+  const [chosen, setChosen] = useState(() => new Set());
+  const [text, setText] = useState("");
+  const [category, setCategory] = useState("person");
+  const [target, setTarget] = useState("");
+  const [stamp, setStamp] = useState(() => Date.now());
+  const [working, setWorking] = useState("");
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const [scale, setScale] = useState(1);
+  const [drag, setDrag] = useState(null);
+  const imgRef = useRef(null);
+  const wrapRef = useRef(null);
+
+  const load = async (keep) => {
+    const d = await api.get(`/api/final/${info.id}`);
+    setData(d);
+    setAt((i) => (keep ? Math.min(i, Math.max(d.flags.length - 1, 0)) : 0));
+    return d;
+  };
+  useEffect(() => { load(false).catch((e) => setError(e.message)); }, [info.id]);
+  const flag = data && data.flags[at];
+  const where = flag ? `member=${encodeURIComponent(flag.file)}&page=${flag.page}` : "";
+  useEffect(() => {
+    if (!flag) { setPage(null); return; }
+    setPage(null); setChosen(new Set()); setText("");
+    api.get(`/api/final/${info.id}/words?${where}`)
+      .then((p) => { setPage(p); setCategory("person"); setTarget(p.suspects.person || ""); })
+      .catch((e) => setError(e.message));
+  }, [where, stamp]);
+  useEffect(() => {
+    if (!page) return;
+    const words = page.words.filter((w) => chosen.has(w.i)).sort((a, b) => a.i - b.i);
+    setText(words.map((w) => w.text).join(" "));
+  }, [chosen, page]);
+  const fit = () => { if (imgRef.current && page && page.width) setScale(imgRef.current.clientWidth / page.width); };
+  useEffect(() => { window.addEventListener("resize", fit); return () => window.removeEventListener("resize", fit); });
+
+  const toggle = (i) => setChosen((was) => { const next = new Set(was); if (next.has(i)) next.delete(i); else next.add(i); return next; });
+  const point = (e) => { const r = wrapRef.current.getBoundingClientRect(); return { x: (e.clientX - r.left) / scale, y: (e.clientY - r.top) / scale }; };
+  const startDrag = (e) => { if (e.target === imgRef.current) { const p = point(e); setDrag({ x0: p.x, y0: p.y, x1: p.x, y1: p.y }); } };
+  const moveDrag = (e) => { if (drag) { const p = point(e); setDrag({ ...drag, x1: p.x, y1: p.y }); } };
+  // the box ends where the button is let go, moved over on the way or not
+  const endDrag = (e) => {
+    if (!drag) return;
+    const end = e && e.clientX !== undefined ? point(e) : { x: drag.x1, y: drag.y1 };
+    const [x0, x1] = [Math.min(drag.x0, end.x), Math.max(drag.x0, end.x)];
+    const [y0, y1] = [Math.min(drag.y0, end.y), Math.max(drag.y0, end.y)];
+    if (x1 - x0 > 3 && y1 - y0 > 3) {
+      const inside = page.words.filter((w) => w.x0 < x1 && w.x1 > x0 && w.y0 < y1 && w.y1 > y0);
+      setChosen((was) => { const next = new Set(was); inside.forEach((w) => next.add(w.i)); return next; });
+    }
+    setDrag(null);
+  };
+
+  const rows = ((data && data.rows) || []).filter((r) => sameKind(r.category, category));
+  const fix = async () => {
+    setError(""); setMessage(""); setWorking("Starting");
+    try {
+      const r = await api.job(api.post(`/api/final/${info.id}/fix`, {
+        member: flag.file, page: flag.page, text, category, target }), (m) => setWorking(m || "Working"));
+      if (r.error) setError(r.error);
+      else {
+        const failed = Object.keys(r.failed || {}).length;
+        setMessage(`Made ${plural(r.remade, "file")} again${failed ? `; ${failed} could not be` : ""}. ` +
+          (r.page_clean ? "That page now reads clean." : "That page is still flagged - look again.") +
+          ` ${plural(r.to_look_at, "page")} left to look at.`);
+      }
+      await load(true);
+      setStamp(Date.now());
+    } catch (e) { setError(e.message); } finally { setWorking(""); }
+  };
+  const dismiss = async () => {
+    setError(""); setMessage("");
+    try { await api.post(`/api/final/${info.id}/dismiss`, { member: flag.file, page: flag.page }); await load(true); }
+    catch (e) { setError(e.message); }
+  };
+  const finish = async () => {
+    try { await api.post(`/api/final/${info.id}/finish`, {}); onClose(true); }
+    catch (e) { setError(e.message); }
+  };
+
+  const suspects = new Set(page ? page.suspects.words : []);
+  return html`<div class="overlay">
+    <div class="modal wide finalreview">
+      <h3>Flagged pages - ${info.name}</h3>
+      ${error ? html`<p class="fielderror" role="alert">${error}</p>` : null}
+      ${message ? html`<p class="status-ok">${message}</p>` : null}
+      ${!data ? html`<p class="hint">Loading…</p>` : !data.flags.length ? html`
+        <p class="status-ok">Nothing is left to look at.</p>
+        <p class="hint">Finishing lets go of this set's copies of the documents and its
+          password, as after any run.</p>
+        <div class="bar"><span class="spacer"></span>
+          <button class="primary" onClick=${finish}>Finish</button></div>` : html`
+      <div class="finalgrid">
+        <ol class="flaglist">${data.flags.map((f, i) => html`<li key=${f.file + f.page}>
+          <button class=${i === at ? "current" : ""} onClick=${() => setAt(i)}>
+            ${f.file} - page ${f.page}
+            <span class="hint">${f.kev != null ? ` Kev ${Math.round(f.kev * 100)}%` : ""}
+              ${f.matched && f.matched.length ? ` reads ${f.matched.join(", ")}` : ""}</span>
+          </button></li>`)}</ol>
+        <div class="finalpage">
+          ${!data.originals ? html`<p class="warn">This set's original documents are no longer
+            to hand, so a page cannot be made again here.</p>` : null}
+          ${!page ? html`<p class="hint">Reading the page…</p>` : page.image ? html`
+            <p class="hint small">Marked in yellow: where a ticked name may still be. Click words
+              to choose them, or drag a box across them.</p>
+            <div class="pagewrap" ref=${wrapRef} onMouseDown=${startDrag} onMouseMove=${moveDrag}
+                 onMouseUp=${endDrag} onMouseLeave=${endDrag}>
+              <img ref=${imgRef} draggable="false" onLoad=${fit}
+                   src=${`/api/final/${info.id}/image?${where}&t=${stamp}`} alt=${`${flag.file}, page ${flag.page}`} />
+              ${page.words.map((w) => html`<span key=${w.i}
+                  class=${"fword" + (chosen.has(w.i) ? " chosen" : suspects.has(w.i) ? " suspect" : "")}
+                  title=${w.text} onMouseDown=${(e) => e.stopPropagation()}
+                  onClick=${() => toggle(w.i)}
+                  style=${{ left: `${w.x0 * scale}px`, top: `${w.y0 * scale}px`,
+                            width: `${(w.x1 - w.x0) * scale}px`, height: `${(w.y1 - w.y0) * scale}px` }}></span>`)}
+              ${drag ? html`<span class="dragbox" style=${{
+                  left: `${Math.min(drag.x0, drag.x1) * scale}px`, top: `${Math.min(drag.y0, drag.y1) * scale}px`,
+                  width: `${Math.abs(drag.x1 - drag.x0) * scale}px`, height: `${Math.abs(drag.y1 - drag.y0) * scale}px` }}></span>` : null}
+            </div>` : html`
+            <p class="hint small">A Word file has no pages to draw: its words, marked in yellow where
+              a ticked name may still be. Click words to choose them.</p>
+            <div class="wordflow">${page.words.map((w) => html`<span key=${w.i}
+                class=${"wword" + (chosen.has(w.i) ? " chosen" : suspects.has(w.i) ? " suspect" : "")}
+                onClick=${() => toggle(w.i)}>${w.text}</span> `)}</div>`}
+          <div class="row"><span>Replace</span>
+            <input type="text" value=${text} placeholder="Choose words on the page, or type them"
+                   onInput=${(e) => setText(e.target.value)} /></div>
+          <div class="row"><span>It is</span>
+            <select value=${category} onChange=${(e) => { setCategory(e.target.value); setTarget(""); }}>
+              ${meta.categories.map((c) => html`<option key=${c.key} value=${c.key}>${c.label}</option>`)}
+            </select></div>
+          <div class="row"><span>Whose</span>
+            <select value=${target} onChange=${(e) => setTarget(e.target.value)}>
+              <option value="">A new row of its own</option>
+              ${rows.map((r) => html`<option key=${r.key} value=${r.key}>${r.text} - ${r.replacement}</option>`)}
+            </select></div>
+          <div class="bar">
+            <button onClick=${dismiss} disabled=${!!working}>Nothing to fix on this page</button>
+            <span class="spacer"></span>
+            ${working ? html`<span class="hint">${working}…</span>` : null}
+            <button class="primary" disabled=${!!working || !text.trim() || !data.originals} onClick=${fix}>
+              Replace it in every file it is in</button>
+          </div>
+        </div>
+      </div>`}
+      <div class="bar"><span class="spacer"></span><button onClick=${() => onClose(false)}>Close</button></div>
+    </div>
+  </div>`;
+}
+
+
 // The run is queued, not run here: the queue runs every queued set one after
 // another, unattended, into the results folder - a folder per set.
-function RunStatus({ info, download, unqueue }) {
+function RunStatus({ info, download, unqueue, lookAt }) {
   const run = info.run || {};
   const audit = run.audit || {};
-  // pages still to look at
-  const toLook = audit.still !== undefined ? audit.still : audit.flagged || 0;
+  // pages still to look at, on the review screen while the set keeps them
+  const toLook = run.to_look_at !== undefined ? run.to_look_at
+    : audit.still !== undefined ? audit.still : audit.flagged || 0;
   switch (info.state) {
     case "queued":
       return html`<div>Queued - it runs when every set before it has.
@@ -1272,9 +1435,11 @@ function RunStatus({ info, download, unqueue }) {
             Final check: ${n(audit.pages)} page(s) read back by ${audit.kev}.
             ${audit.fixed ? ` ${n(audit.fixed)} page(s) fixed by the local model and rechecked.` : ""}
             ${audit.cleared ? ` ${n(audit.cleared)} page(s) cleared by the local model.` : ""}
-            ${toLook ? ` ${n(toLook)} page(s) to look at - listed in final-check.txt.`
+            ${toLook ? ` ${n(toLook)} page(s) to look at.`
               : audit.flagged ? " Nothing is left to look at - final-check.txt lists what was fixed."
               : " No page was flagged."}</span>` : null}
+        ${toLook && run.to_look_at ? html`<div><button class="primary" onClick=${lookAt}>
+            Look at the ${plural(toLook, "flagged page")} →</button></div>` : null}
         <br /><span class="hint">Saved in ${run.results}</span>
         <div class="downloads">
           <a href=${download("archive")} download><button>Archive</button></a>
@@ -1288,6 +1453,7 @@ function RunStatus({ info, download, unqueue }) {
 
 function RunStage({ filled, todo, work, options, sets, meta, busy, actions, notice }) {
   const anyDone = filled.some((info) => info.state === "done");
+  const [reviewing, setReviewing] = useState(null);
   return html`
     <div class="card">
       <h2>Run every set</h2>
@@ -1326,6 +1492,7 @@ function RunStage({ filled, todo, work, options, sets, meta, busy, actions, noti
                         onClick=${() => actions.password(info.id, generatePassword())}>New</button>
               </div>`}</td>
               <td><${RunStatus} info=${info} unqueue=${() => actions.unqueue(info)}
+                    lookAt=${() => setReviewing(info)}
                     download=${(kind) => actions.download(info.id, kind)} /></td>
             </tr>`;
           })}
@@ -1342,7 +1509,9 @@ function RunStage({ filled, todo, work, options, sets, meta, busy, actions, noti
         without its password it cannot be opened.</p>
       ${anyDone ? html`<p class="warn">Keep the mapping keys, the reports and
         final-check.txt away from anything you deliver.</p>` : null}
-    </div>`;
+    </div>
+    ${reviewing ? html`<${FinalReview} info=${reviewing} meta=${meta}
+        onClose=${() => setReviewing(null)} />` : null}`;
 }
 
 /* ------------------------------------------------------------------- app -- */

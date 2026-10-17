@@ -29,10 +29,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import (__version__, caption, categories, feedback, grouping, merges, name_screen,
+from . import (__version__, caption, categories, feedback, final_review, grouping, merges,
+               name_screen,
                names as _names, ner, ocr_pool, officials, parties, pdf_processor, pipeline,
                review, sets)
 from .engine import Settings
@@ -995,6 +996,86 @@ def _find_set(set_id: str) -> sets.DocSet:
 
 @app.get("/api/sets")
 def list_sets():
+    return _sets_payload()
+
+
+# --------------------------------------------------------------------------
+# the final check's flagged pages, looked at and fixed - see final_review.py
+# --------------------------------------------------------------------------
+
+
+def _final_set(set_id: str) -> sets.DocSet:
+    doc_set = _find_set(set_id)
+    if doc_set.run_state != "done" or doc_set.run_result is None \
+            or doc_set.run_result.archive is None:
+        raise HTTPException(409, "This set has no finished run to look at.")
+    return doc_set
+
+
+def _flag(doc_set: sets.DocSet, member: str, number: int) -> dict:
+    found = next((f for f in doc_set.final_flags
+                  if f["file"] == member and f["page"] == number), None)
+    if found is None:
+        raise HTTPException(404, "That page is not on the list to look at.")
+    return found
+
+
+@app.get("/api/final/{set_id}")
+def final_pages(set_id: str):
+    doc_set = _final_set(set_id)
+    return {"flags": doc_set.final_flags,
+            "rows": final_review.choices(doc_set.store),
+            "originals": bool(doc_set.files) and all(Path(f).exists() for f in doc_set.files)}
+
+
+@app.get("/api/final/{set_id}/image")
+def final_image(set_id: str, member: str, page: int):
+    doc_set = _final_set(set_id)
+    _flag(doc_set, member, page)
+    png = final_review.page_image(Path(doc_set.run_result.archive), member, page)
+    return Response(content=png, media_type="image/png",
+                    headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/final/{set_id}/words")
+def final_words(set_id: str, member: str, page: int):
+    doc_set = _final_set(set_id)
+    flag = _flag(doc_set, member, page)
+    out = final_review.page_words(Path(doc_set.run_result.archive), member, page)
+    out["suspects"] = final_review.suspects(out["words"], doc_set.store, flag.get("matched") or [])
+    return out
+
+
+@app.post("/api/final/{set_id}/fix")
+async def final_fix(set_id: str, request: Request):
+    doc_set = _final_set(set_id)
+    body = await request.json()
+    member, number = str(body.get("member", "")), int(body.get("page", 0))
+    _flag(doc_set, member, number)
+    text, category = str(body.get("text", "")), str(body.get("category", "person"))
+    target = str(body.get("target", ""))
+    if category not in {c.key for c in categories.CATEGORIES}:
+        raise HTTPException(422, "No such type.")
+
+    def work(progress):
+        return final_review.fix(doc_set, member, number, text, category, target, progress)
+
+    return {"job": _start_job(work)}
+
+
+@app.post("/api/final/{set_id}/dismiss")
+async def final_dismiss(set_id: str, request: Request):
+    doc_set = _final_set(set_id)
+    body = await request.json()
+    member, number = str(body.get("member", "")), int(body.get("page", 0))
+    _flag(doc_set, member, number)
+    return {"to_look_at": final_review.dismiss(doc_set, member, number)}
+
+
+@app.post("/api/final/{set_id}/finish")
+def final_finish(set_id: str):
+    doc_set = _final_set(set_id)
+    sets.finish_final(doc_set)
     return _sets_payload()
 
 
