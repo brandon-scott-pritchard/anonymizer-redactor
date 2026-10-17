@@ -43,6 +43,9 @@ def selftest() -> int:
     iban_ok, iban_note = _iban_check()
     lines.append(f"IBAN check digits:    {'OK  ' if iban_ok else 'FAIL'} {iban_note}")
 
+    marks_ok, marks_note = _page_marks()
+    lines.append(f"flagged-page marks:   {'OK  ' if marks_ok else 'FAIL'} {marks_note}")
+
     report = "\n".join(lines)
     print(report)
     # the Windows build is windowed (console=False), so stdout goes nowhere;
@@ -56,7 +59,21 @@ def selftest() -> int:
         print(f"written to {target}")
         break
 
-    return 0 if ok and model_ok and photos_ok and workers_ok and sort_ok and iban_ok else 1
+    return 0 if (ok and model_ok and photos_ok and workers_ok and sort_ok and iban_ok
+                 and marks_ok) else 1
+
+
+def _page_marks() -> tuple[bool, str]:
+    """The flagged-page screen marks a misread name with RapidFuzz and
+    Jellyfish; a missing compiled part fails its first page."""
+    try:
+        from redactor import final_review, review
+        store, _ = review.build_store([("Abigail N Okafor", "person")])
+        words = [{"i": 0, "text": "Paid"}, {"i": 1, "text": "OKAF0R"}]
+        marked = final_review.suspects(words, store, [])["words"]
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    return marked == [1], f"a misread surname {'is' if marked == [1] else 'is NOT'} marked"
 
 
 def _name_sort() -> tuple[bool, str]:

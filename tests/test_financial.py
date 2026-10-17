@@ -678,3 +678,40 @@ def test_a_handle_holding_a_ticked_name_goes_whole():
     store, _ = review.build_store([("Abigail N Okafor", "person")])
     hits = engine.scan_text("Facebook: abby.okafor22", store, Settings(pdf_mode="anonymize"))
     assert [(h.category, h.text) for h in hits] == [("social_handle", "abby.okafor22")]
+
+
+# ---------------------------------------------------------------------------
+# found by the Fable review, 2026-10-17
+# ---------------------------------------------------------------------------
+
+
+def test_a_checking_tail_after_chk_on_a_transfer_line_is_an_account():
+    found = scanned("Online Transfer From Chk ...8631 Transaction#: 33422313702")
+    assert ("...8631", "masked_account") in found
+
+
+def test_a_masked_tail_is_never_a_check_number():
+    assert ("****4417", "credit_card") in scanned("CHECK CARD TRANSACTION ****4417 WALMART")
+    assert ("1043", "check_number") in scanned("Check #1043 paid")
+
+
+def test_the_surname_holder_is_a_surname():
+    from redactor import review
+    store, _ = review.build_store([("Sarah J Holder", "person")])
+    assert [e.canonical for e in store.persons()] == ["Sarah J Holder"]
+
+
+def test_an_account_number_in_a_sentence_is_found_by_its_own_search():
+    assert ("4465400449", "bank_account") in scanned("Your account number is 4465400449.")
+    assert ("8102 4477 9301", "bank_account") in scanned("The account was 8102 4477 9301 until May.")
+    assert scanned("This account is 30 days past due") == []
+
+
+def test_a_web_address_without_www_goes_when_it_holds_a_ticked_name():
+    from redactor import engine, review
+    from redactor.engine import Settings
+
+    store, _ = review.build_store([("Abigail N Okafor", "person")])
+    hits = engine.scan_text("See instagram.com/okaforlaw today", store, Settings(pdf_mode="anonymize"))
+    assert [(h.category, h.text) for h in hits] == [("url", "instagram.com/okaforlaw")]
+    assert engine.scan_text("Shop at Amazon.com now", store, Settings()) == []

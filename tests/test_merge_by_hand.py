@@ -78,3 +78,16 @@ def test_a_party_row_merged_by_hand_and_split_back_is_the_partys_again():
     assert (row.fixed, row.party, row.kind, row.replacement) == (
         True, "petitioner", "address", "[PETITIONER-ADDRESS-1]")
     assert grouping.head_of(store, row) is row
+
+
+def test_a_party_person_merged_and_split_back_keeps_their_invented_name():
+    from redactor import merges
+
+    store = _store()
+    tyson, abigail = _row(store, "Tyson J Okafor"), _row(store, "Abigail N Okafor")
+    tyson.fixed, tyson.party, tyson.kind = True, "respondent", "name"
+    before = tyson.replacement
+    merges.merge_by_hand(store, tyson, abigail)
+    grouping.split(store, tyson)
+    merges.settle(store)
+    assert tyson.replacement == before

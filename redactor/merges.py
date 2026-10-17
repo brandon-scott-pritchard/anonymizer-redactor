@@ -233,7 +233,10 @@ def _unmerge(store: MappingStore, via: str) -> None:
             form.group_note = ""
         if form is not owner and owner is not None and form.key not in store.split_out:
             form.parent = owner.key                # back under the row it came with
-    if owner is not None and owner.is_person and owner.person is not None:
+    # a party's row merged by hand and split back has its own invented name
+    # again (grouping.split restored it): it is not to be given a new one
+    if owner is not None and owner.is_person and owner.person is not None \
+            and not owner.fixed:
         # its invented name was the head's, in its shape - and an invented
         # surname follows the real one, so it would have kept the head's
         owner.surrogate = None

@@ -594,6 +594,7 @@ class RunQueue:
                 error = "the app was closed while it ran - run it again"
             doc_set.run_state, doc_set.run_error = "failed", error
             doc_set.run_message = "Failed"
+            doc_set.run_password, doc_set.final_flags = "", []   # nothing to fix
             return
         doc_set.run_result = result
         if getattr(result, "store", None) is not None:
@@ -644,8 +645,11 @@ def finish_final(doc_set: DocSet) -> None:
     are not kept a moment longer."""
     from . import pdf_processor
 
+    from . import final_review
+
     doc_set.final_flags = []
     doc_set.run_password = ""
+    final_review.forget_pictures(doc_set.id)
     pdf_processor.forget_ocr(doc_set.files)
     shutil.rmtree(doc_set.uploads, ignore_errors=True)
 

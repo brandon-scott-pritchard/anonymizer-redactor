@@ -675,33 +675,50 @@ def _whole_handles(hits: list[Hit], store: MappingStore) -> list[Hit]:
             and _holds_ticked_name(h.text, parts) else h for h in hits]
 
 
+# A web address written without "http" or "www": "instagram.com/okaforlaw",
+# "okaforlaw.com". Not after an "@" (an email's domain is the email's) nor
+# inside a longer address the detectors above already took.
+_BARE_DOMAIN = re.compile(
+    r"(?<![\w@.\-/])(?:[a-z0-9][a-z0-9\-]*\.)+(?:com|net|org|co|me|io|tv|app|us|info|biz|edu|gov)"
+    r"(?![\w\-])(?:/[^\s<>\"')\]]*)?", re.IGNORECASE)
+
+
+def _url_spans(text: str):
+    """(start, end, value) for every web address, with "www" or without."""
+    found = []
+    for det in _URL_DETECTORS:
+        for m in det.regex.finditer(text):
+            if m.group(det.group):
+                found.append((*m.span(det.group), m.group(det.group)))
+    for m in _BARE_DOMAIN.finditer(text):
+        if not any(a <= m.start() < b for a, b, _v in found):
+            found.append((m.start(), m.end(), m.group(0)))
+    return found
+
+
 def url_hits(text: str, store: MappingStore, redact: bool, protected=(),
              register: bool = True) -> list[Hit]:
-    lower = text.lower()
-    if not any(k in lower for d in _URL_DETECTORS for k in d.keywords):
+    if "." not in text:
         return []
     parts = None
     hits = []
-    for det in _URL_DETECTORS:
-        for m in det.regex.finditer(text):
-            value = m.group(det.group)
-            start, end = m.span(det.group)
-            if not value or _overlaps(start, end, list(protected)):
+    for start, end, value in _url_spans(text):
+        if _overlaps(start, end, list(protected)):
+            continue
+        if parts is None:
+            parts = _ticked_name_parts(store)
+        if not _holds_ticked_name(value, parts):
+            continue
+        entity = store.get("url", value)
+        if entity is None:
+            if not register:
                 continue
-            if parts is None:
-                parts = _ticked_name_parts(store)
-            if not _holds_ticked_name(value, parts):
-                continue
-            entity = store.get("url", value)
-            if entity is None:
-                if not register:
-                    continue
-                entity = store.add_value("url", value)
-            if not entity.enabled:
-                continue
-            hits.append(Hit(start, end, value, "url",
-                            REDACTION_TEXT if redact else entity.replacement,
-                            entity.key, URL_PRIORITY))
+            entity = store.add_value("url", value)
+        if not entity.enabled:
+            continue
+        hits.append(Hit(start, end, value, "url",
+                        REDACTION_TEXT if redact else entity.replacement,
+                        entity.key, URL_PRIORITY))
     return hits
 
 

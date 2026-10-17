@@ -105,3 +105,51 @@ def test_suspects_mark_a_ticked_first_names_nickname():
     words = [{"i": i, "text": t} for i, t in enumerate(["Transfer", "to", "Billy", "Harringtn"])]
     marked = final_review.suspects(words, store, [])["words"]
     assert marked == [2, 3]
+
+
+def test_a_kind_left_as_written_is_refused_not_reported_clean(ran, monkeypatch):
+    """A loan number filed as a loan number is never replaced; saying the page
+    reads clean would be false."""
+    doc_set, members = ran
+    monkeypatch.setenv("REDACTOR_KEV", "0")
+    done = final_review.fix(doc_set, members[0], 1, "88213377", "loan_number", "")
+    assert done.get("error") and "left as written" in done["error"]
+    assert "88213377" in _delivered(doc_set.run_result.archive, members[0])
+    assert "loan_number" not in {k["key"] for k in final_review.kinds(doc_set.run_settings)}
+
+
+def test_a_file_that_cannot_be_made_again_is_never_reported_clean(ran, monkeypatch):
+    doc_set, members = ran
+    monkeypatch.setenv("REDACTOR_KEV", "0")
+    for outcome in doc_set.run_result.outcomes:
+        outcome.source.unlink()                      # the original is gone
+    done = final_review.fix(doc_set, members[0], 1, "88213377", "bank_account", "")
+    assert not done["page_clean"] and "could not be made again" in done["how"]
+    assert any(f["file"] == members[0] for f in doc_set.final_flags)
+
+
+def test_text_still_on_the_page_keeps_the_page_on_the_list(ran, monkeypatch):
+    """A file made again that still holds what was chosen - a value the
+    literal pass will not take, here stood in for by a remake that changes
+    nothing - is not clean, and the page stays listed."""
+    from redactor import audit
+
+    doc_set, members = ran
+    monkeypatch.setenv("REDACTOR_KEV", "0")
+    monkeypatch.setattr(audit, "remake", lambda *a, **k: {})
+    done = final_review.fix(doc_set, members[0], 1, "Locker", "bank_account", "")
+    assert not done["page_clean"] and "still on the page" in done["how"]
+    assert any(f["file"] == members[0] and f["page"] == 1 for f in doc_set.final_flags)
+
+
+def test_kev_unsure_pages_are_listed_after_the_flagged_ones(tmp_path):
+    from redactor import audit
+
+    check = audit.Check(kev_note="Kev", pages=3)
+    check.flags = [audit.Flag("a.pdf", 1, 0.8)]
+    check.doubtful = [audit.Flag("b.pdf", 2, 0.35, doubtful=True)]
+    summary = check.summary()
+    assert [f["unsure"] for f in summary["flags"]] == [False, True]
+    check.path = tmp_path / "final-check.txt"
+    text = audit.render(check)
+    assert "Kev unsure - 1 page(s)" in text and "b.pdf, page 2" in text

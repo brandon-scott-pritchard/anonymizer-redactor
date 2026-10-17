@@ -747,6 +747,14 @@ DETECTORS: tuple[Detector, ...] = (
                                V_ACCOUNT_ID), group=1, priority=82,
        digit=True, kw=("bank", "checking", "savings", "deposit", "acct", "account",
                        "a/c", "money", "cd", "meter", "service")),
+    # The second search, apart from the first: a letter's sentence - "Your
+    # account number is 4465400449", "the account was 8102 4477 9301". Only
+    # "is" or "was" may stand between the title and the number here; the
+    # title rule above still wants white space alone.
+    _d("bank_account",
+       rf"\b(?:account|acct\.?|a/c)(?:[^\S\n]*(?:number|no\.?|num|#))?[^\S\n]+(?:is|was)"
+       rf"[^\S\n]*[:#]?[^\S\n]*({V_ACCOUNT_ID})",
+       group=1, priority=82, digit=True, kw=("account", "acct", "a/c")),
     _d("loan_number", labeled(("loan", "mortgage", "escrow", "note\\s*(?:no\\.?|number|#)", "deed\\s+of\\s+trust",
                                "heloc", "line\\s+of\\s+credit", "promissory\\s+note"),
                               V_ACCOUNT_ID), group=1, priority=86,
@@ -1270,9 +1278,12 @@ _PHONE_LABEL_BEFORE = re.compile(
 _ACCOUNT_LABEL_BEFORE = re.compile(
     r"(?i)\b(?:account|acct|a/c|card)\.?(?:[^\S\n]*(?:no\.?|nos\.?|number|num|#|ending(?:"
     r"[^\S\n]+in)?))?[^\S\n]*[:#\-]?[^\S\n]*$")
-# a reference, not an account: "Transaction 4417 8825", "Conf # 99187263"
+# a reference, not an account: "Transaction 4417 8825", "Conf # 99187263".
+# Not "Chk" or "CK": on a transfer line they are the checking account -
+# "Online Transfer From Chk ...8631" - and reading them as a reference label
+# shipped the account's tail.
 _REFERENCE_LABEL_BEFORE = re.compile(
-    r"(?i)\b(?:check|chk|cheque|ck|transaction|trans|txn|tran|ref(?:erence)?|confirmation|"
+    r"(?i)\b(?:check|cheque|transaction|trans|txn|tran|ref(?:erence)?|confirmation|"
     r"conf|trace|order|tracking|auth(?:orization)?|invoice|receipt)\b\.?"
     r"[^\S\n]*(?:no\.?|number|num|id|#|code)?[^\S\n]*[:#\-]?[^\S\n]*$")
 _ZIP_PLUS4 = re.compile(r"^\d{5}-\d{4}$")
@@ -1290,12 +1301,23 @@ def _line_before(text: str, start: int, reach: int = 40) -> str:
     return text[max(line_start, start - reach):start]
 
 
+# A mask run in a value: "****4417", "XXXX-XXXX-4417", "...6613".
+_MASKED_VALUE = re.compile(_MASK_RUN)
+# The kinds no one prints masked. "CHECK CARD TRANSACTION ****4417" read as a
+# check number - a kind left as written - and the card's tail shipped.
+_NEVER_MASKED = frozenset({"check_number", "order_number", "tracking_number",
+                           "claim_number", "policy_number", "routing_number"})
+
+
 def _not_a_number_of_its_kind(category: str, value: str, text: str, start: int) -> bool:
     """True when ``value``, found by a ``category`` detector, is a phone, a
-    date, money, a ZIP, a routing number or a reference instead."""
+    date, money, a ZIP, a routing number or a reference instead - or a masked
+    account's tail taken by a kind that is never masked."""
     if category not in NUMBER_CATEGORIES:
         return False
     cleaned = value.strip()
+    if category in _NEVER_MASKED and _MASKED_VALUE.search(cleaned):
+        return True
     before = _line_before(text, start)
     account = category in ACCOUNT_CATEGORIES
     if phone_shaped(cleaned) and not (account and _ACCOUNT_LABEL_BEFORE.search(before)):
@@ -1313,7 +1335,9 @@ def _not_a_number_of_its_kind(category: str, value: str, text: str, start: int) 
     line = text[text.rfind("\n", 0, start) + 1:len(text) if line_end < 0 else line_end]
     if valid_routing(cleaned) and _ROUTING_ON_LINE.search(line):
         return True
-    if _REFERENCE_LABEL_BEFORE.search(before):
+    # a masked value is an account's tail whatever stands before it: nobody
+    # masks a check, a reference or an order number
+    if _REFERENCE_LABEL_BEFORE.search(before) and not _MASKED_VALUE.search(cleaned):
         return True
     return False
 

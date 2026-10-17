@@ -50,7 +50,8 @@ KEV_RUN = "jaredpalmer/kev-4b@v1.0"
 # invented name scored 0.61 - so the higher one: a flag should be worth a look.
 # (Telling Kev the invented names lowered leaks' scores as much as clean ones.)
 KEV_THRESHOLD = 0.5
-# Kev's score at or above which the local model reads the page too. On the
+# Kev's score at or above which a page is listed as unsure - below the flags,
+# worth a look (the local model that read these pages was taken out). On the
 # corpus test, the model reading pages Kev scored 0.3 or more, beside the
 # matcher's, caught 74 of 77 leaks against Kev's 70, flagged none of 120
 # clean pages, and read under half of a test set a third leaks - far less of a
@@ -243,8 +244,8 @@ class Flag:
     # (quote, person): what the local model found on it that could not be fixed
     quotes: list[tuple[str, str]] = field(default_factory=list)
     note: str = ""
-    # not flagged, only doubtful: Kev scored it KEV_ASK_LLM or more. The local
-    # model reads it; listed only when that model finds a real name on it
+    # not flagged, only doubtful: Kev scored it KEV_ASK_LLM or more. Listed
+    # as unsure, after the flagged pages
     doubtful: bool = False
 
 
@@ -275,9 +276,13 @@ class Check:
                 "fixed": len(self.fixed), "cleared": len(self.cleared),
                 "still": len(self.flags) if self.still is None else len(self.still),
                 "llm": self.llm_note,
-                # each flagged page, for the app to show it: never its text
+                # each flagged page, for the app to show it: never its text -
+                # and the pages Kev is unsure of, listed after them
                 "flags": [{"file": f.file, "page": f.page, "kev": f.kev,
-                           "matched": list(f.matched)} for f in self.flags]}
+                           "matched": list(f.matched), "unsure": False} for f in self.flags]
+                + [{"file": f.file, "page": f.page, "kev": f.kev, "matched": list(f.matched),
+                    "unsure": True} for f in self.doubtful],
+                "unsure": len(self.doubtful)}
 
 
 def _ticked_people(store) -> list[str]:
@@ -434,6 +439,12 @@ def render(check: Check) -> str:
             lines.append("")
             for flag in check.flags:
                 lines.append(f"  {flag.file}, page {flag.page}: {'; '.join(_why(flag))}")
+        if check.doubtful:
+            lines += ["", f"Kev unsure - {len(check.doubtful)} page(s), worth a look:", ""]
+            for flag in check.doubtful:
+                lines.append(f"  {flag.file}, page {flag.page}: Kev "
+                             f"{flag.kev:.0%}" if flag.kev is not None else
+                             f"  {flag.file}, page {flag.page}")
         return "\n".join(lines) + "\n"
 
     if not check.flags:
@@ -521,17 +532,20 @@ def _replace_members(archive: Path, made: dict[str, Path]) -> None:
 
 
 def recheck(archive: Path, store, members: list[str], kev_url: str | None,
-            progress=lambda message, fraction: None) -> list[Flag]:
-    """The pages of ``members`` read back again: the flags they still raise."""
+            progress=lambda message, fraction: None) -> tuple[list[Flag], dict]:
+    """The pages of ``members`` read back again: the flags they still raise -
+    the pages Kev is unsure of too - and each page's text, held in memory
+    for the caller to look for what was chosen."""
     check = Check(kev_note="")
     reader = _Reader(store, check, kev_url)
-    flags = []
+    flags, texts = [], {}
     for member, number, text in _read_members(Path(archive), members, progress,
                                                "Reading the fixed pages back"):
+        texts[(member, number)] = text
         flag = reader.flag(member, number, text)
-        if flag is not None and not flag.doubtful:
+        if flag is not None:
             flags.append(flag)
-    return flags
+    return flags, texts
 
 
 def write_pending(path: Path, pages: int, kev_note: str, flags: list[dict],
@@ -540,7 +554,9 @@ def write_pending(path: Path, pages: int, kev_note: str, flags: list[dict],
     look at, and each page looked at there - fixed, or nothing to fix."""
     check = Check(kev_note=kev_note, pages=pages, path=Path(path))
     check.flags = [Flag(f["file"], f["page"], f.get("kev"), list(f.get("matched") or []))
-                   for f in flags]
+                   for f in flags if not f.get("unsure")]
+    check.doubtful = [Flag(f["file"], f["page"], f.get("kev"), list(f.get("matched") or []),
+                           doubtful=True) for f in flags if f.get("unsure")]
     text = render(check)
     if done:
         text = text.replace("Nothing was changed.", "Pages fixed on the review screen were "

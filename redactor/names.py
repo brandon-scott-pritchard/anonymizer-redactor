@@ -39,10 +39,11 @@ RISKY_SINGLE_TOKENS = {
 # line's confirmation ("Mary Cox Conf", "Mary Pratt ID"). Read as the surname,
 # "Ret" swallowed the household's own Rebecca L Blackburn as a shorter form
 # of it, and every "... Conf" shared one invented surname.
+# Not "Holder": a common surname (Sarah J Holder lost hers to this list).
 NOT_A_NAME_TAIL = frozenset("""
 ret retirement ira roth sep trust ttee trustee cust custodian acct account accounts jt jtwros
 joint pod tod est sav savings chk checking conf cont confirmation ref memo pmt payment id p2p
-txn trans dda statement summary holder holders owner owners member primary secondary
+txn trans dda statement summary owner owners member primary secondary
 """.split())
 
 

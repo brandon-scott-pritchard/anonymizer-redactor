@@ -34,6 +34,35 @@ def _member_bytes(archive: Path, member: str) -> bytes:
         return zf.read(member)
 
 
+# The page pictures made by the last page reads, for the image requests that
+# follow: the picture is drawn inside the job (one step at a time in this
+# process, as the PDF library needs), and only handed out here.
+_PICTURES: dict[tuple[str, str, int], bytes] = {}
+_PICTURES_KEPT = 8
+
+
+def read_page(doc_set, member: str, number: int, matched: list[str]) -> dict:
+    """The page's words, its marked words and - drawn and kept for the image
+    request - its picture. Run as a job."""
+    archive = Path(doc_set.run_result.archive)
+    out = page_words(archive, member, number)
+    out["suspects"] = suspects(out["words"], doc_set.store, matched)
+    if out["image"]:
+        _PICTURES[(doc_set.id, member, number)] = page_image(archive, member, number)
+        while len(_PICTURES) > _PICTURES_KEPT:
+            _PICTURES.pop(next(iter(_PICTURES)))
+    return out
+
+
+def picture(set_id: str, member: str, number: int) -> bytes | None:
+    return _PICTURES.get((set_id, member, number))
+
+
+def forget_pictures(set_id: str) -> None:
+    for key in [k for k in _PICTURES if k[0] == set_id]:
+        _PICTURES.pop(key, None)
+
+
 def page_image(archive: Path, member: str, number: int) -> bytes:
     """The delivered page as a PNG."""
     import pymupdf
@@ -154,6 +183,16 @@ def choices(store) -> list[dict]:
 # the fix
 # --------------------------------------------------------------------------
 
+def kinds(settings) -> list[dict]:
+    """The types a chosen text may be given: those the run replaces. A kind
+    left as written by default - a loan or check number - would be filed and
+    never replaced."""
+    from . import categories
+
+    on = set(getattr(settings, "enabled_categories", ()) or ())
+    return [{"key": c.key, "label": c.label} for c in categories.CATEGORIES if c.key in on]
+
+
 def register(store, text: str, category: str, target_key: str = "") -> str:
     """``text`` made a value the run replaces: a written form of the target
     row, or a row of its own. "" when done, else why not."""
@@ -227,12 +266,16 @@ def fix(doc_set, member: str, number: int, text: str, category: str, target_key:
         progress=lambda message, fraction: None) -> dict:
     """Register the choice, make every file holding it again, write the
     mapping key again, read the changed files back. What happened, for the
-    screen."""
+    screen: a page is clean only when its file was made again, neither the
+    matcher nor Kev flags it, and the chosen text is no longer on it."""
     from . import audit, mapping, models
 
     result, store = doc_set.run_result, doc_set.store
     if result is None or result.archive is None:
         return {"error": "This set has no delivered archive to fix."}
+    if category not in {k["key"] for k in kinds(doc_set.run_settings)}:
+        return {"error": "That type is left as written in this run, so it would not be "
+                         "replaced - choose the type it is replaced as."}
     refused = register(store, text, category, target_key)
     if refused:
         return {"error": refused}
@@ -244,23 +287,47 @@ def fix(doc_set, member: str, number: int, text: str, category: str, target_key:
         mapping.write_encrypted_key(store, Path(result.key_path), doc_set.run_password)
     progress("Reading the fixed pages back", 0.6)
     remade = [m for m in members if m not in failed]
-    with models.SLOT.use("kev") as kev_url:
-        again = audit.recheck(Path(result.archive), store, remade, kev_url, progress) \
-            if remade else []
+    again, texts = [], {}
+    if remade:
+        def waiting() -> None:
+            progress("Waiting for Kev - another set's final check is using it", 0.6)
+        with models.SLOT.use("kev", on_wait=waiting) as kev_url:
+            again, texts = audit.recheck(Path(result.archive), store, remade, kev_url, progress)
     still = {(f.file, f.page) for f in again}
-    # every page of a remade file is as it now reads: flagged again, or clean
+    # the files the chosen text is still written in, read back
+    left = sorted({m for (m, _n), t in texts.items() if _still_written(text, t)})
+    text_gone = not _still_written(text, texts.get((member, number), ""))
+    # every page of a remade file is as it now reads: flagged, unsure, or clean
     kept = [f for f in doc_set.final_flags if f["file"] not in remade]
-    kept += [{"file": f.file, "page": f.page, "kev": f.kev, "matched": list(f.matched)}
-             for f in again]
+    kept += [{"file": f.file, "page": f.page, "kev": f.kev, "matched": list(f.matched),
+              "unsure": bool(f.doubtful)} for f in again]
+    if member in remade and not text_gone and (member, number) not in still:
+        # the chosen text is still on the page: it stays on the list
+        kept.append({"file": member, "page": number, "kev": None, "matched": [text],
+                     "unsure": False})
     kept.sort(key=lambda f: (f["file"], f["page"]))
     doc_set.final_flags = kept
-    _log(doc_set, member, number,
-         "fixed and read back clean" if (member, number) not in still
-         else "fixed, still flagged when read back")
+    clean = member in remade and text_gone and (member, number) not in still
+    if member in failed:
+        how = f"could not be made again - {failed[member]}"
+    elif not text_gone:
+        how = "made again, but the chosen text is still on the page"
+    elif not clean:
+        how = "fixed, still flagged when read back"
+    else:
+        how = "fixed and read back clean"
+    _log(doc_set, member, number, how)
     _write(doc_set)
-    return {"remade": len(remade), "failed": failed,
-            "page_clean": (member, number) not in still,
-            "to_look_at": len(kept)}
+    return {"remade": len(remade), "failed": failed, "page_clean": clean, "how": how,
+            "still_written_in": left, "to_look_at": len(kept)}
+
+
+def _still_written(text: str, page_text: str) -> bool:
+    words = text.split()
+    if not words or not page_text:
+        return False
+    pattern = r"\s*".join(re.escape(w) for w in words)
+    return re.search(pattern, page_text, re.IGNORECASE) is not None
 
 
 def dismiss(doc_set, member: str, number: int) -> int:

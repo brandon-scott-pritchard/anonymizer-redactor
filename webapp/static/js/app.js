@@ -1267,6 +1267,8 @@ function FinalReview({ info, meta, onClose }) {
 
   const load = async (keep) => {
     const d = await api.get(`/api/final/${info.id}`);
+    // the flagged pages first, then those Kev is only unsure of
+    d.flags = [...d.flags.filter((f) => !f.unsure), ...d.flags.filter((f) => f.unsure)];
     setData(d);
     setAt((i) => (keep ? Math.min(i, Math.max(d.flags.length - 1, 0)) : 0));
     return d;
@@ -1277,7 +1279,7 @@ function FinalReview({ info, meta, onClose }) {
   useEffect(() => {
     if (!flag) { setPage(null); return; }
     setPage(null); setChosen(new Set()); setText("");
-    api.get(`/api/final/${info.id}/words?${where}`)
+    api.job(api.post(`/api/final/${info.id}/page`, { member: flag.file, page: flag.page }))
       .then((p) => { setPage(p); setCategory("person"); setTarget(p.suspects.person || ""); })
       .catch((e) => setError(e.message));
   }, [where, stamp]);
@@ -1315,9 +1317,9 @@ function FinalReview({ info, meta, onClose }) {
       if (r.error) setError(r.error);
       else {
         const failed = Object.keys(r.failed || {}).length;
-        setMessage(`Made ${plural(r.remade, "file")} again${failed ? `; ${failed} could not be` : ""}. ` +
-          (r.page_clean ? "That page now reads clean." : "That page is still flagged - look again.") +
-          ` ${plural(r.to_look_at, "page")} left to look at.`);
+        const msg = `Made ${plural(r.remade, "file")} again${failed ? `; ${failed} could not be` : ""}. ` +
+          `That page: ${r.how}. ${plural(r.to_look_at, "page")} left to look at.`;
+        if (r.page_clean) setMessage(msg); else setError(msg);
       }
       await load(true);
       setStamp(Date.now());
@@ -1348,7 +1350,7 @@ function FinalReview({ info, meta, onClose }) {
       <div class="finalgrid">
         <ol class="flaglist">${data.flags.map((f, i) => html`<li key=${f.file + f.page}>
           <button class=${i === at ? "current" : ""} onClick=${() => setAt(i)}>
-            ${f.file} - page ${f.page}
+            ${f.unsure ? html`<span class="warn small">Kev unsure · </span>` : null}${f.file} - page ${f.page}
             <span class="hint">${f.kev != null ? ` Kev ${Math.round(f.kev * 100)}%` : ""}
               ${f.matched && f.matched.length ? ` reads ${f.matched.join(", ")}` : ""}</span>
           </button></li>`)}</ol>
@@ -1382,7 +1384,7 @@ function FinalReview({ info, meta, onClose }) {
                    onInput=${(e) => setText(e.target.value)} /></div>
           <div class="row"><span>It is</span>
             <select value=${category} onChange=${(e) => { setCategory(e.target.value); setTarget(""); }}>
-              ${meta.categories.map((c) => html`<option key=${c.key} value=${c.key}>${c.label}</option>`)}
+              ${(data.kinds || []).map((c) => html`<option key=${c.key} value=${c.key}>${c.label}</option>`)}
             </select></div>
           <div class="row"><span>Whose</span>
             <select value=${target} onChange=${(e) => setTarget(e.target.value)}>

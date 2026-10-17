@@ -1025,37 +1025,52 @@ def final_pages(set_id: str):
     doc_set = _final_set(set_id)
     return {"flags": doc_set.final_flags,
             "rows": final_review.choices(doc_set.store),
+            "kinds": final_review.kinds(doc_set.run_settings),
             "originals": bool(doc_set.files) and all(Path(f).exists() for f in doc_set.files)}
+
+
+def _page_of(body: dict) -> tuple[str, int]:
+    try:
+        return str(body.get("member", "")), int(body.get("page", 0))
+    except (TypeError, ValueError):
+        raise HTTPException(422, "No such page.")
+
+
+@app.post("/api/final/{set_id}/page")
+async def final_page(set_id: str, request: Request):
+    """A flagged page read for the screen - its words, its marked words, its
+    picture - as a job: one step at a time uses the PDF library here."""
+    doc_set = _final_set(set_id)
+    member, number = _page_of(await request.json())
+    flag = _flag(doc_set, member, number)
+
+    def work(progress):
+        progress("Reading the page", 0.1)
+        return final_review.read_page(doc_set, member, number, flag.get("matched") or [])
+
+    return {"job": _start_job(work)}
 
 
 @app.get("/api/final/{set_id}/image")
 def final_image(set_id: str, member: str, page: int):
-    doc_set = _final_set(set_id)
-    _flag(doc_set, member, page)
-    png = final_review.page_image(Path(doc_set.run_result.archive), member, page)
+    png = final_review.picture(set_id, member, page)
+    if png is None:
+        raise HTTPException(404, "Read the page first.")
     return Response(content=png, media_type="image/png",
                     headers={"Cache-Control": "no-store"})
-
-
-@app.get("/api/final/{set_id}/words")
-def final_words(set_id: str, member: str, page: int):
-    doc_set = _final_set(set_id)
-    flag = _flag(doc_set, member, page)
-    out = final_review.page_words(Path(doc_set.run_result.archive), member, page)
-    out["suspects"] = final_review.suspects(out["words"], doc_set.store, flag.get("matched") or [])
-    return out
 
 
 @app.post("/api/final/{set_id}/fix")
 async def final_fix(set_id: str, request: Request):
     doc_set = _final_set(set_id)
     body = await request.json()
-    member, number = str(body.get("member", "")), int(body.get("page", 0))
+    member, number = _page_of(body)
     _flag(doc_set, member, number)
     text, category = str(body.get("text", "")), str(body.get("category", "person"))
     target = str(body.get("target", ""))
-    if category not in {c.key for c in categories.CATEGORIES}:
-        raise HTTPException(422, "No such type.")
+    if category not in {k["key"] for k in final_review.kinds(doc_set.run_settings)}:
+        raise HTTPException(422, "That type is left as written in this run - choose the "
+                                 "type it is replaced as.")
 
     def work(progress):
         return final_review.fix(doc_set, member, number, text, category, target, progress)
@@ -1066,8 +1081,7 @@ async def final_fix(set_id: str, request: Request):
 @app.post("/api/final/{set_id}/dismiss")
 async def final_dismiss(set_id: str, request: Request):
     doc_set = _final_set(set_id)
-    body = await request.json()
-    member, number = str(body.get("member", "")), int(body.get("page", 0))
+    member, number = _page_of(await request.json())
     _flag(doc_set, member, number)
     return {"to_look_at": final_review.dismiss(doc_set, member, number)}
 

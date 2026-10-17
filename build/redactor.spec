@@ -71,7 +71,10 @@ if _vendor.is_dir():
 # The name screen's sort (probablepeople, with its trained CRF model and the
 # crfsuite engine that reads it) and the IBAN check (python-stdnum, with its
 # country tables): both ship data files static analysis does not see.
-for package in ("probablepeople", "probableparsing", "pycrfsuite", "stdnum"):
+# The flagged-page screen's marks read names with RapidFuzz and Jellyfish
+# (name_match.py, final_review.py): compiled extensions with submodules.
+for package in ("probablepeople", "probableparsing", "pycrfsuite", "stdnum",
+                "rapidfuzz", "jellyfish"):
     try:
         pkg_datas, pkg_binaries, pkg_hidden = collect_all(package)
     except Exception:
