@@ -243,16 +243,19 @@ def _name_inside(text: str, head) -> tuple[int, int] | None:
     return None if (a, b) == (0, len(text)) else (a, b)
 
 
-def files_holding(result, text: str) -> list[str]:
+def files_holding(result, text: str, progress=None) -> list[str]:
     """Every delivered file whose original has ``text`` in it, however it is
-    spaced or cased: the fix is carried to each."""
+    spaced or cased."""
     from . import pipeline
 
     pattern = re.compile(r"\s+".join(re.escape(w) for w in text.split()), re.IGNORECASE)
+    outcomes = [o for o in getattr(result, "outcomes", [])
+                if o.delivered_name and Path(o.source).exists()]
     out = []
-    for outcome in getattr(result, "outcomes", []):
-        if not outcome.delivered_name or not Path(outcome.source).exists():
-            continue
+    for i, outcome in enumerate(outcomes):
+        if progress is not None:
+            progress(f"Looking for it in the set's originals: file {i + 1} of {len(outcomes)}",
+                     0.5 + 0.1 * i / max(len(outcomes), 1))
         try:
             texts = pipeline.document_texts([Path(outcome.source)])
         except Exception:
@@ -262,52 +265,232 @@ def files_holding(result, text: str) -> list[str]:
     return out
 
 
+# --------------------------------------------------------------------------
+# what a choice will read as, before anything is changed
+# --------------------------------------------------------------------------
+
+# One or two letters - an initial left of a name - are replaced where they
+# stand on the page and nowhere else: as a form, "C" read as a surname took a
+# whole invented name, matched no lone "C" anywhere, and stands alone in every
+# document of a set, which the fix then set about making again whole.
+SHORT = 2
+
+
+def is_short(text: str) -> bool:
+    return len(re.sub(r"[\W_]", "", text)) <= SHORT
+
+
+def _redacting(settings, member: str) -> bool:
+    mode = getattr(settings, "docx_mode" if member.lower().endswith(".docx") else "pdf_mode",
+                   "redact")
+    return mode != "anonymize"
+
+
+def _initial_stand_in(target, text: str) -> str:
+    """An initial of a ticked person written as their invented name's
+    initial - the part whose real initial it is - in the same case and with
+    the same dots: "C." of Cody becomes "L." of the invented Lise."""
+    if target is None or target.person is None or target.surrogate is None:
+        return ""
+    real, fake = target.person, target.surrogate
+    pairs = [(real.first, fake.first), *zip(real.middles, fake.middles), (real.last, fake.last)]
+    out = []
+    for ch in text:
+        if not ch.isalpha():
+            out.append(ch)
+            continue
+        hit = next((f for r, f in pairs if r and f
+                    and r.strip(".")[:1].casefold() == ch.casefold()), None)
+        if hit is None:
+            return ""
+        letter = hit.strip(".")[:1]
+        out.append(letter.upper() if ch.isupper() else letter.lower())
+    return "".join(out)
+
+
+def _ticked_owner(store, text: str):
+    """The ticked person whose name has ``text`` in it, word for word."""
+    words = {_letters(w) for w in text.split() if _letters(w)}
+    for head in _ticked_heads(store):
+        parts = set(_parts(head)) | {p[:1] for p in _parts(head)}
+        if words and words <= parts:
+            return head
+    return None
+
+
+def preview(doc_set, member: str, text: str, category: str, target_key: str) -> dict:
+    """What the chosen text will read as, where it will change, and anything
+    to look at before pressing Replace. Changes nothing."""
+    import copy
+
+    from . import engine
+
+    text = " ".join(text.split())
+    store, settings = doc_set.store, doc_set.run_settings
+    if not text:
+        return {"error": "Choose words on the page."}
+    if category not in {k["key"] for k in kinds(settings)}:
+        return {"error": "That type is left as written in this run - choose the type it is "
+                         "replaced as."}
+    target = grouping.head_of(store, store.entities[target_key]) \
+        if target_key in store.entities else None
+    warnings = []
+    owner = _ticked_owner(store, text) if category in PEOPLE else None
+    if owner is not None and (target is None or target is not owner):
+        warnings.append(f"This is part of {owner.canonical}'s name - choose their row under "
+                        "Whose, or it becomes someone else.")
+    redact = _redacting(settings, member)
+    if is_short(text):
+        if not member.lower().endswith(".pdf"):
+            return {"error": "One or two letters on their own can be replaced only on a PDF "
+                             "page - choose them with the word beside them."}
+        if redact:
+            reads = ""
+        elif category in PEOPLE:
+            reads = _initial_stand_in(target, text)
+            if not reads:
+                return {"error": "Choose whose initial this is under Whose - it becomes the "
+                                 "first letter of their invented name.",
+                        "warnings": warnings}
+        else:
+            reads = copy.deepcopy(store).add_value(category, text).replacement
+        return {"reads_as": reads, "blacked_out": redact, "short": True, "warnings": warnings,
+                "scope": "Only the letters you chose, on this page."}
+    trial = copy.deepcopy(store)
+    refused = register(trial, text, category, target_key)
+    if refused:
+        return {"error": refused, "warnings": warnings}
+    hits = engine.scan_text(text, trial, settings)
+    if not hits:
+        return {"error": "The run would not find this text on its own - choose the words "
+                         "around it too.", "warnings": warnings}
+    reads = text
+    for hit in sorted(hits, key=lambda h: -h.start):
+        reads = reads[:hit.start] + hit.replacement + reads[hit.end:]
+    return {"reads_as": "" if redact else reads, "blacked_out": redact, "short": False,
+            "warnings": warnings,
+            "scope": "This file is made again. Then the set's other files that hold it are "
+                     "read back, and any page where it still shows is listed here."}
+
+
+# --------------------------------------------------------------------------
+# the fix: this page's letters in place, or this file made again
+# --------------------------------------------------------------------------
+
+def _replace_in_place(archive: Path, member: str, number: int, indices: list[int],
+                      texts: list[str], reads: str, redact: bool) -> str:
+    """The chosen words covered where they stand on the delivered page - a
+    black box, or the stand-in written over a white one. "" when done."""
+    import shutil
+
+    import pymupdf
+
+    from . import audit
+
+    found = page_words(archive, member, number)
+    words = {w["i"]: w for w in found["words"]}
+    chosen = [words.get(i) for i in indices]
+    if not chosen or any(w is None for w in chosen) \
+            or [w["text"] for w in chosen] != list(texts):
+        return "The page's words have changed - read the page again and choose them again."
+    rect = pymupdf.Rect(*(chosen[0][k] / ZOOM for k in ("x0", "y0", "x1", "y1")))
+    for w in chosen[1:]:
+        rect |= pymupdf.Rect(*(w[k] / ZOOM for k in ("x0", "y0", "x1", "y1")))
+    rect = rect + (-0.5, -0.5, 0.5, 0.5)
+    work = Path(tempfile.mkdtemp(prefix="final-here-"))
+    try:
+        target = work / Path(member).name
+        with pymupdf.open(stream=_member_bytes(archive, member), filetype="pdf") as doc:
+            page = doc[number - 1]
+            if redact:
+                page.add_redact_annot(rect, fill=(0, 0, 0))
+            else:
+                page.add_redact_annot(rect, text=reads, fill=(1, 1, 1), text_color=(0, 0, 0),
+                                      fontsize=max(5.0, min(rect.height * 0.75, 12.0)))
+            page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_PIXELS)
+            doc.save(target, garbage=3, deflate=True)
+        audit._replace_members(archive, {member: target})
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    return ""
+
+
 def fix(doc_set, member: str, number: int, text: str, category: str, target_key: str,
+        words: list[int] | None = None, word_texts: list[str] | None = None,
         progress=lambda message, fraction: None) -> dict:
-    """Register the choice, make every file holding it again, write the
-    mapping key again, read the changed files back. What happened, for the
-    screen: a page is clean only when its file was made again, neither the
-    matcher nor Kev flags it, and the chosen text is no longer on it."""
+    """One file at a time. One or two letters are covered where they stand on
+    this page; anything longer becomes a form of the chosen row and this file
+    is made again from its original. Then the file is read back, and - for a
+    form - the set's other files that hold the text are read back too: any
+    page where it still shows, or that Kev flags, comes onto the list."""
     from . import audit, mapping, models
 
-    result, store = doc_set.run_result, doc_set.store
+    result, store, settings = doc_set.run_result, doc_set.store, doc_set.run_settings
     if result is None or result.archive is None:
         return {"error": "This set has no delivered archive to fix."}
-    if category not in {k["key"] for k in kinds(doc_set.run_settings)}:
-        return {"error": "That type is left as written in this run, so it would not be "
-                         "replaced - choose the type it is replaced as."}
-    refused = register(store, text, category, target_key)
-    if refused:
-        return {"error": refused}
-    progress("Finding every file it is written in", 0.05)
-    members = sorted(set(files_holding(result, text)) | {member})
-    progress(f"Making {len(members)} file(s) again", 0.2)
-    failed = audit.remake(members, result, store, doc_set.run_settings, Path(result.archive))
+    text = " ".join(text.split())
+    seen = preview(doc_set, member, text, category, target_key)
+    if seen.get("error"):
+        return {"error": seen["error"]}
+    archive = Path(result.archive)
+    failed: dict[str, str] = {}
+    if seen["short"]:
+        if not words:
+            return {"error": "Choose the letters on the page itself."}
+        progress("Covering the letters you chose", 0.2)
+        refused = _replace_in_place(archive, member, number, list(words),
+                                    list(word_texts or []), seen["reads_as"],
+                                    seen["blacked_out"])
+        if refused:
+            return {"error": refused}
+        _record_here(store, text, category, target_key, seen["reads_as"])
+    else:
+        refused = register(store, text, category, target_key)
+        if refused:
+            return {"error": refused}
+        progress("Making this file again", 0.2)
+        failed = audit.remake([member], result, store, settings, archive)
     if doc_set.run_password and result.key_path:
         mapping.write_encrypted_key(store, Path(result.key_path), doc_set.run_password)
-    progress("Reading the fixed pages back", 0.6)
-    remade = [m for m in members if m not in failed]
-    again, texts = [], {}
-    if remade:
-        def waiting() -> None:
-            progress("Waiting for Kev - another set's final check is using it", 0.6)
-        with models.SLOT.use("kev", on_wait=waiting) as kev_url:
-            again, texts = audit.recheck(Path(result.archive), store, remade, kev_url, progress)
-    still = {(f.file, f.page) for f in again}
-    # the files the chosen text is still written in, read back
-    left = sorted({m for (m, _n), t in texts.items() if _still_written(text, t)})
-    text_gone = not _still_written(text, texts.get((member, number), ""))
-    # every page of a remade file is as it now reads: flagged, unsure, or clean
-    kept = [f for f in doc_set.final_flags if f["file"] not in remade]
-    kept += [{"file": f.file, "page": f.page, "kev": f.kev, "matched": list(f.matched),
-              "unsure": bool(f.doubtful)} for f in again]
-    if member in remade and not text_gone and (member, number) not in still:
-        # the chosen text is still on the page: it stays on the list
-        kept.append({"file": member, "page": number, "kev": None, "matched": [text],
-                     "unsure": False})
-    kept.sort(key=lambda f: (f["file"], f["page"]))
+
+    def waiting() -> None:
+        progress("Waiting for Kev - another set's final check is using it", 0.4)
+
+    added = 0
+    with models.SLOT.use("kev", on_wait=waiting) as kev_url:
+        again, texts = [], {}
+        if member not in failed:
+            progress("Reading this file back", 0.4)
+            again, texts = audit.recheck(archive, store, [member], kev_url, progress)
+        still = {(f.file, f.page) for f in again}
+        text_gone = seen["short"] or not _still_written(text, texts.get((member, number), ""))
+        kept = [f for f in doc_set.final_flags if f["file"] != member or member in failed]
+        kept += [_entry(f) for f in again]
+        if member not in failed and not text_gone and (member, number) not in still:
+            kept.append({"file": member, "page": number, "kev": None, "matched": [text],
+                         "unsure": False})
+        # the same text elsewhere in the set: read back, never changed here
+        if not seen["short"] and member not in failed:
+            others = [m for m in files_holding(result, text, progress) if m != member]
+            for i, other in enumerate(others):
+                progress(f"Checking the set's other files for it: file {i + 1} of {len(others)}",
+                         0.6 + 0.4 * i / max(len(others), 1))
+                flags, other_texts = audit.recheck(archive, store, [other], kev_url)
+                listed = {(f["file"], f["page"]) for f in kept}
+                for f in flags:
+                    if (f.file, f.page) not in listed:
+                        kept.append(_entry(f))
+                        listed.add((f.file, f.page))
+                        added += 1
+                for (m, n), page_text in other_texts.items():
+                    if (m, n) not in listed and _still_written(text, page_text):
+                        kept.append({"file": m, "page": n, "kev": None, "matched": [text],
+                                     "unsure": False})
+                        listed.add((m, n))
+                        added += 1
+    kept.sort(key=lambda f: (f.get("unsure", False), f["file"], f["page"]))
     doc_set.final_flags = kept
-    clean = member in remade and text_gone and (member, number) not in still
+    clean = member not in failed and text_gone and (member, number) not in still
     if member in failed:
         how = f"could not be made again - {failed[member]}"
     elif not text_gone:
@@ -315,11 +498,32 @@ def fix(doc_set, member: str, number: int, text: str, category: str, target_key:
     elif not clean:
         how = "fixed, still flagged when read back"
     else:
-        how = "fixed and read back clean"
+        how = ("covered where it stood and read back clean" if seen["short"]
+               else "fixed and read back clean")
     _log(doc_set, member, number, how)
     _write(doc_set)
-    return {"remade": len(remade), "failed": failed, "page_clean": clean, "how": how,
-            "still_written_in": left, "to_look_at": len(kept)}
+    return {"page_clean": clean, "how": how, "added": added, "failed": failed,
+            "to_look_at": len(kept)}
+
+
+def _entry(flag) -> dict:
+    return {"file": flag.file, "page": flag.page, "kev": flag.kev,
+            "matched": list(flag.matched), "unsure": bool(flag.doubtful)}
+
+
+def _record_here(store, text: str, category: str, target_key: str, reads: str) -> None:
+    """Letters covered in place go into the mapping key as what they became -
+    unticked, so no other file is ever changed by them."""
+    target = grouping.head_of(store, store.entities[target_key]) \
+        if target_key in store.entities else None
+    if category in PEOPLE and target is not None:
+        entity = merges.add_form(store, target, text, written=reads)
+        if entity is not None:
+            entity.enabled = False
+        return
+    if store.get(category, text) is None:
+        entity = store.add_value(category, text, source=merges.FINAL_CHECK)
+        entity.enabled = False
 
 
 def _still_written(text: str, page_text: str) -> bool:

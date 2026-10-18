@@ -1262,6 +1262,7 @@ function FinalReview({ info, meta, onClose }) {
   const [error, setError] = useState("");
   const [scale, setScale] = useState(1);
   const [drag, setDrag] = useState(null);
+  const [preview, setPreview] = useState(null);
   const imgRef = useRef(null);
   const wrapRef = useRef(null);
 
@@ -1288,6 +1289,15 @@ function FinalReview({ info, meta, onClose }) {
     const words = page.words.filter((w) => chosen.has(w.i)).sort((a, b) => a.i - b.i);
     setText(words.map((w) => w.text).join(" "));
   }, [chosen, page]);
+  useEffect(() => {
+    setPreview(null);
+    if (!flag || !text.trim() || working) return undefined;
+    const timer = setTimeout(() => {
+      api.post(`/api/final/${info.id}/preview`, { member: flag.file, page: flag.page, text, category, target })
+        .then(setPreview).catch((e) => setPreview({ error: e.message }));
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [text, category, target, where, working]);
   const fit = () => { if (imgRef.current && page && page.width) setScale(imgRef.current.clientWidth / page.width); };
   useEffect(() => { window.addEventListener("resize", fit); return () => window.removeEventListener("resize", fit); });
 
@@ -1312,13 +1322,16 @@ function FinalReview({ info, meta, onClose }) {
   const fix = async () => {
     setError(""); setMessage(""); setWorking("Starting");
     try {
+      const picked = page.words.filter((w) => chosen.has(w.i)).sort((a, b) => a.i - b.i);
       const r = await api.job(api.post(`/api/final/${info.id}/fix`, {
-        member: flag.file, page: flag.page, text, category, target }), (m) => setWorking(m || "Working"));
+        member: flag.file, page: flag.page, text, category, target,
+        words: picked.map((w) => w.i), word_texts: picked.map((w) => w.text) }),
+      (m) => setWorking(m || "Working"));
       if (r.error) setError(r.error);
       else {
-        const failed = Object.keys(r.failed || {}).length;
-        const msg = `Made ${plural(r.remade, "file")} again${failed ? `; ${failed} could not be` : ""}. ` +
-          `That page: ${r.how}. ${plural(r.to_look_at, "page")} left to look at.`;
+        const msg = `That page: ${r.how}.` +
+          (r.added ? ` ${plural(r.added, "more page")} where it still shows ${r.added === 1 ? "was" : "were"} added to the list.` : "") +
+          ` ${plural(r.to_look_at, "page")} left to look at.`;
         if (r.page_clean) setMessage(msg); else setError(msg);
       }
       await load(true);
@@ -1339,6 +1352,8 @@ function FinalReview({ info, meta, onClose }) {
   return html`<div class="overlay">
     <div class="modal wide finalreview">
       <h3>Flagged pages - ${info.name}</h3>
+      ${working ? html`<p class="workingbar" role="status">${working}… - wait for it to finish;
+        the page list is locked until then.</p>` : null}
       ${error ? html`<p class="fielderror" role="alert">${error}</p>` : null}
       ${message ? html`<p class="status-ok">${message}</p>` : null}
       ${!data ? html`<p class="hint">Loading…</p>` : !data.flags.length ? html`
@@ -1348,12 +1363,41 @@ function FinalReview({ info, meta, onClose }) {
         <div class="bar"><span class="spacer"></span>
           <button class="primary" onClick=${finish}>Finish</button></div>` : html`
       <div class="finalgrid">
+        <div class="finalside">
         <ol class="flaglist">${data.flags.map((f, i) => html`<li key=${f.file + f.page}>
-          <button class=${i === at ? "current" : ""} onClick=${() => setAt(i)}>
+          <button class=${i === at ? "current" : ""} disabled=${!!working} onClick=${() => setAt(i)}>
             ${f.unsure ? html`<span class="warn small">Kev unsure · </span>` : null}${f.file} - page ${f.page}
             <span class="hint">${f.kev != null ? ` Kev ${Math.round(f.kev * 100)}%` : ""}
               ${f.matched && f.matched.length ? ` reads ${f.matched.join(", ")}` : ""}</span>
           </button></li>`)}</ol>
+        ${page ? html`<div class="finalcontrols">
+          <div class="row"><span>Replace</span>
+            <input type="text" value=${text} disabled=${!!working} placeholder="Choose words on the page, or type them"
+                   onInput=${(e) => setText(e.target.value)} /></div>
+          <div class="row"><span>It is</span>
+            <select value=${category} disabled=${!!working} onChange=${(e) => { setCategory(e.target.value); setTarget(""); }}>
+              ${(data.kinds || []).map((c) => html`<option key=${c.key} value=${c.key}>${c.label}</option>`)}
+            </select></div>
+          <div class="row"><span>Whose</span>
+            <select value=${target} disabled=${!!working} onChange=${(e) => setTarget(e.target.value)}>
+              <option value="">A new row of its own</option>
+              ${rows.map((r) => html`<option key=${r.key} value=${r.key}>${r.text} - ${r.replacement}</option>`)}
+            </select></div>
+          ${preview ? html`<div class="preview">
+            ${preview.error ? html`<p class="fielderror">${preview.error}</p>` : html`
+              <p><strong>${preview.blacked_out ? "Will be blacked out." : html`Will read as: <span class="readsas">${preview.reads_as}</span>`}</strong></p>
+              <p class="hint small">${preview.scope}</p>`}
+            ${(preview.warnings || []).map((w) => html`<p class="warn small">${w}</p>`)}
+          </div>` : null}
+          <div class="bar">
+            <button onClick=${dismiss} disabled=${!!working}>Nothing to fix on this page</button>
+            <span class="spacer"></span>
+            <button class="primary" disabled=${!!working || !text.trim() || !preview || !!preview.error
+                || (!preview.short && !data.originals)} onClick=${fix}>
+              ${preview && preview.short ? "Replace on this page" : "Replace in this file"}</button>
+          </div>
+        </div>` : null}
+        </div>
         <div class="finalpage">
           ${!data.originals ? html`<p class="warn">This set's original documents are no longer
             to hand, so a page cannot be made again here.</p>` : null}
@@ -1367,7 +1411,7 @@ function FinalReview({ info, meta, onClose }) {
               ${page.words.map((w) => html`<span key=${w.i}
                   class=${"fword" + (chosen.has(w.i) ? " chosen" : suspects.has(w.i) ? " suspect" : "")}
                   title=${w.text} onMouseDown=${(e) => e.stopPropagation()}
-                  onClick=${() => toggle(w.i)}
+                  onClick=${() => { if (!working) toggle(w.i); }}
                   style=${{ left: `${w.x0 * scale}px`, top: `${w.y0 * scale}px`,
                             width: `${(w.x1 - w.x0) * scale}px`, height: `${(w.y1 - w.y0) * scale}px` }}></span>`)}
               ${drag ? html`<span class="dragbox" style=${{
@@ -1379,25 +1423,6 @@ function FinalReview({ info, meta, onClose }) {
             <div class="wordflow">${page.words.map((w) => html`<span key=${w.i}
                 class=${"wword" + (chosen.has(w.i) ? " chosen" : suspects.has(w.i) ? " suspect" : "")}
                 onClick=${() => toggle(w.i)}>${w.text}</span> `)}</div>`}
-          <div class="row"><span>Replace</span>
-            <input type="text" value=${text} placeholder="Choose words on the page, or type them"
-                   onInput=${(e) => setText(e.target.value)} /></div>
-          <div class="row"><span>It is</span>
-            <select value=${category} onChange=${(e) => { setCategory(e.target.value); setTarget(""); }}>
-              ${(data.kinds || []).map((c) => html`<option key=${c.key} value=${c.key}>${c.label}</option>`)}
-            </select></div>
-          <div class="row"><span>Whose</span>
-            <select value=${target} onChange=${(e) => setTarget(e.target.value)}>
-              <option value="">A new row of its own</option>
-              ${rows.map((r) => html`<option key=${r.key} value=${r.key}>${r.text} - ${r.replacement}</option>`)}
-            </select></div>
-          <div class="bar">
-            <button onClick=${dismiss} disabled=${!!working}>Nothing to fix on this page</button>
-            <span class="spacer"></span>
-            ${working ? html`<span class="hint">${working}…</span>` : null}
-            <button class="primary" disabled=${!!working || !text.trim() || !data.originals} onClick=${fix}>
-              Replace it in every file it is in</button>
-          </div>
         </div>
       </div>`}
       <div class="bar"><span class="spacer"></span><button onClick=${() => onClose(false)}>Close</button></div>

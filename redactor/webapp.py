@@ -1071,11 +1071,27 @@ async def final_fix(set_id: str, request: Request):
     if category not in {k["key"] for k in final_review.kinds(doc_set.run_settings)}:
         raise HTTPException(422, "That type is left as written in this run - choose the "
                                  "type it is replaced as.")
+    words = [int(i) for i in body.get("words") or [] if str(i).lstrip("-").isdigit()]
+    word_texts = [str(t) for t in body.get("word_texts") or []]
 
     def work(progress):
-        return final_review.fix(doc_set, member, number, text, category, target, progress)
+        return final_review.fix(doc_set, member, number, text, category, target,
+                                words, word_texts, progress)
 
     return {"job": _start_job(work)}
+
+
+@app.post("/api/final/{set_id}/preview")
+async def final_preview(set_id: str, request: Request):
+    """What a choice will read as and where it will change - nothing changed."""
+    doc_set = _final_set(set_id)
+    body = await request.json()
+    member, number = _page_of(body)
+    _flag(doc_set, member, number)
+    if SESSION.busy.locked():
+        raise HTTPException(409, "Still working on the previous step.")
+    return final_review.preview(doc_set, member, str(body.get("text", "")),
+                                str(body.get("category", "person")), str(body.get("target", "")))
 
 
 @app.post("/api/final/{set_id}/dismiss")
