@@ -1,0 +1,446 @@
+"""Trimmed fork of the Anonymizer's ``redactor/names.py`` for the party-PII skill.
+Only what the skill reaches is kept. Detection rules are unchanged;
+tests/test_party_pii_skill.py checks they still find what the app finds.
+
+The app module's own description:
+
+Expand a full name into every written form it might appear in.
+
+The operator types one full name per line.  This module turns
+``John Michael Smith`` into the set of strings a legal document might actually
+contain - ``Smith``, ``John Smith``, ``Smith, John``, ``J. Smith``,
+``John M. Smith``, ``Mr. Smith``, ``John``, ``Michael`` - and, critically,
+remembers which *components* each form is built from, so the replacement can be
+built from the matching components of the surrogate name.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from itertools import combinations
+
+TITLES = ("Mr", "Mrs", "Ms", "Miss", "Dr", "Prof", "Rev", "Hon", "Sir", "Madam", "Mx")
+SUFFIXES = ("Jr", "Sr", "II", "III", "IV", "V", "Esq", "MD", "PhD", "JD", "CPA", "RN")
+PARTICLES = ("van", "von", "de", "del", "della", "di", "da", "du", "la", "le",
+             "el", "bin", "ibn", "al", "st", "mc", "mac")
+
+# Single-token variants matching one of these would shred ordinary prose, so
+# they are generated but flagged so the review screen can warn.
+RISKY_SINGLE_TOKENS = {
+    "will", "mark", "grace", "hope", "faith", "rich", "young", "long", "short", "white",
+    "black", "brown", "green", "gray", "grey", "king", "price", "bill", "may", "june",
+    "art", "chase", "case", "law", "court", "judge", "moore", "best", "day", "field",
+    "love", "joy", "summer", "autumn", "winter", "sunny", "star", "rose", "lily", "iris",
+    "victor", "major", "miles", "penny", "frank", "earnest", "ernest", "amber", "jean",
+    "dean", "sterling", "cash", "bond", "banks", "church", "cross", "stone", "wood",
+    "woods", "rivers", "hunter", "carter", "porter", "parker", "baker", "cook", "fisher",
+    "gardner", "mason", "miller", "taylor", "turner", "walker", "wheeler",
+}
+
+
+# Words a statement prints on the end of a holder's or payee's name: an
+# account's kind ("Rebecca L Blackburn Ret", "... IRA", "... Jt"), a payment
+# line's confirmation ("Mary Cox Conf", "Mary Pratt ID"). Read as the surname,
+# "Ret" swallowed the household's own Rebecca L Blackburn as a shorter form
+# of it, and every "... Conf" shared one invented surname.
+# Not "Holder": a common surname (Sarah J Holder lost hers to this list).
+NOT_A_NAME_TAIL = frozenset("""
+ret retirement ira roth sep trust ttee trustee cust custodian acct account accounts jt jtwros
+joint pod tod est sav savings chk checking conf cont confirmation ref memo pmt payment id p2p
+txn trans dda statement summary owner owners member primary secondary
+""".split())
+
+
+# A "person" ending in one of these is a business: "Blackburn Law" was given
+# an invented person beside "BLACKBURN LAW, PLLC" made "SATO LAW, PLLC"
+BUSINESS_TAIL = frozenset("""
+law llc pllc inc corp co company group firm associates partners services enterprises holdings
+dental clinic plumbing construction landscaping realty insurance cpa cpas pc lp llp ltd studio
+""".split())
+
+
+# Words no name is ever written as on its own. A heading or a merchant ticked
+# as a person - "The Home Depot", "Statement of Account" - made every "the"
+# in the case a stand-in: 1,456 of them in one household's statements.
+FUNCTION_WORDS = frozenset("""
+a an and the of for to in on at by with from or as is it its this that per via
+usa us inc llc co corp ltd na n.a bank
+""".split())
+
+_ORDINARY: frozenset[str] | None = None
+
+
+def ordinary_word(word: str) -> bool:
+    """An everyday English word, from the bundled list: a name written as one
+    alone ("Baker", "Hope") is matched only with its capital - see engine."""
+    global _ORDINARY
+    if _ORDINARY is None:
+        import gzip
+
+        from .places import _data_file
+        try:
+            _ORDINARY = frozenset(gzip.decompress(
+                _data_file().with_name("common_words.txt.gz").read_bytes()).decode().split())
+        except OSError:
+            _ORDINARY = frozenset()
+    word = word.casefold()
+    return (word in _ORDINARY or (word.endswith("s") and word[:-1] in _ORDINARY)
+            or (word.endswith("ies") and word[:-3] + "y" in _ORDINARY))
+
+
+@dataclass(frozen=True)
+class NameVariant:
+    """One written form of a name."""
+
+    text: str                 # the literal string to search for
+    components: tuple         # e.g. ("first", "last") or ("initial:first", "last")
+    layout: str               # "plain" | "comma" | "title"
+    risky: bool = False
+    # a single word that is also an everyday one ("Baker", "Hope"): matched
+    # only with its capital
+    everyday: bool = False
+
+    @property
+    def token_count(self) -> int:
+        return len(self.components)
+
+
+@dataclass
+class PersonName:
+    """A full name broken into components."""
+
+    raw: str
+    title: str = ""
+    first: str = ""
+    middles: tuple[str, ...] = ()
+    last: str = ""
+    suffix: str = ""
+
+    @property
+    def canonical(self) -> str:
+        parts = [self.first, *self.middles, self.last]
+        return " ".join(p for p in parts if p)
+
+    @property
+    def ordered(self) -> list[tuple[str, str]]:
+        """(component key, value) in written order, excluding title/suffix."""
+        out: list[tuple[str, str]] = []
+        if self.first:
+            out.append(("first", self.first))
+        for i, mid in enumerate(self.middles):
+            out.append((f"middle{i}", mid))
+        if self.last:
+            out.append(("last", self.last))
+        return out
+
+
+_SUFFIX_RE = re.compile(rf"^(?:{'|'.join(SUFFIXES)})\.?$", re.IGNORECASE)
+_TITLE_RE = re.compile(rf"^(?:{'|'.join(TITLES)})\.?$", re.IGNORECASE)
+
+
+def parse(raw: str) -> PersonName:
+    """Split ``raw`` into title / first / middles / last / suffix."""
+    text = " ".join(raw.replace("’", "'").split())
+    if not text:
+        return PersonName(raw="")
+
+    # "Smith, John Michael" -> "John Michael Smith"
+    if text.count(",") == 1:
+        left, right = (p.strip() for p in text.split(","))
+        if right and not _SUFFIX_RE.match(right.split()[0]) and len(left.split()) <= 2:
+            text = f"{right} {left}"
+    text = text.replace(",", " ")
+
+    tokens = [t for t in text.split() if t]
+    title = ""
+    if tokens and _TITLE_RE.match(tokens[0]):
+        title = tokens.pop(0).rstrip(".")
+    suffix = ""
+    if tokens and _SUFFIX_RE.match(tokens[-1]):
+        suffix = tokens.pop().rstrip(".")
+
+    # Glue particles onto the surname: "van der Berg". Only a token written
+    # lowercase reads as a particle - capitalised "Al"/"St"/"Mc" are given
+    # names ("Mary Al Smith") - except in ALL-CAPS captions, where case
+    # carries no signal. The first token is never a particle: it is the
+    # first name, even for people actually named Van.
+    all_caps = raw.isupper()
+    for i in range(1, len(tokens) - 1):
+        tok = tokens[i]
+        if (tok.lower().strip(".") in PARTICLES
+                and (tok.islower() or all_caps)):
+            tokens = tokens[:i] + [" ".join(tokens[i:])]
+            break
+
+    if not tokens:
+        return PersonName(raw=raw, title=title, suffix=suffix)
+    if len(tokens) == 1:
+        return PersonName(raw=raw, title=title, last=tokens[0], suffix=suffix)
+    return PersonName(
+        raw=raw,
+        title=title,
+        first=tokens[0],
+        middles=tuple(tokens[1:-1]),
+        last=tokens[-1],
+        suffix=suffix,
+    )
+
+
+def _initial(value: str) -> str:
+    return f"{value[0].upper()}."
+
+
+def pluralize(word: str) -> str:
+    """Family-name plural: Smith -> Smiths, Jones -> Joneses."""
+    lower = word.lower()
+    if lower.endswith(("s", "x", "z", "ch", "sh")):
+        return word + "es"
+    return word + "s"
+
+
+def variants(name: PersonName, include_single_tokens: bool = True) -> list[NameVariant]:
+    """Every written form of ``name``, longest first."""
+    parts = name.ordered
+    if not parts:
+        return []
+
+    out: dict[str, NameVariant] = {}
+
+    def put(text: str, components: tuple, layout: str = "plain"):
+        text = " ".join(text.split()).strip(" ,")
+        if len(text) < 2:
+            return
+        word = text.strip(".").casefold()
+        if len(components) == 1 and word in FUNCTION_WORDS:
+            return                     # "The" of "The Home Depot" is nobody's name
+        risky = len(components) == 1 and word in RISKY_SINGLE_TOKENS
+        everyday = (len(components) == 1 and layout == "plain" and " " not in word
+                    and (risky or ordinary_word(word)))
+        key = text.casefold()
+        existing = out.get(key)
+        if existing is None or len(components) > existing.token_count:
+            out[key] = NameVariant(text, components, layout, risky, everyday)
+
+    n = len(parts)
+    # every ordered subset of the components: first, last, first+last, first+middle, …
+    for size in range(n, 0, -1):
+        if size == 1 and not include_single_tokens:
+            continue
+        for combo in combinations(range(n), size):
+            keys = tuple(parts[i][0] for i in combo)
+            values = [parts[i][1] for i in combo]
+            put(" ".join(values), keys)
+
+            if size >= 2:
+                # initial forms: "J. Smith", "John M. Smith", "J. M. Smith"
+                for init_count in range(1, size):
+                    for init_idx in combinations(range(size - 1), init_count):
+                        rendered = [
+                            _initial(v) if i in init_idx else v
+                            for i, v in enumerate(values)
+                        ]
+                        comps = tuple(
+                            f"initial:{keys[i]}" if i in init_idx else keys[i]
+                            for i in range(size)
+                        )
+                        put(" ".join(rendered), comps)
+
+    # "Smith, John Michael" and "Smith, John"
+    if name.last and name.first:
+        put(f"{name.last}, {name.first}", ("last", "first"), "comma")
+        if name.middles:
+            mids = " ".join(name.middles)
+            put(f"{name.last}, {name.first} {mids}",
+                ("last", "first") + tuple(f"middle{i}" for i in range(len(name.middles))),
+                "comma")
+        put(f"{name.last}, {_initial(name.first)}", ("last", "initial:first"), "comma")
+
+    # "the Smiths" - a plural surname names the whole family
+    if name.last and include_single_tokens:
+        put(pluralize(name.last), ("last",), "plural")
+
+    # "Mr. Smith"
+    if name.last:
+        for title in ("Mr.", "Mrs.", "Ms.", "Miss", "Dr."):
+            put(f"{title} {name.last}", ("last",), "title")
+
+    ordered = sorted(
+        out.values(),
+        key=lambda v: (-v.token_count, -len(v.text), v.text.casefold()),
+    )
+    return ordered
+
+
+# OCR's usual confusions, folded before two spellings are compared:
+# "HARRlNGTON", "Harr1ngton", "HARRINGT0N" are one surname
+_OCR_FOLD = str.maketrans({"0": "o", "1": "l", "i": "l", "|": "l", "!": "l",
+                           "5": "s", "$": "s"})
+# a misread or dropped letter is allowed in a word at least this long - a
+# shorter one changed by a letter is another name ("Larsen", "Larson")
+ALIKE_MIN_LENGTH = 7
+
+
+def _ocr_folded(word: str) -> str:
+    word = re.sub(r"[^a-z0-9|!$]", "", word.casefold())
+    return word.replace("rn", "m").replace("vv", "w").translate(_OCR_FOLD)
+
+
+def _one_edit(a: str, b: str) -> bool:
+    if abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        diff = [i for i in range(len(a)) if a[i] != b[i]]
+        return len(diff) == 1 or (len(diff) == 2 and diff[1] == diff[0] + 1
+                                  and a[diff[0]] == b[diff[1]] and a[diff[1]] == b[diff[0]])
+    short, long_ = (a, b) if len(a) < len(b) else (b, a)
+    return any(long_[:i] + long_[i + 1:] == short for i in range(len(long_)))
+
+
+def alike(a: str, b: str) -> bool:
+    """One written name, allowing for how OCR and typing get it wrong.
+
+    The same surname misread on a scan - "HARRlNGTON", "Harringten" - was
+    taken for another family's and handed another invented surname, so one
+    household read as two. Equal once OCR's usual confusions are folded, or
+    one letter out in a long name, with the first letter kept.
+    """
+    x, y = a.strip(".").casefold(), b.strip(".").casefold()
+    if x == y:
+        return True
+    fx, fy = _ocr_folded(x), _ocr_folded(y)
+    if not fx or not fy:
+        return False
+    if fx == fy and len(fx) >= 3:
+        return True
+    return (min(len(fx), len(fy)) >= ALIKE_MIN_LENGTH and fx[0] == fy[0]
+            and _one_edit(fx, fy))
+
+
+def same_given(a: str, b: str) -> bool:
+    """One given name: alike, or one the other's usual short form."""
+    if alike(a, b):
+        return True
+    x, y = a.strip(".").casefold(), b.strip(".").casefold()
+    return (x in _BY_NICKNAME and y in _BY_NICKNAME[x]) or \
+        (y in _BY_NICKNAME and x in _BY_NICKNAME[y])
+
+
+def _part_compatible(x: str, y: str) -> bool:
+    """Equal, one missing, or one the initial of the other."""
+    x, y = x.strip(".").casefold(), y.strip(".").casefold()
+    if not x or not y or x == y:
+        return True
+    return (len(x) == 1 or len(y) == 1) and x[0] == y[0]
+
+
+def same_person(a: PersonName, b: PersonName) -> bool:
+    """Could these be one person written with more or fewer parts?
+
+    "John Smith", "John Michael Smith", "J. Smith" and "John M. Smith" are
+    the same person; "Jane Smith" and "John Smith Jr." vs "John Smith Sr."
+    are not. Registering them as separate entities would hand one person
+    two different pseudonyms.
+    """
+    # exactly: a misread or shortened form is grouped under this one instead
+    # (grouping.py), keeping its own spelling for the matcher to find
+    if not a.last or not b.last or a.last.casefold() != b.last.casefold():
+        return False
+    if a.suffix and b.suffix and a.suffix.casefold() != b.suffix.casefold():
+        return False
+    if not _part_compatible(a.first, b.first):
+        return False
+    if not (a.first and b.first):
+        # surname-only forms are too ambiguous to merge automatically
+        return False
+    for mine, theirs in zip(a.middles, b.middles):
+        if not _part_compatible(mine, theirs):
+            return False
+    return True
+
+
+def richness(person: PersonName) -> tuple[int, int, int]:
+    """How much of the name is written out; the richer form wins a merge."""
+    return (len(person.middles),
+            sum(len(m.strip(".")) for m in person.middles),
+            len(person.first.strip(".")))
+
+
+# Diminutives that appear in pleadings alongside the formal name. A decree
+# calling the petitioner "Chrissy" twice shipped that name intact: the model
+# offered it, but as an ORGANIZATION, and nothing connected it to Christine.
+# A plain table, no model involved - it only ever pre-fills a proposal the
+# operator still has to tick.
+NICKNAMES: dict[str, tuple[str, ...]] = {
+    "christine": ("chris", "chrissy", "chrissie", "christy", "tina"),
+    "christopher": ("chris", "topher"),
+    "jacob": ("jake", "jakey"),
+    "james": ("jim", "jimmy", "jamie"),
+    "robert": ("rob", "bob", "bobby", "robbie"),
+    "william": ("will", "bill", "billy", "willie"),
+    "richard": ("rick", "dick", "richie", "ricky"),
+    "michael": ("mike", "mickey", "mick"),
+    "matthew": ("matt", "matty"),
+    "joseph": ("joe", "joey"),
+    "daniel": ("dan", "danny"),
+    "thomas": ("tom", "tommy"),
+    "charles": ("charlie", "chuck", "chas"),
+    "elizabeth": ("liz", "beth", "betsy", "eliza", "lizzie", "betty"),
+    "katherine": ("kate", "katie", "kathy", "kat"),
+    "catherine": ("cate", "cathy", "katie", "kate"),
+    "margaret": ("maggie", "meg", "peggy", "marge"),
+    "jennifer": ("jen", "jenny"),
+    "jessica": ("jess", "jessie"),
+    "rebecca": ("becca", "becky"),
+    "patricia": ("pat", "patty", "trish"),
+    "deborah": ("deb", "debbie"),
+    "barbara": ("barb", "babs"),
+    "susan": ("sue", "susie"),
+    "stephanie": ("steph", "stephy"),
+    "alexander": ("alex", "xander", "sasha"),
+    "alexandra": ("alex", "lexi", "sasha"),
+    "nicholas": ("nick", "nicky"),
+    "anthony": ("tony"),
+    "benjamin": ("ben", "benny"),
+    "samuel": ("sam", "sammy"),
+    "andrew": ("andy", "drew"),
+    "edward": ("ed", "eddie", "ted", "teddy"),
+    "theodore": ("ted", "teddy", "theo"),
+    "gregory": ("greg",),
+    "timothy": ("tim", "timmy"),
+    "kimberly": ("kim", "kimmy"),
+    "cynthia": ("cindy",),
+    "victoria": ("vicky", "tori"),
+    "veronica": ("ronnie", "vero"),
+}
+
+_BY_NICKNAME: dict[str, set[str]] = {}
+for _formal, _short in NICKNAMES.items():
+    for _nick in ((_short,) if isinstance(_short, str) else _short):
+        _BY_NICKNAME.setdefault(_nick, set()).add(_formal)
+
+
+def escape_token(token: str) -> str:
+    """``re.escape`` that also accepts the typographic apostrophe.
+
+    Operators type O'Brien with a straight quote; Word's autocorrect stores
+    O’Brien with U+2019. One written form must match both or the surname
+    leaks everywhere the document uses the other.
+    """
+    return re.escape(token).replace("'", "['’]")
+
+
+# Where a name is allowed to start and stop.
+#
+# ``\w`` counts an underscore as a letter, and a pleading's signature block is
+# a run of them with the name flush against it - "________Jane Smith________"
+# arrives as a single run out of Word. Treating "_" as a letter meant the
+# surname on every signature line failed to match and shipped intact, so the
+# boundary is written against alphanumerics instead.
+#
+# The apostrophe is excluded on the left only: "Brien" must not match inside
+# "O'Brien", while "Smith" must still match inside the possessive "Smith's".
+BOUNDARY_LEFT = r"(?<![^\W_])(?<!['’])"
+BOUNDARY_RIGHT = r"(?![^\W_])"
+
+
