@@ -18,7 +18,8 @@ root, zip_path, top = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
 INCLUDE_DIRS = ("redactor", "build", "tests", "samples", "webapp")
 INCLUDE_FILES = (
     "START-HERE-WINDOWS.txt", "README.md", "LICENSE", "requirements.txt",
-    "requirements-dev.txt", "build_windows.bat", "run.bat", "run_web.bat",
+    "requirements-dev.txt", "requirements.lock", "requirements-dev.lock",
+    "build_windows.bat", "run.bat", "run_web.bat",
     "run_app.bat",
     # optional on Windows: RapidOCR already covers scanned PDFs
     "vendor_tesseract_windows.py",

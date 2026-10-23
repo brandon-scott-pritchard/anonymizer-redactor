@@ -14,7 +14,7 @@ python3 -m venv "$VENV"
 
 echo "==> Installing dependencies"
 "$VENV/bin/python" -m pip install --upgrade pip
-"$VENV/bin/python" -m pip install -r "$HERE/requirements.txt"
+"$VENV/bin/python" -m pip install --require-hashes -r "$HERE/requirements.lock"
 
 echo "==> Downloading the offline language model"
 "$VENV/bin/python" -m spacy download en_core_web_sm

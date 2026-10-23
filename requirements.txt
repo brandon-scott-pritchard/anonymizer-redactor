@@ -6,8 +6,14 @@ spacy>=3.7,<4             # offline NER suggestions (proposals only, never appli
 pytesseract>=0.3.10,<1    # drives Tesseract, bundled in vendor/ or found on PATH
 rapidocr-onnxruntime>=1.3,<2  # OCR fallback: pip-installable, models included,
                           # so scanned PDFs work even with no Tesseract anywhere
-Pillow>=11.3,<13          # image handling for the OCR path and photos of documents;
-                          # 12.x is what the tests run on, and reads AVIF and JPEG 2000
+onnxruntime<1.24; sys_platform == "darwin" and platform_machine == "x86_64"
+onnxruntime>=1.24; sys_platform != "darwin" or platform_machine != "x86_64"
+                          # (rapidocr's engine) 1.23.2 is the last with Intel-Mac
+                          # wheels; the pair splits the lock so Intel Macs get it
+                          # and everything else keeps the current release
+Pillow>=13.0,<14          # image handling for the OCR path and photos of documents;
+                          # reads AVIF and JPEG 2000. Not <13: 12.x carries the
+                          # October 2026 decoder advisories (crafted JPEG/TIFF/GIF)
 pillow-heif>=1.0,<2       # the iPhone's HEIC/HEIF photos
 opencv-python>=4.8,<6      # photos: finding and squaring the page; handwriting detection
 numpy>=1.26,<3            # (both came in only through rapidocr before)
@@ -23,3 +29,7 @@ rapidfuzz>=3.14,<4
 jellyfish>=1.0,<2
 python-stdnum>=2.2,<3            # IBAN check digits (patterns.valid_iban)
 probablepeople>=0.5.6,<1           # the name screen's sort, beside Kev (name_screen.py)
+certifi>=2026.10.19       # (indirect) drops the compromised emSign roots, GHSA-6q48-6c7w-9gw2
+#
+# Installs use the hash-pinned requirements.lock / requirements-dev.lock, generated
+# from this file and requirements-dev.txt; the command is at the top of each lock.

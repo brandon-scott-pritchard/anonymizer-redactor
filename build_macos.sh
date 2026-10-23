@@ -54,7 +54,7 @@ echo "==> Staging sources in $STAGE"
 mkdir -p "$STAGE/src"
 cp -R "$HERE/redactor" "$STAGE/src/"
 cp -R "$HERE/webapp" "$STAGE/src/"
-cp "$HERE/requirements.txt" "$STAGE/src/"
+cp "$HERE/requirements-dev.lock" "$STAGE/src/"
 cp "$HERE/build/launcher.py" "$STAGE/src/"
 cp "$HERE/build/redactor.spec" "$STAGE/src/"
 [ -f "$HERE/build/icon.icns" ] && cp "$HERE/build/icon.icns" "$STAGE/src/"
@@ -69,7 +69,7 @@ fi
 echo "==> Creating build environment"
 "$BUILD_PYTHON" -m venv "$BUILD_VENV"
 "$BUILD_VENV/bin/python" -m pip install --upgrade pip wheel
-"$BUILD_VENV/bin/python" -m pip install -r "$STAGE/src/requirements.txt" pyinstaller
+"$BUILD_VENV/bin/python" -m pip install --require-hashes -r "$STAGE/src/requirements-dev.lock"
 "$BUILD_VENV/bin/python" -m spacy download en_core_web_sm
 
 echo "==> Building"

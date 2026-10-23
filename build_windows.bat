@@ -12,7 +12,7 @@ if exist "%STAGE%" rmdir /s /q "%STAGE%"
 mkdir "%STAGE%\src"
 xcopy /e /i /q "%HERE%redactor" "%STAGE%\src\redactor" >nul
 xcopy /e /i /q "%HERE%webapp" "%STAGE%\src\webapp" >nul
-copy /y "%HERE%requirements.txt" "%STAGE%\src\" >nul
+copy /y "%HERE%requirements-dev.lock" "%STAGE%\src\" >nul
 copy /y "%HERE%build\launcher.py" "%STAGE%\src\" >nul
 copy /y "%HERE%build\redactor.spec" "%STAGE%\src\" >nul
 if exist "%HERE%build\icon.ico" copy /y "%HERE%build\icon.ico" "%STAGE%\src\" >nul
@@ -26,7 +26,7 @@ if exist "%HERE%vendor\tesseract-windows-*.tar.gz" (
 echo ==^> Creating build environment
 python -m venv "%BUILD_VENV%"
 "%BUILD_VENV%\Scripts\python.exe" -m pip install --upgrade pip wheel
-"%BUILD_VENV%\Scripts\python.exe" -m pip install -r "%STAGE%\src\requirements.txt" pyinstaller
+"%BUILD_VENV%\Scripts\python.exe" -m pip install --require-hashes -r "%STAGE%\src\requirements-dev.lock"
 "%BUILD_VENV%\Scripts\python.exe" -m spacy download en_core_web_sm
 
 echo ==^> Building

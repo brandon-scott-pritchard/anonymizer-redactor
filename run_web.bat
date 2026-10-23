@@ -9,7 +9,7 @@ if not exist "%VENV%\Scripts\python.exe" (
   echo No environment found. Creating one...
   python -m venv "%VENV%"
   "%VENV%\Scripts\python.exe" -m pip install --upgrade pip
-  "%VENV%\Scripts\python.exe" -m pip install -r "%HERE%requirements.txt"
+  "%VENV%\Scripts\python.exe" -m pip install --require-hashes -r "%HERE%requirements.lock"
   "%VENV%\Scripts\python.exe" -m spacy download en_core_web_sm
 )
 
